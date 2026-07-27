@@ -75,7 +75,7 @@ harness-companion/
 ├── references/
 │   ├── harness-files.md      # Full format reference
 │   └── subsystems-mapping.md # Subsystems ↔ files ↔ lessons
-└── assets/templates/         # Copy-paste harness file templates
+└── templates/         # Copy-paste harness file templates
     ├── AGENTS.md
     ├── CLAUDE.md
     ├── feature_list.json

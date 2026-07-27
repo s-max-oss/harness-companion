@@ -17,61 +17,29 @@ Harness Engineering 是 [Learn Harness Engineering](https://github.com/walkingla
 
 ### 安装
 
-=== Harness Companion Install ===
+```bash
+# 1. 克隆本仓库到 Claude Code 的 skills 目录
+git clone https://github.com/s-max-oss/harness-companion.git ~/.claude/skills/harness-companion
 
-[1/3] Installing globally to: /c/Users/20805/.claude/skills/harness-companion
-  Already at target location — skipping copy.
-[2/3] Making scripts executable...
-  Done.
-[3/3] Registering hooks in ~/.claude/settings.json...
-  Backup: /c/Users/20805/.claude/settings.json.bak-20260727
-  ⚠️  hooks section already exists in settings.json.
-  Please manually add these entries if not already present:
-
-  "SessionStart": [{
-    "matcher": "startup|resume",
-    "hooks": [{
-      "type": "command",
-      "command": "bash /c/Users/20805/.claude/skills/harness-companion/scripts/hooks/session-start.sh",
-      "timeout": 5000
-    }]
-  }],
-  "Stop": [{
-    "matcher": "*",
-    "hooks": [{
-      "type": "command",
-      "command": "bash /c/Users/20805/.claude/skills/harness-companion/scripts/hooks/stop-handoff.sh",
-      "timeout": 5000
-    }]
-  }]
-
-=== Install Complete ===
-
-Verification:
-  Skill directory: ✅ /c/Users/20805/.claude/skills/harness-companion
-  SKILL.md:        ✅
-  Templates:       8 files
-
-Next steps:
-  1. Restart Claude Code to load the skill and hooks
-  2. In a harness project, try: /harness:status
-  3. To initialize a new project: /harness:init
+# 2. 运行安装脚本注册 hooks
+bash ~/.claude/skills/harness-companion/install.sh
+```
 
 安装脚本会自动：
-- 将 skill 文件复制到 
+- 将 skill 文件复制到 `~/.claude/skills/harness-companion/`（全局）或 `./.claude/skills/harness-companion/`（项目本地）
 - 赋予所有脚本可执行权限
-- 在  中注册 SessionStart 和 Stop hooks（安装前自动备份）
+- 在 `~/.claude/settings.json` 中注册 SessionStart 和 Stop hooks（安装前自动备份原文件）
 
 ### 6 个命令
 
 | 命令 | 触发方式 | 功能 |
 |------|---------|------|
-|  | "初始化 harness"、"搭建 harness 脚手架" | 从模板生成全套 harness 文件 |
-|  | "harness 状态"、"健康检查" | 文件存在性仪表盘、功能进度、WIP=1 检测 |
-|  | "功能列表"、"添加功能"、"更新状态" | 管理 （增删改查） |
-|  | "验证功能"、"真的完成了吗" | 运行 typecheck→build→test 验证链，自动填写证据 |
-|  | "交接"、"结束会话"、"收尾" | 生成 ，运行 checklist 验证 |
-|  | "审计 harness"、"诊断" | 对 7 个子系统打分（满分 21），按影响排序给出改进建议 |
+| `/harness:init` | "初始化 harness"、"搭建 harness 脚手架" | 从模板生成全套 harness 文件 |
+| `/harness:status` | "harness 状态"、"健康检查" | 文件存在性仪表盘、功能进度、WIP=1 检测 |
+| `/harness:feature` | "功能列表"、"添加功能"、"更新状态" | 管理 `feature_list.json`（增删改查） |
+| `/harness:verify` | "验证功能"、"真的完成了吗" | 运行 typecheck→build→test 验证链，自动填写证据 |
+| `/harness:handoff` | "交接"、"结束会话"、"收尾" | 生成 `session-handoff.md`，运行 checklist 验证 |
+| `/harness:audit` | "审计 harness"、"诊断" | 对 7 个子系统打分（满分 21），按影响排序给出改进建议 |
 
 ## 7 个子系统
 
@@ -79,59 +47,88 @@ Harness Companion 围绕 [Learn Harness Engineering](https://github.com/walkingl
 
 | # | 子系统 | 核心文件 | 课程 |
 |---|--------|---------|------|
-| 1 | **Knowledge**（知识） | 、、 | L02-L03 |
-| 2 | **Environment**（环境） |  | L04 |
-| 3 | **Progress**（进度） |  | L05-L06 |
-| 4 | **Scope/Feature**（范围/功能） |  | L07-L08 |
-| 5 | **Verification**（验证） | 、测试套件 | L09-L10 |
-| 6 | **Observability**（可观测） | 、 | L11 |
-| 7 | **Handoff/Loop**（交接/循环） | 、、 | L12-L13 |
+| 1 | **Knowledge**（知识） | `AGENTS.md`、`CLAUDE.md`、`docs/` | L02-L03 |
+| 2 | **Environment**（环境） | `init.sh` | L04 |
+| 3 | **Progress**（进度） | `claude-progress.md` | L05-L06 |
+| 4 | **Scope/Feature**（范围/功能） | `feature_list.json` | L07-L08 |
+| 5 | **Verification**（验证） | `checklist.sh`、测试套件 | L09-L10 |
+| 6 | **Observability**（可观测） | `agent.log`、`evaluator-rubric.md` | L11 |
+| 7 | **Handoff/Loop**（交接/循环） | `session-handoff.md`、`clean-state-checklist.md`、`loop.sh` | L12-L13 |
 
 ## 环境要求
 
 - [Claude Code](https://claude.ai/code) CLI
-- Git Bash（Windows）/ bash（macOS/Linux）
-- （推荐安装，用于功能管理的高级特性；缺失时自动降级为 grep/sed fallback）
+- Git Bash（Windows）/ bash（macOS / Linux）
+- `jq`（推荐安装，用于功能管理的高级特性；缺失时自动降级为 grep/sed fallback）
 
 ## 文件结构
 
-
+```
+harness-companion/
+├── SKILL.md                  # Skill 主文档（6 个工作流）
+├── README.md                 # 英文说明
+├── README.zh-CN.md           # 中文说明（本文件）
+├── LICENSE                   # MIT 许可证
+├── install.sh                # 一键安装 + hook 注册
+├── scripts/
+│   ├── harness-init.sh       # 脚手架生成器
+│   ├── harness-status.sh     # 健康仪表盘
+│   ├── harness-feature.sh    # 功能清单管理
+│   ├── harness-verify.sh     # 验证链执行器
+│   ├── harness-handoff.sh    # 会话交接文档生成器
+│   ├── harness-audit.sh      # 7 子系统审计器
+│   └── hooks/
+│       ├── session-start.sh  # SessionStart 钩子
+│       └── stop-handoff.sh   # Stop 钩子
+├── references/
+│   ├── harness-files.md      # 完整文件格式参考
+│   └── subsystems-mapping.md # 子系统 - 文件 - 课程对照表
+└── templates/                # 可直接复制的 harness 文件模板
+    ├── AGENTS.md
+    ├── CLAUDE.md
+    ├── feature_list.json
+    ├── init.sh
+    ├── claude-progress.md
+    ├── session-handoff.md
+    ├── clean-state-checklist.md
+    └── checklist.sh
+```
 
 ## Hooks 工作原理
 
 两个 hook 在后台自动运行——无需手动调用：
 
 - **SessionStart**：检测 harness 文件 → 报告健康状态 → 将上下文注入 Claude 的系统提示
-- **Stop**：检测未提交变更 → 发现未同步的  功能 → 提醒执行 
+- **Stop**：检测未提交变更 → 发现未同步的 `in_progress` 功能 → 提醒执行 `checklist.sh`
 
 Hooks 遵循以下原则：
-- **非阻塞**：始终返回 ，不中断会话
-- **优雅降级**：非 harness 项目（无 ）静默退出
+- **非阻塞**：始终返回 `{"continue":true}`，不中断会话
+- **优雅降级**：非 harness 项目（无 `feature_list.json`）静默退出
 - **快速执行**：5 秒超时，超时自动放行
 
 ## 关键设计理念
 
 ### WIP=1 原则
 
-同一时间只允许一个功能处于  状态。这是课程第 7 课的核心原则——避免多任务切换造成的上下文丢失，确保每个功能在开始下一个之前被充分验证。
+同一时间只允许一个功能处于 `in_progress` 状态。这是课程第 7 课的核心原则——避免多任务切换造成的上下文丢失，确保每个功能在开始下一个之前被充分验证。
 
 ### 证据优先
 
-功能不能仅靠口头声明"已完成"。必须通过 typecheck → build → test 验证链，并将命令输出作为  记录在  中。 强制执行这一原则。
+功能不能仅靠口头声明"已完成"。必须通过 typecheck → build → test 验证链，并将命令输出作为 `evidence` 记录在 `feature_list.json` 中。`/harness:verify` 强制执行这一原则。
 
 ### 渐进式披露
 
-AGENTS.md 作为入口文档，链接到详细文档，而不是把所有信息塞进一个文件。 会标记超过 500 行的 AGENTS.md。
+AGENTS.md 作为入口文档，链接到详细文档，而不是把所有信息塞进一个文件。`/harness:audit` 会标记超过 500 行的 AGENTS.md。
 
 ## 常见问题
 
 **Q: 我的项目没有 harness 文件，hooks 会报错吗？**
 
-不会。hooks 检测到没有  后会静默退出，完全不影响正常使用。
+不会。hooks 检测到没有 `feature_list.json` 后会静默退出，完全不影响正常使用。
 
 **Q: 必须安装 jq 吗？**
 
-不必须。 缺失时，脚本自动使用 / fallback 处理简单的 JSON 操作。但功能管理（）的完整能力需要 。
+不必须。`jq` 缺失时，脚本自动使用 `grep`/`sed` fallback 处理简单的 JSON 操作。但功能管理（`/harness:feature`）的完整能力需要 `jq`。
 
 **Q: 可以只用 hooks 不用命令，或反过来吗？**
 

@@ -59,7 +59,8 @@ Harness Companion is built around the 7 subsystems from the [Learn Harness Engin
 ```
 harness-companion/
 ├── SKILL.md                  # Main skill document (6 workflows)
-├── README.md                 # This file
+├── README.md                 # English readme (this file)
+├── README.zh-CN.md           # 简体中文说明
 ├── LICENSE                   # MIT
 ├── install.sh                # One-command install + hook registration
 ├── scripts/

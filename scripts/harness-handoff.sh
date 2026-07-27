@@ -86,13 +86,13 @@ echo "[Generate session-handoff.md]"
 
 if [ -f "session-handoff.md" ]; then
   echo "  session-handoff.md already exists — update it manually with the state above."
-  echo "  Template: $TARGET/assets/templates/session-handoff.md (in harness-companion skill)"
+  echo "  Template: $TARGET/templates/session-handoff.md (in harness-companion skill)"
 else
   echo "  Creating session-handoff.md from template..."
 
   # Find template
   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-  TEMPLATE="$SCRIPT_DIR/../assets/templates/session-handoff.md"
+  TEMPLATE="$SCRIPT_DIR/../templates/session-handoff.md"
 
   if [ -f "$TEMPLATE" ]; then
     sed "s/\[Date\]/$DATE/g" "$TEMPLATE" > session-handoff.md

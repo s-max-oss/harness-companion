@@ -43,7 +43,7 @@ fi
 echo "[2/3] Making scripts executable..."
 chmod +x "$TARGET/scripts/"*.sh 2>/dev/null || true
 chmod +x "$TARGET/scripts/hooks/"*.sh 2>/dev/null || true
-chmod +x "$TARGET/assets/templates/"*.sh 2>/dev/null || true
+chmod +x "$TARGET/templates/"*.sh 2>/dev/null || true
 echo "  Done."
 
 # --- Step 3: Register hooks in settings.json ---------------------------------
@@ -102,7 +102,7 @@ echo ""
 echo "Verification:"
 echo "  Skill directory: $([ -d "$TARGET" ] && echo '✅' || echo '❌') $TARGET"
 echo "  SKILL.md:        $([ -f "$TARGET/SKILL.md" ] && echo '✅' || echo '❌')"
-echo "  Templates:       $(find "$TARGET/assets/templates" -type f 2>/dev/null | wc -l | tr -d ' ') files"
+echo "  Templates:       $(find "$TARGET/templates" -type f 2>/dev/null | wc -l | tr -d ' ') files"
 echo ""
 echo "Next steps:"
 echo "  1. Restart Claude Code to load the skill and hooks"

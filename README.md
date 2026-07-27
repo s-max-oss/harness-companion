@@ -1,5 +1,7 @@
 # Harness Companion
 
+> 🇨🇳 [简体中文](./README.zh-CN.md)
+
 A [Claude Code](https://claude.ai/code) skill that automates Harness Engineering — the practice of building reliable coding environments for AI agents. It combines **automatic lifecycle hooks** with **interactive slash commands** to keep your project's harness files healthy.
 
 ## What It Does

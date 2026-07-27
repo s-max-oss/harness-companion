@@ -3,14 +3,14 @@
 #
 # Usage: bash harness-init.sh [project-dir] [--minimal|--full]
 #
-# Copies templates from the skill's assets/templates/ directory
+# Copies templates from the skill's templates/ directory
 # to the target project, filling in project-specific placeholders.
 
 set -euo pipefail
 
 # Resolve script directory
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TEMPLATES_DIR="$SCRIPT_DIR/../assets/templates"
+TEMPLATES_DIR="$SCRIPT_DIR/../templates"
 
 TARGET="${1:-.}"
 MODE="${2:---minimal}"

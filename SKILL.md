@@ -46,7 +46,7 @@ Trigger this skill when:
 **Process**:
 1. Detect project type (Node/TS, Python, generic) by reading `package.json` or similar
 2. Ask which harness files to generate (minimum: AGENTS.md + CLAUDE.md + feature_list.json + init.sh)
-3. Copy templates from `assets/templates/` to project root, filling in project-specific placeholders
+3. Copy templates from `templates/` to project root, filling in project-specific placeholders
 4. Make scripts executable (`chmod +x init.sh`)
 5. Run `bash init.sh` to verify the scaffold works
 6. Report what was created and what the user should customize

@@ -588,6 +588,123 @@ assert_fp_equals "regen + evidence write: fingerprint stable" \
   "$FP_REGEN_before" "$FP_REGEN_assoc"
 
 # ============================================================================
+# Test 18: Precise match — negative cases (anchored regex)
+# ============================================================================
+echo ""
+echo "=== Test 18: Precise match negative ==="
+
+# Verify _is_excluded uses anchored matching:
+#   feature_list.json       → EXCLUDED
+#   myfeature_list.json.bak → NOT excluded
+#   .harness/config.json    → EXCLUDED
+#   .harness/configXjson    → NOT excluded
+#   path/with spaces.txt    → NOT excluded (real file)
+#   path/file[1].txt        → NOT excluded (brackets)
+
+cd "$TMPDIR"
+git clean -fd >/dev/null 2>&1
+git checkout -- . >/dev/null 2>&1 || true
+git reset HEAD -- . >/dev/null 2>&1 || true
+rm -rf "$TMPDIR"/* "$TMPDIR"/.harness 2>/dev/null || true
+
+echo "base" > src.txt
+git init --quiet .
+git config user.email t@t && git config user.name t
+mkdir -p path
+
+# Create files that should NOT be excluded
+echo "bak" > myfeature_list.json.bak
+echo "cfg" > .harness/configXjson
+echo "spc" > "path/with spaces.txt"
+echo "brk" > "path/file[1].txt"
+
+git add -A && git commit -m "base" --quiet
+
+FP_T18_baseline="$(compute_workspace_fingerprint "$TMPDIR")"
+
+# Create real feature_list.json (should be excluded — fingerprint unchanged)
+echo '{"features":[]}' > feature_list.json
+FP_T18_fl="$(compute_workspace_fingerprint "$TMPDIR")"
+assert_fp_equals "feature_list.json IS excluded — fingerprint unchanged" \
+  "$FP_T18_baseline" "$FP_T18_fl"
+
+# Edit myfeature_list.json.bak (NOT excluded — fingerprint changes)
+echo "MODIFIED" >> myfeature_list.json.bak
+FP_T18_bak="$(compute_workspace_fingerprint "$TMPDIR")"
+assert_fp_not_equals "myfeature_list.json.bak NOT excluded — fingerprint CHANGES" \
+  "$FP_T18_fl" "$FP_T18_bak"
+
+# Revert bak, edit .harness/config.json (EXCLUDED)
+git checkout -- myfeature_list.json.bak
+mkdir -p .harness
+echo '{"k":"v"}' > .harness/config.json
+FP_T18_cfg="$(compute_workspace_fingerprint "$TMPDIR")"
+assert_fp_equals ".harness/config.json IS excluded — fingerprint unchanged" \
+  "$FP_T18_baseline" "$FP_T18_cfg"
+
+# Edit .harness/configXjson (NOT excluded)
+echo "MODIFIED" >> .harness/configXjson
+FP_T18_cfgx="$(compute_workspace_fingerprint "$TMPDIR")"
+assert_fp_not_equals ".harness/configXjson NOT excluded — fingerprint CHANGES" \
+  "$FP_T18_cfg" "$FP_T18_cfgx"
+
+# Revert configXjson, touch spaces/brackets files
+git checkout -- .harness/configXjson
+echo "MOD" >> "path/with spaces.txt"
+FP_T18_spc="$(compute_workspace_fingerprint "$TMPDIR")"
+assert_fp_not_equals "path with spaces NOT excluded — fingerprint CHANGES" \
+  "$FP_T18_baseline" "$FP_T18_spc"
+
+git checkout -- "path/with spaces.txt"
+echo "MOD" >> "path/file[1].txt"
+FP_T18_brk="$(compute_workspace_fingerprint "$TMPDIR")"
+assert_fp_not_equals "path with brackets NOT excluded — fingerprint CHANGES" \
+  "$FP_T18_baseline" "$FP_T18_brk"
+
+# ============================================================================
+# Test 19: Rename into excluded directory — old file deletion recorded
+# ============================================================================
+echo ""
+echo "=== Test 19: Rename into excluded dir ==="
+
+cd "$TMPDIR"
+git clean -fd >/dev/null 2>&1
+git checkout -- . >/dev/null 2>&1 || true
+rm -rf "$TMPDIR"/* "$TMPDIR"/.harness 2>/dev/null || true
+
+mkdir -p src .harness/logs/runs
+echo "important" > src/hello.txt
+git init --quiet .
+git config user.email t@t && git config user.name t
+git add -A && git commit -m "base" --quiet
+
+# Baseline
+FP_T19_before="$(compute_workspace_fingerprint "$TMPDIR")"
+assert_fp_equals "clean project returns clean" "$FP_T19_before" "clean"
+
+# Rename src/hello.txt → .harness/logs/hello.txt (simulates a user moving
+# a file into the harness logs directory by accident).
+mv src/hello.txt .harness/logs/hello.txt
+FP_T19_renamed="$(compute_workspace_fingerprint "$TMPDIR")"
+
+# The DELETE of src/hello.txt should be recorded (it was a non-excluded file),
+# so the fingerprint must change. The CREATE of .harness/logs/hello.txt is
+# excluded and must NOT suppress recording of the source deletion.
+assert_fp_not_equals "rename into excluded dir: src deletion recorded → fingerprint CHANGES" \
+  "$FP_T19_before" "$FP_T19_renamed"
+# Should start with sha256: (genuine content change registered)
+case "$FP_T19_renamed" in
+  sha256:*) echo "PASS: rename into excluded dir — deletion recorded as sha256"; PASSED=$((PASSED + 1)) ;;
+  *) echo "FAIL: rename into excluded dir — expected sha256:<hex>, got '$FP_T19_renamed'"; FAILED=$((FAILED + 1)) ;;
+esac
+
+# If we commit, fingerprint returns to clean (the rename is fully registered)
+git add -A && git commit -m "rename into excluded" --quiet
+FP_T19_committed="$(compute_workspace_fingerprint "$TMPDIR")"
+assert_fp_equals "after committing rename, fingerprint returns to clean" \
+  "clean" "$FP_T19_committed"
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo ""

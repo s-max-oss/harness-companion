@@ -56,44 +56,19 @@ DEFAULT_EXCLUDES=(
 # content. Content lines never start with "diff --git a/" or "--- a/" or
 # "+++ b/", so the substitution is safe for normal diffs.
 #
-# project_prefix is the git-relative path WITH a trailing slash (e.g.
-# "projects/my-app/") as returned by `git rev-parse --show-prefix`.
-#
-# CRITICAL — both sides of "diff --git" lines must be stripped independently:
-# git's rename detection can emit "diff --git a/OLD b/NEW" where the two
-# paths differ. A naive sequential sed pipeline that anchors at `^` for the
-# b/ branch will MISS the b/ side because after stripping the a/ side, the
-# line no longer starts with "diff --git b/". We therefore:
-#   1. Restrict all substitutions to lines starting with the expected prefix
-#      so we never mutate content lines (which never start with "diff --git",
-#      "--- a/", or "+++ b/").
-#   2. For the "diff --git" line, strip the a/ side at start AND strip any
-#      " b/<prefix>/" anywhere on that line — this catches renames where the
-#      b/ side appears mid-line.
+# The awk sub() calls use [.] for literal dots instead of \. — this avoids
+# the "escape sequence `\.' treated as plain `.'" warning on GNU awk ≥5.
 _strip_diff_prefix() {
   local prefix="$1"
   if [ -z "$prefix" ]; then
     cat
     return
   fi
-  # Escape regex specials in the prefix so it can be embedded in an awk
-  # regex. awk's regex syntax is ERE, so we escape `.+^$(){}|\` (anything
-  # special in ERE).
+  # Escape regex specials. Use [.] for dots so awk never warns.
   local safe_prefix
-  safe_prefix="$(printf '%s' "$prefix" | sed 's/[.+^$(){}|\\]/\\&/g')"
-  # Use awk rather than sed because Git Bash sed mishandles `/` in patterns
-  # when the address form `/regex/` is mixed with the path's `/` characters.
-  # awk's sub()/gsub() don't need a delimiter char, so the path's `/` is
-  # never ambiguous.
-  #
-  # Address-restricted subs on the four git-diff header lines:
-  #   diff --git a/<PREFIX>/X b/<PREFIX>/Y  (rename: a/OLD b/NEW where both
-  #                                          may live inside <PREFIX>/)
-  #   --- a/<PREFIX>/X
-  #   +++ b/<PREFIX>/X
-  # We strip the a/ side at start AND any " b/<PREFIX>/" anywhere on the
-  # diff --git line so rename cases are covered (the b/ side may appear
-  # mid-line after a/ stripping).
+  safe_prefix="$(printf '%s' "$prefix" | sed \
+    -e 's/\./[.]/g' \
+    -e 's/[+^$(){}|\\]/\\&/g')"
   awk -v p="$safe_prefix" '
     /^diff --git a\// {
       sub("^diff --git a/" p, "diff --git a/")
@@ -107,15 +82,46 @@ _strip_diff_prefix() {
   '
 }
 
-# Convert a glob pattern to an extended-regex pattern.
-# * → .*, ? → ., all other regex specials escaped.
+# Convert a glob exclude pattern to an ERE fragment with proper anchoring.
+#
+# Anchoring rules (so "feature_list.json" does NOT match "myfeature_list.json.bak"):
+#   literal (no * or ?)     → ^<regex>$
+#   ends with /             → ^<regex>     (prefix match)
+#   wildcard (* or ?)       → ^<regex>$
+#
+# Dots are rendered as [.] (not \.) so awk never emits "escape sequence"
+# warnings. Glob * → [^/]*, ? → [^/].
 _glob_to_regex() {
-  printf '%s' "$1" | sed -e 's/[.+^$(){}|\\]/\\&/g' -e 's/\*/.*/g' -e 's/?/./g'
+  local raw="$1"
+  local has_wildcard=0 trailing_slash=0
+  case "$raw" in *"*"*|*"?"*) has_wildcard=1 ;; esac
+  case "$raw" in */) trailing_slash=1 ;; esac
+
+  local rx
+  # Step 1: escape ERE specials. Dots → [.] to suppress awk warnings.
+  rx="$(printf '%s' "$raw" | sed \
+    -e 's/\\/\\\\/g' \
+    -e 's/\./[.]/g' \
+    -e 's/[+^$(){}|]/\\&/g')"
+
+  # Step 2: convert glob wildcards
+  if [ "$has_wildcard" -eq 1 ]; then
+    rx="$(printf '%s' "$rx" | sed \
+      -e 's/\*/[^\/]*/g' \
+      -e 's/?/[^\/]/g')"
+  fi
+
+  # Step 3: anchor
+  if [ "$has_wildcard" -eq 1 ]; then
+    printf '^%s$' "$rx"
+  elif [ "$trailing_slash" -eq 1 ]; then
+    printf '^%s' "$rx"
+  else
+    printf '^%s$' "$rx"
+  fi
 }
 
-# Build a single awk regex that matches ANY path satisfying BUILTIN_EXCLUDES
-# or FINGERPRINT_EXCLUDES. Used by _filter_diff_excluded to drop whole-file
-# diff chunks for excluded files.
+# Build a single awk ERE alternation from BUILTIN_EXCLUDES + FINGERPRINT_EXCLUDES.
 _build_exclude_awk_pat() {
   local pat="" sep="" rx p
   for p in "${BUILTIN_EXCLUDES[@]}"; do
@@ -133,23 +139,24 @@ _build_exclude_awk_pat() {
   printf '%s' "$pat"
 }
 
-# Drop diff chunks whose b/ path matches the exclude pattern. Each chunk
-# starts with "diff --git a/X b/Y" and ends at the next "diff --git" or EOF.
-# The b/ side is the post-rename name, which is the canonical path for
-# staleness bookkeeping.
+# Drop diff chunks whose BOTH a/ and b/ paths match an exclude pattern.
+# If only ONE side is excluded (e.g. "diff --git a/src/hello.txt b/.harness/logs/hello.txt"
+# — a rename from a non-excluded file INTO an excluded directory), the chunk
+# is KEPT so the deletion of the original file is still recorded in the fingerprint.
+#
+# Chunks where both sides are excluded are dropped entirely.
 _filter_diff_excluded() {
   local pat="$1"
   awk -v pat="$pat" '
     BEGIN { skip = 0 }
     /^diff --git/ {
-      bpath = ""
-      # Format: "diff --git a/X b/Y" — split and take the 4th field
+      apath = ""; bpath = ""
       n = split($0, parts, " ")
-      if (n >= 4) {
-        bpath = parts[4]
-        sub(/^b\//, "", bpath)
-      }
-      if (pat != "" && bpath ~ pat) {
+      if (n >= 3) { apath = parts[3]; sub(/^a\//, "", apath) }
+      if (n >= 4) { bpath = parts[4]; sub(/^b\//, "", bpath) }
+      a_excl = (pat != "" && apath ~ pat)
+      b_excl = (pat != "" && bpath ~ pat)
+      if (a_excl && b_excl) {
         skip = 1
         next
       }
@@ -163,24 +170,21 @@ _filter_diff_excluded() {
 }
 
 # Check if a path matches any exclude glob pattern.
-# Uses grep for pattern matching; returns 0 (true) if excluded.
+# Returns 0 (true) if excluded. Uses _glob_to_regex for anchored matching
+# so "feature_list.json" does NOT match "myfeature_list.json.bak".
 _is_excluded() {
   local path="$1"
-  local pattern
-  # Built-in excludes always checked first — not overridable
-  # Supports glob patterns: * → .*, ? → ., literal otherwise
-  local escaped
+  local pattern rx
   for pattern in "${BUILTIN_EXCLUDES[@]}"; do
-    escaped="$(printf '%s' "$pattern" | sed 's/\./\\./g; s/[*]/.*/g; s/[?]/./g')"
-    if printf '%s' "$path" | grep -qE "$escaped" 2>/dev/null; then
+    rx="$(_glob_to_regex "$pattern")"
+    if printf '%s' "$path" | grep -qE "$rx" 2>/dev/null; then
       return 0
     fi
   done
-  # Configurable excludes
   for pattern in "${FINGERPRINT_EXCLUDES[@]:-}"; do
     [ -z "$pattern" ] && continue
-    escaped="$(printf '%s' "$pattern" | sed 's/\./\\./g; s/[*]/.*/g; s/[?]/./g')"
-    if printf '%s' "$path" | grep -qE "$escaped" 2>/dev/null; then
+    rx="$(_glob_to_regex "$pattern")"
+    if printf '%s' "$path" | grep -qE "$rx" 2>/dev/null; then
       return 0
     fi
   done

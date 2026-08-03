@@ -1,0 +1,7 @@
+{
+  "project_type": "docs",
+  "fingerprint_exclude": [".git/", "node_modules/", ".DS_Store"],
+  "verification": {
+    "commands": []
+  }
+}

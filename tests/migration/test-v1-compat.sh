@@ -357,6 +357,201 @@ echo "FAILED: $FAILED"
 echo "SKIPPED: $SKIPPED"
 echo ""
 
+# ============================================================================
+# G12 — Init produces the full v2 scaffold (P0-1 acceptance)
+# ============================================================================
+echo ""
+echo "=== G12: /harness:init produces v2 scaffold for node/python/docs/generic ==="
+
+init_e2e() {
+  local name="$1"
+  local marker="$2"
+  local expected_type="$3"
+
+  local tmp; tmp="$(mktemp -d)"
+  if [ -n "$marker" ]; then
+    touch "$tmp/$marker"
+  fi
+
+  if ! bash "$ROOT_DIR/scripts/harness-init.sh" "$tmp" >/dev/null 2>&1; then
+    fail "G12 $name: init exit non-zero" "see output"
+    rm -rf "$tmp"
+    return
+  fi
+
+  # Required files
+  for f in AGENTS.md CLAUDE.md init.sh feature_list.json .harness/config.json .gitignore; do
+    if [ ! -f "$tmp/$f" ]; then
+      fail "G12 $name: missing $f after init" "absent"
+      rm -rf "$tmp"
+      return
+    fi
+  done
+  pass "G12 $name: all 6 required files present (AGENTS.md/CLAUDE.md/init.sh/feature_list.json/.harness/config.json/.gitignore)"
+
+  # .harness/logs/runs/ must exist
+  if [ ! -d "$tmp/.harness/logs/runs" ]; then
+    fail "G12 $name: .harness/logs/runs/ missing" "absent"
+    rm -rf "$tmp"
+    return
+  fi
+  pass "G12 $name: .harness/logs/runs/ exists"
+
+  # feature_list.json must be v2 schema (revision: 1)
+  local rev
+  rev="$(jq -r '.revision' "$tmp/feature_list.json" 2>/dev/null)"
+  if [ "$rev" = "1" ]; then
+    pass "G12 $name: feature_list.json revision=1 (v2 schema)"
+  else
+    fail "G12 $name: feature_list.json revision" "expected 1, got '$rev'"
+  fi
+
+  # .harness/config.json must have detected project_type
+  local got_type
+  got_type="$(jq -r '.project_type' "$tmp/.harness/config.json" 2>/dev/null)"
+  if [ "$got_type" = "$expected_type" ]; then
+    pass "G12 $name: project_type=$expected_type (auto-detected)"
+  else
+    fail "G12 $name: project_type" "expected $expected_type, got $got_type"
+  fi
+
+  # .gitignore must contain .harness/logs/
+  if grep -qF ".harness/logs/" "$tmp/.gitignore" 2>/dev/null; then
+    pass "G12 $name: .gitignore contains .harness/logs/"
+  else
+    fail "G12 $name: .gitignore missing .harness/logs/" "absent"
+  fi
+
+  # init.sh must be executable
+  if [ -x "$tmp/init.sh" ]; then
+    pass "G12 $name: init.sh is executable"
+  else
+    fail "G12 $name: init.sh executable" "chmod +x missing"
+  fi
+
+  # E2E: status/feature/verify must read v2 scaffold without crashing
+  local status_rc feature_rc verify_rc
+  bash "$ROOT_DIR/scripts/harness-status.sh" "$tmp" >/dev/null 2>&1
+  status_rc=$?
+  cd "$tmp"
+  bash "$ROOT_DIR/scripts/harness-feature.sh" list >/dev/null 2>&1
+  feature_rc=$?
+  cd "$ROOT_DIR"
+  if [ "$status_rc" -eq 0 ]; then
+    pass "G12 $name: harness-status.sh reads v2 scaffold (exit 0)"
+  else
+    fail "G12 $name: harness-status.sh" "exit=$status_rc"
+  fi
+  if [ "$feature_rc" -eq 0 ]; then
+    pass "G12 $name: harness-feature.sh reads v2 scaffold (exit 0)"
+  else
+    fail "G12 $name: harness-feature.sh" "exit=$feature_rc"
+  fi
+  # harness-verify.sh may legitimately exit non-zero on empty project (commands fail)
+  # — we only assert it READ the scaffold successfully (got past config parse)
+  bash "$ROOT_DIR/scripts/harness-verify.sh" feature-001 "$tmp" >/dev/null 2>&1
+  verify_rc=$?
+  if [ "$verify_rc" -ne 0 ]; then
+    # Non-zero is OK here (commands fail on empty project), but the script must
+    # have read the config + written a log. Check for log dir entry.
+    if ls "$tmp/.harness/logs/runs/"*.ndjson >/dev/null 2>&1; then
+      pass "G12 $name: harness-verify.sh read v2 config + wrote run log (commands may legitimately fail)"
+    else
+      fail "G12 $name: harness-verify.sh" "no run log written — config not read"
+    fi
+  else
+    pass "G12 $name: harness-verify.sh ran successfully on v2 scaffold"
+  fi
+
+  rm -rf "$tmp"
+}
+
+init_e2e "node"     "package.json"     "node"
+init_e2e "python"   "pyproject.toml"   "python"
+init_e2e "docs"     "README.md"        "docs"
+init_e2e "generic"  ""                 "generic"
+
+# ============================================================================
+# G13 — Six project-type config examples + schema are tracked in Git
+# ============================================================================
+echo ""
+echo "=== G13: 6 project-type config examples + schema tracked in Git ==="
+for t in node python rust go docs generic; do
+  fp="templates/.harness/config.json.${t}.example"
+  if [ -f "$ROOT_DIR/$fp" ]; then
+    pass "G13 templates/.harness/config.json.${t}.example exists"
+  else
+    fail "G13 templates/.harness/config.json.${t}.example exists" "missing"
+  fi
+done
+assert_file_exists "G13 templates/.harness/config.schema.json" "$ROOT_DIR/templates/.harness/config.schema.json"
+
+# Also check git ls-files (not just working tree)
+echo ""
+echo "  --- git ls-files for templates/.harness/ ---"
+git -C "$ROOT_DIR" ls-files templates/.harness/ 2>&1 | sed 's/^/    /'
+tracked_count=$(git -C "$ROOT_DIR" ls-files templates/.harness/ | wc -l | tr -d ' ')
+if [ "$tracked_count" -eq 7 ]; then
+  pass "G13 git tracks all 7 templates/.harness/ files"
+else
+  fail "G13 git tracks 7 templates/.harness/ files" "tracked=$tracked_count"
+fi
+
+# git archive HEAD verification (per user requirement: must be in commit, not just working tree)
+ARCHIVE_TMP="$(mktemp -d)"
+git -C "$ROOT_DIR" archive HEAD -- 'templates/.harness/*' | tar -x -C "$ARCHIVE_TMP"
+archive_count=$(find "$ARCHIVE_TMP/templates/.harness/" -type f 2>/dev/null | wc -l | tr -d ' ')
+if [ "$archive_count" -eq 7 ]; then
+  pass "G13 git archive HEAD contains all 7 templates/.harness/ files"
+else
+  fail "G13 git archive HEAD contains 7 files" "archive=$archive_count"
+fi
+rm -rf "$ARCHIVE_TMP"
+
+# ============================================================================
+# G14 — Codex host produces codex-progress.md instead of CLAUDE.md
+# ============================================================================
+echo ""
+echo "=== G14: --host=codex produces codex-progress.md ==="
+TMP_CODEX="$(mktemp -d)"
+touch "$TMP_CODEX/package.json"
+bash "$ROOT_DIR/scripts/harness-init.sh" "$TMP_CODEX" --host=codex >/dev/null 2>&1
+if [ -f "$TMP_CODEX/codex-progress.md" ] && [ ! -f "$TMP_CODEX/CLAUDE.md" ]; then
+  pass "G14 --host=codex wrote codex-progress.md (and skipped CLAUDE.md)"
+else
+  fail "G14 --host=codex" "codex-progress.md=$( [ -f "$TMP_CODEX/codex-progress.md" ] && echo Y || echo N ) CLAUDE.md=$( [ -f "$TMP_CODEX/CLAUDE.md" ] && echo Y || echo N )"
+fi
+rm -rf "$TMP_CODEX"
+
+# ============================================================================
+# G15 — --full mode produces the 4 extra files
+# ============================================================================
+echo ""
+echo "=== G15: --full produces extra files ==="
+TMP_FULL="$(mktemp -d)"
+touch "$TMP_FULL/package.json"
+bash "$ROOT_DIR/scripts/harness-init.sh" "$TMP_FULL" --full >/dev/null 2>&1
+for f in claude-progress.md session-handoff.md clean-state-checklist.md checklist.sh; do
+  if [ -f "$TMP_FULL/$f" ]; then
+    pass "G15 --full produced $f"
+  else
+    fail "G15 --full produced $f" "missing"
+  fi
+done
+if [ -x "$TMP_FULL/checklist.sh" ]; then
+  pass "G15 --full checklist.sh is executable"
+else
+  fail "G15 --full checklist.sh executable" "chmod +x missing"
+fi
+rm -rf "$TMP_FULL"
+
+echo ""
+echo "=== Migration Compat Test Summary ==="
+echo "PASSED: $PASSED"
+echo "FAILED: $FAILED"
+echo "SKIPPED: $SKIPPED"
+echo ""
+
 if [ "$FAILED" -gt 0 ]; then
   echo "RESULT: FAIL"
   exit 1

@@ -89,7 +89,7 @@ bash harness-companion/adapters/codex/install.sh --user
 
 ## 7 个子系统
 
-Harness Companion 围绕 [Learn Harness Engineering](https://github.com/s-max-oss/learn-harness-engineering) 课程中的 7 个子系统构建：
+Harness Companion 围绕 [Learn Harness Engineering](https://github.com/walkinglabs/learn-harness-engineering) 课程中的 7 个子系统构建：
 
 | # | 子系统 | 核心文件 | 课程 |
 |---|--------|---------|------|

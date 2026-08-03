@@ -48,6 +48,34 @@ DEFAULT_EXCLUDES=(
 
 # ---- helpers ---------------------------------------------------------------
 
+# Strip git diff path-header lines of the leading project_prefix.
+# When project_dir is a subdir of the git root, git's diff output uses paths
+# like "diff --git a/projects/my-app/foo.txt b/projects/my-app/foo.txt". We
+# need to feed only "foo.txt" semantics into the fingerprint hash, otherwise
+# the fingerprint becomes a function of the absolute location instead of the
+# content. Content lines never start with "diff --git a/" or "--- a/" or
+# "+++ b/", so the substitution is safe for normal diffs.
+#
+# project_prefix is the git-relative path WITH a trailing slash (e.g.
+# "projects/my-app/") as returned by `git rev-parse --show-prefix`. The
+# leading "a/" and "b/" branches are required because git's rename detection
+# can emit "diff --git a/PATH b/PATH" where the two paths differ — both
+# branches must be stripped independently.
+_strip_diff_prefix() {
+  local prefix="$1"
+  if [ -z "$prefix" ]; then
+    cat
+    return
+  fi
+  # Escape `|` in prefix defensively (git paths use `/`, so `|` is safe in
+  # practice, but we tolerate it for robustness).
+  local safe_prefix="${prefix//|/\\|}"
+  sed -e "s|^diff --git a/${safe_prefix}|diff --git a/|g" \
+      -e "s|^diff --git b/${safe_prefix}|diff --git b/|g" \
+      -e "s|^--- a/${safe_prefix}|--- a/|g" \
+      -e "s|^+++ b/${safe_prefix}|+++ b/|g"
+}
+
 # Check if a path matches any exclude glob pattern.
 # Uses grep for pattern matching; returns 0 (true) if excluded.
 _is_excluded() {
@@ -150,15 +178,64 @@ compute_workspace_fingerprint() {
   if git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
     local staged unstaged untracked_files
 
-    # Staged changes: HEAD vs index (git diff --cached HEAD)
-    staged="$(git -C "$project_dir" diff --cached HEAD -- . :/ 2>/dev/null || true)"
+    # Detect git root and project_prefix — when project_dir is a subdirectory
+    # of the git root (monorepo / nested project), git's diff and ls-files
+    # output paths are RELATIVE TO GIT ROOT, not project_dir. Without scoping,
+    # sibling directories would pollute the fingerprint and the untracked-file
+    # hash would point at wrong paths.
+    #
+    # We use `git rev-parse --show-prefix` (which returns the git-relative path
+    # of the cwd WITH a trailing slash, e.g. "projects/my-app/") rather than
+    # comparing absolute paths in bash. This avoids cross-platform pitfalls
+    # where Git Bash's POSIX-style /tmp paths don't share a prefix with git's
+    # Windows-style C:/... toplevel output.
+    local git_root=""
+    git_root="$(git -C "$project_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+    local project_prefix=""
+    project_prefix="$(git -C "$project_dir" rev-parse --show-prefix 2>/dev/null || true)"
+    # show-prefix returns "" when cwd IS git root; normalize trailing slash
+    case "$project_prefix" in
+      ""|"./") project_prefix="" ;;
+    esac
 
-    # Unstaged changes: index vs working tree (git diff, NOT git diff HEAD)
-    # Plan v4 correction: git diff HEAD would double-count staged changes.
-    unstaged="$(git -C "$project_dir" diff -- . :/ 2>/dev/null || true)"
+    if [ -z "$project_prefix" ]; then
+      # ---- project_dir IS the git root — original behavior ----
+      # Staged changes: HEAD vs index (git diff --cached HEAD)
+      staged="$(git -C "$project_dir" diff --cached HEAD -- . :/ 2>/dev/null || true)"
 
-    # Untracked files
-    untracked_files="$(git -C "$project_dir" ls-files --others --exclude-standard 2>/dev/null || true)"
+      # Unstaged changes: index vs working tree (git diff, NOT git diff HEAD)
+      # Plan v4 correction: git diff HEAD would double-count staged changes.
+      unstaged="$(git -C "$project_dir" diff -- . :/ 2>/dev/null || true)"
+
+      # Untracked files
+      untracked_files="$(git -C "$project_dir" ls-files --others --exclude-standard 2>/dev/null || true)"
+    else
+      # ---- project_dir is subdir of git root — scoped behavior ----
+      # Run from git_root and use "<project_prefix>" as pathspec so sibling
+      # directories are excluded. project_prefix already has the trailing "/",
+      # so no extra separator is added. Then strip the project_prefix from
+      # diff path lines so the hash reflects project content, not absolute
+      # location.
+      staged="$(git -C "$git_root" diff --cached HEAD -- "$project_prefix" 2>/dev/null | _strip_diff_prefix "$project_prefix" || true)"
+
+      unstaged="$(git -C "$git_root" diff -- "$project_prefix" 2>/dev/null | _strip_diff_prefix "$project_prefix" || true)"
+
+      # Untracked: run from git_root with project_prefix as pathspec so the
+      # output is scoped to our project AND relative to git_root. Then strip
+      # the project_prefix so downstream hashing reads "$project_dir/<path>"
+      # correctly.
+      #
+      # Note: we deliberately do NOT use `git -C "$project_dir"` here. When
+      # git's cwd is the subdir, ls-files paths are relative to that subdir
+      # (not git_root), which would require a different prefix-strip step and
+      # could miss files when pathspec interactions get tricky. Running from
+      # git_root with explicit pathspec is the canonical scoping form.
+      untracked_files="$(
+        git -C "$git_root" ls-files --others --exclude-standard -- "$project_prefix" 2>/dev/null \
+          | sed -e "s|^${project_prefix}||" \
+          || true
+      )"
+    fi
 
     # Build sorted, NUL-delimited path:hash sequence
     # NUL bytes MUST NOT be stored in bash variables — use a temp file outside

@@ -1,0 +1,154 @@
+name: harness-companion CI
+
+# CI for the harness-companion standalone repository.
+#
+# Runs on every push to master and every PR targeting master. Executes:
+#   1. Core regression suite (tests/core/test-*.sh)
+#   2. Claude Code adapter contract suite (tests/adapters/test-claude-code-contract.sh)
+#   3. Codex adapter contract suite (tests/adapters/test-codex-contract.sh)
+#   4. Codex install-modes suite (tests/adapters/test-codex-install-modes.sh)
+#   5. Migration / v1-compat suite (tests/migration/test-v1-compat.sh)
+#   6. Official Codex validate_plugin.py against .codex-plugin/ (best effort)
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: All 15 test scripts + validate_plugin.py
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show environment
+        run: |
+          echo "Runner:    $RUNNER_OS"
+          echo "Bash:      $(bash --version | head -1)"
+          echo "jq:        $(jq --version 2>/dev/null || echo 'missing')"
+          echo "python3:   $(python3 --version 2>/dev/null || echo 'missing')"
+          echo "git:       $(git --version)"
+
+      - name: Install runtime helpers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq bash >/dev/null
+
+      # ------------------------------------------------------------------
+      # Phase 1 — Core regression suite
+      # ------------------------------------------------------------------
+      - name: Phase 1 — core regression
+        id: phase1
+        run: |
+          set +e
+          FAILED=0
+          for t in tests/core/test-*.sh; do
+            echo ""
+            echo "============================================"
+            echo "  $t"
+            echo "============================================"
+            bash "$t"
+            rc=$?
+            [ "$rc" -ne 0 ] && FAILED=$((FAILED + 1))
+          done
+          echo ""
+          echo "Phase 1 summary: $FAILED core suite(s) failed"
+          [ "$FAILED" -eq 0 ]
+
+      # ------------------------------------------------------------------
+      # Phase 2 — Claude Code adapter contract
+      # ------------------------------------------------------------------
+      - name: Phase 2 — Claude Code adapter contract
+        run: bash tests/adapters/test-claude-code-contract.sh
+
+      # ------------------------------------------------------------------
+      # Phase 3 — Codex adapter contract
+      # ------------------------------------------------------------------
+      - name: Phase 3 — Codex adapter contract
+        run: bash tests/adapters/test-codex-contract.sh
+
+      # ------------------------------------------------------------------
+      # Phase 4 — Codex install modes
+      # ------------------------------------------------------------------
+      - name: Phase 4 — Codex install modes
+        run: bash tests/adapters/test-codex-install-modes.sh
+
+      # ------------------------------------------------------------------
+      # Phase 5 — Migration / v1-compat
+      # ------------------------------------------------------------------
+      - name: Phase 5 — migration v1-compat
+        run: bash tests/migration/test-v1-compat.sh
+
+      # ------------------------------------------------------------------
+      # Phase 6 — Official validate_plugin.py (best effort)
+      #
+      # The validator ships inside the Codex CLI repo. We shallow-clone
+      # the repo to fetch the script and run it against .codex-plugin/.
+      # If the upstream path changes, this phase is allowed to fail without
+      # blocking the build — but it MUST emit a clear warning.
+      # ------------------------------------------------------------------
+      - name: Phase 6 — Codex validate_plugin.py
+        id: phase6
+        continue-on-error: true
+        run: |
+          set +e
+          CODEX_DIR="$(mktemp -d)"
+          if git clone --depth 1 --filter=blob:none --sparse \
+               https://github.com/openai/codex.git "$CODEX_DIR" 2>/dev/null; then
+            cd "$CODEX_DIR"
+            # Pull only the directory tree containing validate_plugin.py
+            # (best-effort; sparse-checkout paths vary across releases).
+            git sparse-checkout set --no-cone \
+              scripts plugin 2>/dev/null || true
+            cd -
+            VALIDATOR=""
+            for cand in \
+              "$CODEX_DIR/scripts/validate_plugin.py" \
+              "$CODEX_DIR/plugin/validate_plugin.py" \
+              "$CODEX_DIR/scripts/validate-plugin.py" \
+              "$CODEX_DIR/validate_plugin.py"; do
+              if [ -f "$cand" ]; then
+                VALIDATOR="$cand"
+                break
+              fi
+            done
+            if [ -n "$VALIDATOR" ]; then
+              echo "Found validator at $VALIDATOR"
+              python3 "$VALIDATOR" .codex-plugin
+              exit $?
+            else
+              echo "::warning::validate_plugin.py not located in Codex CLI repo — skipping"
+              exit 0
+            fi
+          else
+            echo "::warning::Could not clone github.com/openai/codex — skipping validate_plugin.py"
+            exit 0
+          fi
+
+      # ------------------------------------------------------------------
+      # Summary
+      # ------------------------------------------------------------------
+      - name: Summary
+        if: always()
+        run: |
+          echo "============================================"
+          echo "  harness-companion CI summary"
+          echo "============================================"
+          echo "Phase 1 (core regression):       ${{ steps.phase1.outcome }}"
+          echo "Phase 6 (validate_plugin.py):    ${{ steps.phase6.outcome }}"
+          echo "Phases 2/3/4/5 see raw output above."
+          if [ "${{ steps.phase6.outcome }}" = "failure" ]; then
+            echo "::warning::validate_plugin.py phase reported failure — see log"
+          fi

@@ -87,7 +87,7 @@ The install script:
 
 ## The 7 Subsystems
 
-Harness Companion is built around the 7 subsystems from the [Learn Harness Engineering](https://github.com/s-max-oss/learn-harness-engineering) course:
+Harness Companion is built around the 7 subsystems from the [Learn Harness Engineering](https://github.com/walkinglabs/learn-harness-engineering) course:
 
 | # | Subsystem | Files |
 |---|-----------|-------|

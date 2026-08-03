@@ -1,0 +1,40 @@
+{
+  "project_type": "rust",
+  "fingerprint_exclude": ["target/", ".git/", "Cargo.lock", ".DS_Store"],
+  "verification": {
+    "commands": [
+      {
+        "id": "format-check",
+        "command": ["cargo", "fmt", "--all", "--", "--check"],
+        "required_for_passing": false,
+        "timeout_seconds": 120,
+        "command_origin": "configured",
+        "confirmation": "not_required"
+      },
+      {
+        "id": "clippy",
+        "command": ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"],
+        "required_for_passing": true,
+        "timeout_seconds": 600,
+        "command_origin": "configured",
+        "confirmation": "not_required"
+      },
+      {
+        "id": "build",
+        "command": ["cargo", "build", "--all-targets"],
+        "required_for_passing": true,
+        "timeout_seconds": 1800,
+        "command_origin": "configured",
+        "confirmation": "not_required"
+      },
+      {
+        "id": "unit-test",
+        "command": ["cargo", "test", "--all"],
+        "required_for_passing": true,
+        "timeout_seconds": 1800,
+        "command_origin": "configured",
+        "confirmation": "not_required"
+      }
+    ]
+  }
+}

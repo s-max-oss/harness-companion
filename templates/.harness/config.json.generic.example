@@ -1,0 +1,16 @@
+{
+  "project_type": "generic",
+  "fingerprint_exclude": [".git/", ".DS_Store", "Thumbs.db"],
+  "verification": {
+    "commands": [
+      {
+        "id": "smoke",
+        "command": ["bash", "-c", "echo 'no checks configured — edit .harness/config.json to add verification commands' && exit 0"],
+        "required_for_passing": false,
+        "timeout_seconds": 30,
+        "command_origin": "configured",
+        "confirmation": "not_required"
+      }
+    ]
+  }
+}

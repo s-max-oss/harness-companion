@@ -1,0 +1,22 @@
+{
+  "version": "2",
+  "schema_version": "2.0.0",
+  "revision": 0,
+  "last_updated": "2026-08-01",
+  "features": [
+    {
+      "id": "feat-wip-001",
+      "title": "First in_progress feature (v2)",
+      "status": "in_progress",
+      "evidence_associations": [],
+      "legacy_audit_evidence": []
+    },
+    {
+      "id": "feat-wip-002",
+      "title": "Second in_progress feature violates WIP=1 (v2)",
+      "status": "in_progress",
+      "evidence_associations": [],
+      "legacy_audit_evidence": []
+    }
+  ]
+}

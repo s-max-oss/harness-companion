@@ -1,0 +1,23 @@
+{
+  "version": "2",
+  "schema_version": "2.0.0",
+  "revision": 0,
+  "last_updated": "2026-08-01",
+  "features": [
+    {
+      "id": "feat-noassc-001",
+      "title": "Passing feature with NO evidence_associations (v2)",
+      "status": "passing",
+      "evidence_associations": [],
+      "legacy_audit_evidence": [
+        {
+          "id": "typecheck",
+          "command": "echo typecheck",
+          "exit_code": 0,
+          "run_id": "20260801T090000Z-12345-00001",
+          "commit": "oldcommit00"
+        }
+      ]
+    }
+  ]
+}

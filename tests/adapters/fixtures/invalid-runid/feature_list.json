@@ -1,0 +1,21 @@
+{
+  "version": "2",
+  "schema_version": "2.0.0",
+  "revision": 1,
+  "last_updated": "2026-08-03",
+  "features": [
+    {
+      "id": "feat-invrid-001",
+      "title": "Passing feature with run_id pointing at non-existent NDJSON (v2)",
+      "status": "passing",
+      "evidence_associations": [
+        {
+          "run_id": "20991231T000000Z-99999-99999",
+          "associated_at": "2026-08-01T11:00:00Z",
+          "associated_by": "user"
+        }
+      ],
+      "legacy_audit_evidence": []
+    }
+  ]
+}

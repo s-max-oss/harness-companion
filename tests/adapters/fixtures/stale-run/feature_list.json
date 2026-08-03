@@ -1,0 +1,21 @@
+{
+  "version": "2",
+  "schema_version": "2.0.0",
+  "revision": 1,
+  "last_updated": "2026-08-03",
+  "features": [
+    {
+      "id": "feat-stalerun-001",
+      "title": "Passing feature whose run log has stale workspace_fingerprint_verified (v2)",
+      "status": "passing",
+      "evidence_associations": [
+        {
+          "run_id": "20260803T014136Z-868-25153",
+          "associated_at": "2026-08-03T01:41:43Z",
+          "associated_by": "user"
+        }
+      ],
+      "legacy_audit_evidence": []
+    }
+  ]
+}

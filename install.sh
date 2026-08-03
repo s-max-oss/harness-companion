@@ -1,110 +1,93 @@
 #!/bin/bash
-# install.sh — Install harness-companion skill and register hooks
+# install.sh — Top-level harness-companion installer
 #
-# Usage: bash install.sh [--user|--project]
+# Default behavior: install the Claude Code adapter (Phase 4 — Core/Adapter split).
+# Use --codex to install the Codex adapter (Phase 5b) or --all to install both.
 #
-# --user:    Install to ~/.claude/skills/harness-companion/ (global, default)
-# --project: Install to ./.claude/skills/harness-companion/ (project-local)
+# Usage:
+#   bash install.sh [--user|--project] [--codex|--all] [--symlink-core]
 #
-# Registers SessionStart + Stop hooks in ~/.claude/settings.json
+# --user            Install globally (default)
+# --project         Install into the current project's .claude/
+# --codex           Install the Codex adapter (default: Claude Code)
+# --all             Install both adapters
+# --symlink-core    Symlink core/ instead of copying (Linux/macOS only)
+#
+# All real work lives in adapters/<adapter>/install.sh. This dispatcher
+# forwards arguments and reports a unified summary.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MODE="${1:---user}"
 
-echo "=== Harness Companion Install ==="
+ADAPTERS=("claude-code")
+ADAPTERS_ARGS=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --user|--project|--symlink-core)
+      ADAPTERS_ARGS+=("$1")
+      shift
+      ;;
+    --codex)
+      ADAPTERS=("codex")
+      shift
+      ;;
+    --all)
+      ADAPTERS=("claude-code" "codex")
+      shift
+      ;;
+    --help|-h)
+      sed -n '2,30p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+echo "=== harness-companion v2 installer ==="
+echo "Adapters:   ${ADAPTERS[*]}"
+echo "Args:       ${ADAPTERS_ARGS[*]:-<none>}"
 echo ""
 
-# --- Step 1: Copy skill files ------------------------------------------------
-if [ "$MODE" = "--project" ]; then
-  TARGET="$(pwd)/.claude/skills/harness-companion"
-  echo "[1/3] Installing project-local to: $TARGET"
-else
-  TARGET="$HOME/.claude/skills/harness-companion"
-  echo "[1/3] Installing globally to: $TARGET"
-fi
-
-if [ "$SCRIPT_DIR" = "$TARGET" ]; then
-  echo "  Already at target location — skipping copy."
-else
-  mkdir -p "$TARGET"
-  # Copy everything except install.sh itself and .git
-  for item in "$SCRIPT_DIR"/*; do
-    name=$(basename "$item")
-    if [ "$name" != "install.sh" ] && [ "$name" != ".git" ]; then
-      cp -r "$item" "$TARGET/"
-    fi
-  done
-  echo "  Done."
-fi
-
-# --- Step 2: Make scripts executable -----------------------------------------
-echo "[2/3] Making scripts executable..."
-chmod +x "$TARGET/scripts/"*.sh 2>/dev/null || true
-chmod +x "$TARGET/scripts/hooks/"*.sh 2>/dev/null || true
-chmod +x "$TARGET/templates/"*.sh 2>/dev/null || true
-echo "  Done."
-
-# --- Step 3: Register hooks in settings.json ---------------------------------
-echo "[3/3] Registering hooks in ~/.claude/settings.json..."
-
-SETTINGS_FILE="$HOME/.claude/settings.json"
-
-if [ ! -f "$SETTINGS_FILE" ]; then
-  echo "  ~/.claude/settings.json not found. Creating minimal settings file..."
-  mkdir -p "$HOME/.claude"
-  cat > "$SETTINGS_FILE" << 'SETEOF'
-{
-  "hooks": {}
-}
-SETEOF
-fi
-
-# Backup
-cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak-$(date +%Y%m%d 2>/dev/null || date +%Y%m%d)"
-echo "  Backup: $SETTINGS_FILE.bak-$(date +%Y%m%d 2>/dev/null || date +%Y%m%d)"
-
-# Check if hooks section already exists
-if grep -q '"hooks"' "$SETTINGS_FILE"; then
-  echo "  ⚠️  hooks section already exists in settings.json."
-  echo "  Please manually add these entries if not already present:"
+# Each adapter install.sh accepts different arguments; pass only those it accepts.
+# --symlink-core is a Claude Code flag; Codex install.sh does not consume it.
+for adapter in "${ADAPTERS[@]}"; do
   echo ""
-  echo "  \"SessionStart\": [{"
-  echo "    \"matcher\": \"startup|resume\","
-  echo "    \"hooks\": [{"
-  echo "      \"type\": \"command\","
-  echo "      \"command\": \"bash $TARGET/scripts/hooks/session-start.sh\","
-  echo "      \"timeout\": 5000"
-  echo "    }]"
-  echo "  }],"
-  echo "  \"Stop\": [{"
-  echo "    \"matcher\": \"*\","
-  echo "    \"hooks\": [{"
-  echo "      \"type\": \"command\","
-  echo "      \"command\": \"bash $TARGET/scripts/hooks/stop-handoff.sh\","
-  echo "      \"timeout\": 5000"
-  echo "    }]"
-  echo "  }]"
-else
-  echo "  Adding hook configuration..."
-  # This is a simple approach; for complex nested JSON, jq is better
-  # but we avoid the dependency for installation
-  echo "  Note: settings.json already has content — manual hook registration may be safer."
-  echo "  See the manual instructions above."
-fi
+  echo "── Installing adapter: $adapter ──"
+  case "$adapter" in
+    claude-code)
+      exec_args=()
+      for a in "${ADAPTERS_ARGS[@]}"; do
+        case "$a" in
+          --user|--project|--symlink-core) exec_args+=("$a") ;;
+        esac
+      done
+      bash "$SCRIPT_DIR/adapters/claude-code/install.sh" "${exec_args[@]}"
+      ;;
+    codex)
+      # Codex adapter is selected by --repo/--user semantics; default = --repo $(pwd).
+      # If user passed --user at top level, forward --user to codex install.sh.
+      # --project maps to --repo at codex layer.
+      codex_args=()
+      for a in "${ADAPTERS_ARGS[@]}"; do
+        case "$a" in
+          --user) codex_args+=("--user") ;;
+          --project) codex_args+=("--repo" "$(pwd)") ;;
+        esac
+      done
+      if [ ${#codex_args[@]} -eq 0 ]; then
+        codex_args+=("--repo" "$(pwd)")
+      fi
+      bash "$SCRIPT_DIR/adapters/codex/install.sh" "${codex_args[@]}"
+      ;;
+  esac
+done
 
 echo ""
-
-# --- Verify ------------------------------------------------------------------
-echo "=== Install Complete ==="
+echo "=== All selected adapters installed ==="
 echo ""
-echo "Verification:"
-echo "  Skill directory: $([ -d "$TARGET" ] && echo '✅' || echo '❌') $TARGET"
-echo "  SKILL.md:        $([ -f "$TARGET/SKILL.md" ] && echo '✅' || echo '❌')"
-echo "  Templates:       $(find "$TARGET/templates" -type f 2>/dev/null | wc -l | tr -d ' ') files"
-echo ""
-echo "Next steps:"
-echo "  1. Restart Claude Code to load the skill and hooks"
-echo "  2. In a harness project, try: /harness:status"
-echo "  3. To initialize a new project: /harness:init"
+echo "Restart Claude Code / Codex to load the new hooks."

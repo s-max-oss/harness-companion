@@ -1,0 +1,34 @@
+{
+  "version": "2",
+  "schema_version": "2.0.0",
+  "revision": 2,
+  "last_updated": "2026-08-03",
+  "features": [
+    {
+      "id": "feat-stale-001",
+      "title": "Feature with stale-fingerprint passing evidence (v2)",
+      "status": "passing",
+      "evidence_associations": [
+        {
+          "run_id": "20260803T014206Z-2560-26686",
+          "associated_at": "2026-08-03T01:42:14Z",
+          "associated_by": "user"
+        }
+      ],
+      "legacy_audit_evidence": []
+    },
+    {
+      "id": "feat-stale-002",
+      "title": "Feature with matching passing evidence (NOT stale)",
+      "status": "passing",
+      "evidence_associations": [
+        {
+          "run_id": "20260803T014216Z-3114-10779",
+          "associated_at": "2026-08-03T01:42:24Z",
+          "associated_by": "user"
+        }
+      ],
+      "legacy_audit_evidence": []
+    }
+  ]
+}

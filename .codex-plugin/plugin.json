@@ -1,0 +1,25 @@
+{
+  "name": "harness-companion",
+  "version": "2.0.0-rc.1",
+  "description": "Harness Engineering skill — evidence-backed feature pipeline for reliable AI coding environments",
+  "author": {
+    "name": "harness-engineering"
+  },
+  "homepage": "https://github.com/s-max-oss/harness-companion",
+  "repository": "https://github.com/s-max-oss/harness-companion",
+  "license": "MIT",
+  "keywords": ["harness", "engineering", "feature-tracking", "evidence", "audit"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Harness Companion",
+    "shortDescription": "Evidence-backed feature pipeline with status, audit, and handoff.",
+    "longDescription": "Harness Companion adds a structured engineering workflow: feature tracking via feature_list.json, evidence associations per feature, 7-subsystem health dashboard, 5-axis audit scoring, WIP=1 rule enforcement, SessionStart status injection, and Stop handoff warnings. It works across coding agents (Codex, Claude Code) through a core/adapter architecture.",
+    "developerName": "harness-engineering",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Write"],
+    "defaultPrompt": ["Set up harness engineering for this project."],
+    "websiteURL": "https://github.com/s-max-oss/harness-companion",
+    "privacyPolicyURL": "https://github.com/s-max-oss/harness-companion",
+    "termsOfServiceURL": "https://github.com/s-max-oss/harness-companion"
+  }
+}

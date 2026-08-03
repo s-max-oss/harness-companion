@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/adapters/codex/hooks/session-start.sh\"",
+            "commandWindows": "%PLUGIN_ROOT%\\adapters\\codex\\hooks\\session-start.cmd",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/adapters/codex/hooks/stop-handoff.sh\"",
+            "commandWindows": "%PLUGIN_ROOT%\\adapters\\codex\\hooks\\stop-handoff.cmd",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${PLUGIN_ROOT}/adapters/codex/hooks/pre-tool-use.sh\"",
+            "commandWindows": "%PLUGIN_ROOT%\\adapters\\codex\\hooks\\pre-tool-use.cmd",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

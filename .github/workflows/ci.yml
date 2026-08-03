@@ -9,6 +9,9 @@ name: harness-companion CI
 #   4. Codex install-modes suite (tests/adapters/test-codex-install-modes.sh)
 #   5. Migration / v1-compat suite (tests/migration/test-v1-compat.sh)
 #   6. Official Codex validate_plugin.py against the plugin root (blocking)
+#   7. Release archive gate — git archive + inner tests + validator
+#      (HARNESS_VALIDATOR_SKIP_OK=1 because Phase 6 already validates the plugin)
+#   8. Negative gate tests — prove gates exit non-zero on mktemp/fixture/validator failure
 #
 # Phase 6 has THREE outcomes surfaced via step output:
 #   passed  — validator located AND exited 0
@@ -16,6 +19,15 @@ name: harness-companion CI
 #   skipped — validator could not be located (not the same as passed;
 #             summary step reads steps.phase6.outputs.phase6_result to
 #             tell the three states apart).
+#
+# Phase 7 validates the release archive end-to-end, including Phase B tests
+# run inside the extracted archive (no .git). The archive tests use
+# HARNESS_VALIDATOR_SKIP_OK=1 because CI doesn't have validate_plugin.py
+# installed — Phase 6 already covers that check.
+#
+# Phase 8 proves the release gate itself is reliable: it DELIBERATELY
+# causes failures and asserts each gate exits non-zero. Phase 8 exits 0
+# only if ALL gates correctly fail-closed.
 
 on:
   push:
@@ -165,6 +177,43 @@ jobs:
             echo "phase6_detail=validator exit $rc" >> "$GITHUB_OUTPUT"
             exit 1
           fi
+
+      # ------------------------------------------------------------------
+      # Phase 7 — Release archive gate
+      #
+      # Runs test-release-archive.sh which:
+      #   Phase A (outer): verifies git-ls-files, git archive extraction
+      #   Phase B (inner): runs core/adapters/migration tests inside the
+      #     extracted archive (no .git) + validate_plugin.py
+      #
+      # HARNESS_VALIDATOR_SKIP_OK=1 because Phase 6 already validates the
+      # plugin against the source repo root. The archive test's validator
+      # check is redundant in CI (but blocks locally when a user omits it).
+      # ------------------------------------------------------------------
+      - name: Phase 7 — Release archive gate
+        id: phase7
+        run: |
+          echo "HARNESS_VALIDATOR_SKIP_OK=1 (CI: Phase 6 already validates the plugin)"
+          HARNESS_VALIDATOR_SKIP_OK=1 bash tests/release/test-release-archive.sh
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "phase7_result=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "phase7_result=failed" >> "$GITHUB_OUTPUT"
+            exit $rc
+          fi
+
+      # ------------------------------------------------------------------
+      # Phase 8 — Negative gate tests (prove gates fail-closed)
+      #
+      # This phase DELIBERATELY causes failures (fake mktemp, corrupted git
+      # repos, missing validator without SKIP_OK) and asserts each gate
+      # exits non-zero. Phase 8 exits 0 ONLY if ALL gates correctly
+      # fail-closed — proving that the release gate catches real failures.
+      # ------------------------------------------------------------------
+      - name: Phase 8 — Negative gate tests
+        id: phase8
+        run: bash tests/release/test-negative-gates.sh
 
       # ------------------------------------------------------------------
       # Summary — reads steps.phase6.outputs.phase6_result (NOT step outcome)

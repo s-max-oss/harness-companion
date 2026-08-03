@@ -29,6 +29,18 @@ PASSED=0
 FAILED=0
 SKIPPED=0
 
+# Cumulative cleanup: add_cleanup accumulates dirs; single EXIT trap cleans them all.
+cleanup_dirs=""
+add_cleanup() { cleanup_dirs="$cleanup_dirs $1"; }
+trap 'for d in $cleanup_dirs; do rm -rf "$d" 2>/dev/null; done' EXIT
+
+# Safe mktemp — fail immediately if temp dir cannot be created.
+safe_mktemp() {
+  local _dir; _dir="$(mktemp -d)" || { echo "FATAL: mktemp failed" >&2; exit 1; }
+  add_cleanup "$_dir"
+  printf '%s' "$_dir"
+}
+
 pass() {
   local name="$1"
   echo "PASS: $name"
@@ -131,8 +143,7 @@ done
 # ============================================================================
 echo ""
 echo "=== G3: scripts/harness-init.sh creates 4 scaffold files ==="
-TMPINIT="$(mktemp -d)"
-trap 'rm -rf "$TMPINIT"' EXIT
+TMPINIT="$(safe_mktemp)"
 
 if bash "$ROOT_DIR/scripts/harness-init.sh" "$TMPINIT" >/dev/null 2>&1; then
   for f in AGENTS.md CLAUDE.md feature_list.json init.sh; do
@@ -157,22 +168,16 @@ fi
 # ============================================================================
 echo ""
 echo "=== G4: scripts/harness-handoff.sh outputs summary ==="
-TMPHAND="$(mktemp -d)"
-trap 'rm -rf "$TMPHAND"' EXIT
+TMPHAND="$(safe_mktemp)"
 
 # Set up a minimal harness project
-echo '{"features":[],"last_updated":"2026-08-03"}' > "$TMPHAND/feature_list.json"
-mkdir -p "$TMPHAND/.git"
+echo '{"features":[],"last_updated":"2026-08-03"}' > "$TMPHAND/feature_list.json" || { echo "FATAL: G4 setup write failed" >&2; exit 1; }
+mkdir -p "$TMPHAND/.git" || { echo "FATAL: G4 setup mkdir failed" >&2; exit 1; }
 
 if bash "$ROOT_DIR/scripts/harness-handoff.sh" "$TMPHAND" >/dev/null 2>&1; then
   pass "G4 harness-handoff.sh exits 0"
 else
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
-    pass "G4 harness-handoff.sh exits 0"
-  else
-    fail "G4 harness-handoff.sh invocation" "exit=$rc"
-  fi
+  fail "G4 harness-handoff.sh invocation" "exit=$?"
 fi
 
 # The output of handoff should contain the Handoff Summary header
@@ -368,7 +373,7 @@ init_e2e() {
   local marker="$2"
   local expected_type="$3"
 
-  local tmp; tmp="$(mktemp -d)"
+  local tmp; tmp="$(safe_mktemp)"
   if [ -n "$marker" ]; then
     touch "$tmp/$marker"
   fi
@@ -501,14 +506,12 @@ if git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
     fail "G13 git tracks 7 templates/.harness/ files" "tracked=$tracked_count"
   fi
 else
-  echo "    [SKIP: no .git directory — running from archive, git-ls-files unavailable]"
-  PASSED=$((PASSED + 1))
-  echo "PASS: G13 git-ls-files skipped (no .git, archive mode)"
+  skip "G13 git-ls-files" "no .git directory — archive mode"
 fi
 
 # git archive HEAD verification (per user requirement: must be in commit, not just working tree)
 if git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-  ARCHIVE_TMP="$(mktemp -d)"
+  ARCHIVE_TMP="$(safe_mktemp)"
   git -C "$ROOT_DIR" archive HEAD -- 'templates/.harness/*' | tar -x -C "$ARCHIVE_TMP"
   archive_count=$(find "$ARCHIVE_TMP/templates/.harness/" -type f 2>/dev/null | wc -l | tr -d ' ')
   if [ "$archive_count" -eq 7 ]; then
@@ -518,9 +521,7 @@ if git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
   fi
   rm -rf "$ARCHIVE_TMP"
 else
-  echo "    [SKIP: no .git directory — running from archive, git-archive unavailable]"
-  PASSED=$((PASSED + 1))
-  echo "PASS: G13 git-archive skipped (no .git, archive mode)"
+  skip "G13 git-archive" "no .git directory — archive mode"
 fi
 
 # ============================================================================
@@ -528,7 +529,7 @@ fi
 # ============================================================================
 echo ""
 echo "=== G14: --host=codex produces codex-progress.md ==="
-TMP_CODEX="$(mktemp -d)"
+TMP_CODEX="$(safe_mktemp)"
 touch "$TMP_CODEX/package.json"
 bash "$ROOT_DIR/scripts/harness-init.sh" "$TMP_CODEX" --host=codex >/dev/null 2>&1
 if [ -f "$TMP_CODEX/codex-progress.md" ] && [ ! -f "$TMP_CODEX/CLAUDE.md" ]; then
@@ -543,7 +544,7 @@ rm -rf "$TMP_CODEX"
 # ============================================================================
 echo ""
 echo "=== G15: --full produces extra files ==="
-TMP_FULL="$(mktemp -d)"
+TMP_FULL="$(safe_mktemp)"
 touch "$TMP_FULL/package.json"
 bash "$ROOT_DIR/scripts/harness-init.sh" "$TMP_FULL" --full >/dev/null 2>&1
 for f in claude-progress.md session-handoff.md clean-state-checklist.md checklist.sh; do

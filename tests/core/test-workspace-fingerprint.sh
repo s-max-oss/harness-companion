@@ -22,8 +22,20 @@ source "$CORE_LIB/workspace-fingerprint.sh"
 PASSED=0
 FAILED=0
 
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+# Cumulative cleanup: add_cleanup accumulates dirs; single EXIT trap cleans them all.
+cleanup_dirs=""
+add_cleanup() { cleanup_dirs="$cleanup_dirs $1"; }
+trap 'for d in $cleanup_dirs; do rm -rf "$d" 2>/dev/null; done' EXIT
+
+# Safe mktemp — fail immediately if temp dir cannot be created.
+safe_mktemp() {
+  local _label="$1"
+  local _dir; _dir="$(mktemp -d)" || { echo "FATAL: mktemp failed ($_label)" >&2; exit 1; }
+  add_cleanup "$_dir"
+  printf '%s' "$_dir"
+}
+
+TMPDIR="$(safe_mktemp "workspace-fp main")"
 
 # Helper: assert fingerprint equals expected
 assert_fp_equals() {
@@ -54,12 +66,12 @@ assert_fp_not_equals() {
 echo "=== Test 1: Clean git repo ==="
 
 cd "$TMPDIR"
-git init --quiet .
+git init --quiet . || { echo "FATAL: git init failed" >&2; exit 1; }
 git config user.email "test@test"
 git config user.name "Tester"
 echo "hello" > README.md
 git add README.md
-git commit -m "init" --quiet
+git commit -m "init" --quiet || { echo "FATAL: git commit failed" >&2; exit 1; }
 
 FP1="$(compute_workspace_fingerprint "$TMPDIR")"
 assert_fp_equals "clean git repo returns 'clean'" "$FP1" "clean"
@@ -219,8 +231,7 @@ rm -f "$TMPDIR/app.js" "$TMPDIR/.harness/config.json"
 echo ""
 echo "=== Test 10: Nested Git repo — project as subdir of git root ==="
 
-NESTED_TMP="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR" "$NESTED_TMP"' EXIT
+NESTED_TMP="$(safe_mktemp "workspace-fp nested")"
 
 # Build a parent git repo with:
 #   projects/app/   — the project we fingerprint
@@ -491,8 +502,7 @@ assert_fp_equals "verify write: fingerprint stable after STAGE of evidence + run
 echo ""
 echo "=== Test 16: Equal content at different nested prefixes ==="
 
-TWIN_TMP="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR" "$NESTED_TMP" "$TWIN_TMP"' EXIT
+TWIN_TMP="$(safe_mktemp "workspace-fp twin")"
 
 cd "$TWIN_TMP"
 git init --quiet .
@@ -600,66 +610,83 @@ echo "=== Test 18: Precise match negative ==="
 #   .harness/configXjson    → NOT excluded
 #   path/with spaces.txt    → NOT excluded (real file)
 #   path/file[1].txt        → NOT excluded (brackets)
+#
+# Each sub-assertion gets a FRESH git repo so residual state from one
+# sub-test cannot pollute another.
 
-cd "$TMPDIR"
-git clean -fd >/dev/null 2>&1
-git checkout -- . >/dev/null 2>&1 || true
-git reset HEAD -- . >/dev/null 2>&1 || true
-rm -rf "$TMPDIR"/* "$TMPDIR"/.harness 2>/dev/null || true
+T18_TMP="$(safe_mktemp "workspace-fp test18")"
 
-echo "base" > src.txt
-git init --quiet .
-git config user.email t@t && git config user.name t
-mkdir -p path
+# setup_t18_fixture: create a clean git repo in $1 with baseline files.
+# Returns the fingerprint of the clean baseline via stdout.
+setup_t18_fixture() {
+  local dir="$1"
+  rm -rf "$dir"/* "$dir"/.git "$dir"/.[!.]* "$dir"/..?* 2>/dev/null || true
+  cd "$dir" || { echo "FATAL: cd into test18 dir failed" >&2; exit 1; }
+  git init --quiet . || { echo "FATAL: git init failed (test18)" >&2; exit 1; }
+  git config user.email t@t && git config user.name t
+  mkdir -p path .harness
+  echo "base" > src.txt
+  # Create the "NOT excluded" files (committed to git so edits are tracked diffs)
+  echo "bak" > myfeature_list.json.bak
+  echo "cfg" > .harness/configXjson
+  echo "spc" > "path/with spaces.txt"
+  echo "brk" > "path/file[1].txt"
+  git add -A && git commit -m "base" --quiet || { echo "FATAL: git commit failed (test18)" >&2; exit 1; }
+}
 
-# Create files that should NOT be excluded
-echo "bak" > myfeature_list.json.bak
-echo "cfg" > .harness/configXjson
-echo "spc" > "path/with spaces.txt"
-echo "brk" > "path/file[1].txt"
-
-git add -A && git commit -m "base" --quiet
-
-FP_T18_baseline="$(compute_workspace_fingerprint "$TMPDIR")"
-
-# Create real feature_list.json (should be excluded — fingerprint unchanged)
-echo '{"features":[]}' > feature_list.json
-FP_T18_fl="$(compute_workspace_fingerprint "$TMPDIR")"
+# ---- Sub-test a: feature_list.json IS excluded ----
+echo "  [18a] feature_list.json excluded"
+setup_t18_fixture "$T18_TMP"
+FP_T18a_baseline="$(compute_workspace_fingerprint "$T18_TMP")"
+echo '{"features":[]}' > "$T18_TMP/feature_list.json"
+FP_T18a_fl="$(compute_workspace_fingerprint "$T18_TMP")"
 assert_fp_equals "feature_list.json IS excluded — fingerprint unchanged" \
-  "$FP_T18_baseline" "$FP_T18_fl"
+  "$FP_T18a_baseline" "$FP_T18a_fl"
 
-# Edit myfeature_list.json.bak (NOT excluded — fingerprint changes)
-echo "MODIFIED" >> myfeature_list.json.bak
-FP_T18_bak="$(compute_workspace_fingerprint "$TMPDIR")"
+# ---- Sub-test b: myfeature_list.json.bak NOT excluded ----
+echo "  [18b] myfeature_list.json.bak NOT excluded"
+setup_t18_fixture "$T18_TMP"
+FP_T18b_baseline="$(compute_workspace_fingerprint "$T18_TMP")"
+echo "MODIFIED" >> "$T18_TMP/myfeature_list.json.bak"
+FP_T18b_mod="$(compute_workspace_fingerprint "$T18_TMP")"
 assert_fp_not_equals "myfeature_list.json.bak NOT excluded — fingerprint CHANGES" \
-  "$FP_T18_fl" "$FP_T18_bak"
+  "$FP_T18b_baseline" "$FP_T18b_mod"
 
-# Revert bak, edit .harness/config.json (EXCLUDED)
-git checkout -- myfeature_list.json.bak
-mkdir -p .harness
-echo '{"k":"v"}' > .harness/config.json
-FP_T18_cfg="$(compute_workspace_fingerprint "$TMPDIR")"
+# ---- Sub-test c: .harness/config.json IS excluded ----
+echo "  [18c] .harness/config.json excluded"
+setup_t18_fixture "$T18_TMP"
+FP_T18c_baseline="$(compute_workspace_fingerprint "$T18_TMP")"
+echo '{"k":"v"}' > "$T18_TMP/.harness/config.json"
+FP_T18c_cfg="$(compute_workspace_fingerprint "$T18_TMP")"
 assert_fp_equals ".harness/config.json IS excluded — fingerprint unchanged" \
-  "$FP_T18_baseline" "$FP_T18_cfg"
+  "$FP_T18c_baseline" "$FP_T18c_cfg"
 
-# Edit .harness/configXjson (NOT excluded)
-echo "MODIFIED" >> .harness/configXjson
-FP_T18_cfgx="$(compute_workspace_fingerprint "$TMPDIR")"
+# ---- Sub-test d: .harness/configXjson NOT excluded ----
+echo "  [18d] .harness/configXjson NOT excluded"
+setup_t18_fixture "$T18_TMP"
+FP_T18d_baseline="$(compute_workspace_fingerprint "$T18_TMP")"
+echo "MODIFIED" >> "$T18_TMP/.harness/configXjson"
+FP_T18d_mod="$(compute_workspace_fingerprint "$T18_TMP")"
 assert_fp_not_equals ".harness/configXjson NOT excluded — fingerprint CHANGES" \
-  "$FP_T18_cfg" "$FP_T18_cfgx"
+  "$FP_T18d_baseline" "$FP_T18d_mod"
 
-# Revert configXjson, touch spaces/brackets files
-git checkout -- .harness/configXjson
-echo "MOD" >> "path/with spaces.txt"
-FP_T18_spc="$(compute_workspace_fingerprint "$TMPDIR")"
+# ---- Sub-test e: path/with spaces.txt NOT excluded ----
+echo "  [18e] path with spaces NOT excluded"
+setup_t18_fixture "$T18_TMP"
+FP_T18e_baseline="$(compute_workspace_fingerprint "$T18_TMP")"
+echo "MOD" >> "$T18_TMP/path/with spaces.txt"
+FP_T18e_mod="$(compute_workspace_fingerprint "$T18_TMP")"
 assert_fp_not_equals "path with spaces NOT excluded — fingerprint CHANGES" \
-  "$FP_T18_baseline" "$FP_T18_spc"
+  "$FP_T18e_baseline" "$FP_T18e_mod"
 
-git checkout -- "path/with spaces.txt"
-echo "MOD" >> "path/file[1].txt"
-FP_T18_brk="$(compute_workspace_fingerprint "$TMPDIR")"
+# ---- Sub-test f: path/file[1].txt NOT excluded ----
+echo "  [18f] path with brackets NOT excluded"
+setup_t18_fixture "$T18_TMP"
+FP_T18f_baseline="$(compute_workspace_fingerprint "$T18_TMP")"
+echo "MOD" >> "$T18_TMP/path/file[1].txt"
+FP_T18f_mod="$(compute_workspace_fingerprint "$T18_TMP")"
 assert_fp_not_equals "path with brackets NOT excluded — fingerprint CHANGES" \
-  "$FP_T18_baseline" "$FP_T18_brk"
+  "$FP_T18f_baseline" "$FP_T18f_mod"
 
 # ============================================================================
 # Test 19: Rename into excluded directory — old file deletion recorded
@@ -667,25 +694,23 @@ assert_fp_not_equals "path with brackets NOT excluded — fingerprint CHANGES" \
 echo ""
 echo "=== Test 19: Rename into excluded dir ==="
 
-cd "$TMPDIR"
-git clean -fd >/dev/null 2>&1
-git checkout -- . >/dev/null 2>&1 || true
-rm -rf "$TMPDIR"/* "$TMPDIR"/.harness 2>/dev/null || true
+T19_TMP="$(safe_mktemp "workspace-fp test19")"
+cd "$T19_TMP" || { echo "FATAL: cd into test19 dir failed" >&2; exit 1; }
 
 mkdir -p src .harness/logs/runs
 echo "important" > src/hello.txt
-git init --quiet .
+git init --quiet . || { echo "FATAL: git init failed (test19)" >&2; exit 1; }
 git config user.email t@t && git config user.name t
-git add -A && git commit -m "base" --quiet
+git add -A && git commit -m "base" --quiet || { echo "FATAL: git commit failed (test19)" >&2; exit 1; }
 
 # Baseline
-FP_T19_before="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T19_before="$(compute_workspace_fingerprint "$T19_TMP")"
 assert_fp_equals "clean project returns clean" "$FP_T19_before" "clean"
 
 # Rename src/hello.txt → .harness/logs/hello.txt (simulates a user moving
 # a file into the harness logs directory by accident).
 mv src/hello.txt .harness/logs/hello.txt
-FP_T19_renamed="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T19_renamed="$(compute_workspace_fingerprint "$T19_TMP")"
 
 # The DELETE of src/hello.txt should be recorded (it was a non-excluded file),
 # so the fingerprint must change. The CREATE of .harness/logs/hello.txt is
@@ -700,7 +725,7 @@ esac
 
 # If we commit, fingerprint returns to clean (the rename is fully registered)
 git add -A && git commit -m "rename into excluded" --quiet
-FP_T19_committed="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T19_committed="$(compute_workspace_fingerprint "$T19_TMP")"
 assert_fp_equals "after committing rename, fingerprint returns to clean" \
   "clean" "$FP_T19_committed"
 

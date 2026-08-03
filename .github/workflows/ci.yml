@@ -8,7 +8,19 @@ name: harness-companion CI
 #   3. Codex adapter contract suite (tests/adapters/test-codex-contract.sh)
 #   4. Codex install-modes suite (tests/adapters/test-codex-install-modes.sh)
 #   5. Migration / v1-compat suite (tests/migration/test-v1-compat.sh)
-#   6. Official Codex validate_plugin.py against .codex-plugin/ (best effort)
+#   6. Official Codex validate_plugin.py against .codex-plugin/plugin.json
+#
+# Phase 6 has THREE mutually-exclusive outcomes that are surfaced distinctly
+# in the GitHub UI (and in the summary step):
+#   - "passed" : validator located AND exited 0
+#   - "failed" : validator located AND exited non-zero (CI is BLOCKED)
+#   - "skipped": validator could not be located (CI is NOT marked passed —
+#                the summary explicitly distinguishes this from "passed").
+#
+# The validator argument is the PLUGIN ROOT (the directory that contains
+# .codex-plugin/), NOT the .codex-plugin/ subdirectory itself. validate_plugin.py
+# internally does `plugin_root / ".codex-plugin" / "plugin.json"`, so passing
+# .codex-plugin/ as the root results in `missing .codex-plugin/plugin.json`.
 
 on:
   push:
@@ -25,7 +37,7 @@ concurrency:
 
 jobs:
   test:
-    name: All 15 test scripts + validate_plugin.py
+    name: 15 test scripts + Codex plugin validator
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -39,6 +51,7 @@ jobs:
           echo "Bash:      $(bash --version | head -1)"
           echo "jq:        $(jq --version 2>/dev/null || echo 'missing')"
           echo "python3:   $(python3 --version 2>/dev/null || echo 'missing')"
+          echo "PyYAML:    $(python3 -c 'import yaml; print(yaml.__version__)' 2>/dev/null || echo 'missing')"
           echo "git:       $(git --version)"
 
       - name: Install runtime helpers
@@ -92,28 +105,25 @@ jobs:
         run: bash tests/migration/test-v1-compat.sh
 
       # ------------------------------------------------------------------
-      # Phase 6 — Official validate_plugin.py (best effort)
+      # Phase 6 — Official Codex validate_plugin.py (BLOCKING when found)
       #
-      # The validator ships inside the Codex CLI repo. We shallow-clone
-      # the repo to fetch the script and run it against .codex-plugin/.
-      # If the upstream path changes, this phase is allowed to fail without
-      # blocking the build — but it MUST emit a clear warning.
+      # Three outcomes are reported via the `phase6` step output:
+      #   passed  — validator found AND exited 0  → CI continues
+      #   failed  — validator found AND exited non-zero → CI FAILS
+      #   skipped — validator could not be located (offline / upstream moved)
+      #             CI continues but the summary step makes the distinction
+      #             explicit (skipped is NOT conflated with passed).
       # ------------------------------------------------------------------
+      - name: Install PyYAML (deterministic, pinned)
+        run: python3 -m pip install --quiet "PyYAML>=6.0,<7.0"
+
       - name: Phase 6 — Codex validate_plugin.py
         id: phase6
-        continue-on-error: true
         run: |
           set +e
+          VALIDATOR=""
           CODEX_DIR="$(mktemp -d)"
-          if git clone --depth 1 --filter=blob:none --sparse \
-               https://github.com/openai/codex.git "$CODEX_DIR" 2>/dev/null; then
-            cd "$CODEX_DIR"
-            # Pull only the directory tree containing validate_plugin.py
-            # (best-effort; sparse-checkout paths vary across releases).
-            git sparse-checkout set --no-cone \
-              scripts plugin 2>/dev/null || true
-            cd -
-            VALIDATOR=""
+          if git clone --depth 1 https://github.com/openai/codex.git "$CODEX_DIR" 2>/dev/null; then
             for cand in \
               "$CODEX_DIR/scripts/validate_plugin.py" \
               "$CODEX_DIR/plugin/validate_plugin.py" \
@@ -124,21 +134,37 @@ jobs:
                 break
               fi
             done
-            if [ -n "$VALIDATOR" ]; then
-              echo "Found validator at $VALIDATOR"
-              python3 "$VALIDATOR" .codex-plugin
-              exit $?
-            else
-              echo "::warning::validate_plugin.py not located in Codex CLI repo — skipping"
-              exit 0
-            fi
-          else
-            echo "::warning::Could not clone github.com/openai/codex — skipping validate_plugin.py"
+          fi
+          rm -rf "$CODEX_DIR"
+
+          if [ -z "$VALIDATOR" ]; then
+            echo "::warning::validate_plugin.py could not be located in the Codex CLI repo — phase SKIPPED (NOT counted as passed)"
+            echo "phase6_result=skipped" >> "$GITHUB_OUTPUT"
+            echo "phase6_detail=validator not located" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          echo "Validator located at: $VALIDATOR"
+          # CRITICAL: argument is the plugin ROOT (directory containing
+          # .codex-plugin/), not .codex-plugin/ itself. The validator does
+          # `plugin_root / ".codex-plugin" / "plugin.json"`.
+          set +e
+          PYTHONIOENCODING=utf-8 python3 "$VALIDATOR" .
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "phase6_result=passed" >> "$GITHUB_OUTPUT"
+            echo "phase6_detail=validator exit 0" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            echo "::error::validate_plugin.py exited $rc — phase FAILED (CI BLOCKED)"
+            echo "phase6_result=failed" >> "$GITHUB_OUTPUT"
+            echo "phase6_detail=validator exit $rc" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
       # ------------------------------------------------------------------
-      # Summary
+      # Summary — surfaces the three Phase 6 outcomes distinctly
       # ------------------------------------------------------------------
       - name: Summary
         if: always()
@@ -148,7 +174,12 @@ jobs:
           echo "============================================"
           echo "Phase 1 (core regression):       ${{ steps.phase1.outcome }}"
           echo "Phase 6 (validate_plugin.py):    ${{ steps.phase6.outcome }}"
+          echo "  phase6 result:                  ${{ steps.phase6.outputs.phase6_result }}"
+          echo "  phase6 detail:                  ${{ steps.phase6.outputs.phase6_detail }}"
           echo "Phases 2/3/4/5 see raw output above."
+          if [ "${{ steps.phase6.outcome }}" = "skipped" ]; then
+            echo "::warning::Phase 6 (validate_plugin.py) was SKIPPED — not the same as passed. The release-gate record must explicitly note this."
+          fi
           if [ "${{ steps.phase6.outcome }}" = "failure" ]; then
-            echo "::warning::validate_plugin.py phase reported failure — see log"
+            echo "::error::Phase 6 (validate_plugin.py) FAILED — release blocker"
           fi

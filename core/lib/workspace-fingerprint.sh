@@ -57,23 +57,109 @@ DEFAULT_EXCLUDES=(
 # "+++ b/", so the substitution is safe for normal diffs.
 #
 # project_prefix is the git-relative path WITH a trailing slash (e.g.
-# "projects/my-app/") as returned by `git rev-parse --show-prefix`. The
-# leading "a/" and "b/" branches are required because git's rename detection
-# can emit "diff --git a/PATH b/PATH" where the two paths differ — both
-# branches must be stripped independently.
+# "projects/my-app/") as returned by `git rev-parse --show-prefix`.
+#
+# CRITICAL — both sides of "diff --git" lines must be stripped independently:
+# git's rename detection can emit "diff --git a/OLD b/NEW" where the two
+# paths differ. A naive sequential sed pipeline that anchors at `^` for the
+# b/ branch will MISS the b/ side because after stripping the a/ side, the
+# line no longer starts with "diff --git b/". We therefore:
+#   1. Restrict all substitutions to lines starting with the expected prefix
+#      so we never mutate content lines (which never start with "diff --git",
+#      "--- a/", or "+++ b/").
+#   2. For the "diff --git" line, strip the a/ side at start AND strip any
+#      " b/<prefix>/" anywhere on that line — this catches renames where the
+#      b/ side appears mid-line.
 _strip_diff_prefix() {
   local prefix="$1"
   if [ -z "$prefix" ]; then
     cat
     return
   fi
-  # Escape `|` in prefix defensively (git paths use `/`, so `|` is safe in
-  # practice, but we tolerate it for robustness).
-  local safe_prefix="${prefix//|/\\|}"
-  sed -e "s|^diff --git a/${safe_prefix}|diff --git a/|g" \
-      -e "s|^diff --git b/${safe_prefix}|diff --git b/|g" \
-      -e "s|^--- a/${safe_prefix}|--- a/|g" \
-      -e "s|^+++ b/${safe_prefix}|+++ b/|g"
+  # Escape regex specials in the prefix so it can be embedded in an awk
+  # regex. awk's regex syntax is ERE, so we escape `.+^$(){}|\` (anything
+  # special in ERE).
+  local safe_prefix
+  safe_prefix="$(printf '%s' "$prefix" | sed 's/[.+^$(){}|\\]/\\&/g')"
+  # Use awk rather than sed because Git Bash sed mishandles `/` in patterns
+  # when the address form `/regex/` is mixed with the path's `/` characters.
+  # awk's sub()/gsub() don't need a delimiter char, so the path's `/` is
+  # never ambiguous.
+  #
+  # Address-restricted subs on the four git-diff header lines:
+  #   diff --git a/<PREFIX>/X b/<PREFIX>/Y  (rename: a/OLD b/NEW where both
+  #                                          may live inside <PREFIX>/)
+  #   --- a/<PREFIX>/X
+  #   +++ b/<PREFIX>/X
+  # We strip the a/ side at start AND any " b/<PREFIX>/" anywhere on the
+  # diff --git line so rename cases are covered (the b/ side may appear
+  # mid-line after a/ stripping).
+  awk -v p="$safe_prefix" '
+    /^diff --git a\// {
+      sub("^diff --git a/" p, "diff --git a/")
+      sub(" b/" p, " b/")
+      print
+      next
+    }
+    /^--- a\// { sub("^--- a/" p, "--- a/"); print; next }
+    /^\+\+\+ b\// { sub("^+++ b/" p, "+++ b/"); print; next }
+    { print }
+  '
+}
+
+# Convert a glob pattern to an extended-regex pattern.
+# * → .*, ? → ., all other regex specials escaped.
+_glob_to_regex() {
+  printf '%s' "$1" | sed -e 's/[.+^$(){}|\\]/\\&/g' -e 's/\*/.*/g' -e 's/?/./g'
+}
+
+# Build a single awk regex that matches ANY path satisfying BUILTIN_EXCLUDES
+# or FINGERPRINT_EXCLUDES. Used by _filter_diff_excluded to drop whole-file
+# diff chunks for excluded files.
+_build_exclude_awk_pat() {
+  local pat="" sep="" rx p
+  for p in "${BUILTIN_EXCLUDES[@]}"; do
+    [ -z "$p" ] && continue
+    rx="$(_glob_to_regex "$p")"
+    pat="${pat}${sep}${rx}"
+    sep="|"
+  done
+  for p in "${FINGERPRINT_EXCLUDES[@]:-}"; do
+    [ -z "$p" ] && continue
+    rx="$(_glob_to_regex "$p")"
+    pat="${pat}${sep}${rx}"
+    sep="|"
+  done
+  printf '%s' "$pat"
+}
+
+# Drop diff chunks whose b/ path matches the exclude pattern. Each chunk
+# starts with "diff --git a/X b/Y" and ends at the next "diff --git" or EOF.
+# The b/ side is the post-rename name, which is the canonical path for
+# staleness bookkeeping.
+_filter_diff_excluded() {
+  local pat="$1"
+  awk -v pat="$pat" '
+    BEGIN { skip = 0 }
+    /^diff --git/ {
+      bpath = ""
+      # Format: "diff --git a/X b/Y" — split and take the 4th field
+      n = split($0, parts, " ")
+      if (n >= 4) {
+        bpath = parts[4]
+        sub(/^b\//, "", bpath)
+      }
+      if (pat != "" && bpath ~ pat) {
+        skip = 1
+        next
+      }
+      skip = 0
+      print
+      next
+    }
+    skip { next }
+    { print }
+  '
 }
 
 # Check if a path matches any exclude glob pattern.
@@ -198,14 +284,23 @@ compute_workspace_fingerprint() {
       ""|"./") project_prefix="" ;;
     esac
 
+    # Build a single awk regex from BUILTIN_EXCLUDES + FINGERPRINT_EXCLUDES.
+    # Used to drop whole-file diff chunks from staged/unstaged output — the
+    # exclusion must apply uniformly to all three input classes (staged,
+    # unstaged, untracked), otherwise a committed feature_list.json or
+    # .harness/config.json edit would invalidate the fingerprint and break
+    # passing eligibility the moment --write mutates them.
+    local exclude_awk_pat=""
+    exclude_awk_pat="$(_build_exclude_awk_pat)"
+
     if [ -z "$project_prefix" ]; then
       # ---- project_dir IS the git root — original behavior ----
       # Staged changes: HEAD vs index (git diff --cached HEAD)
-      staged="$(git -C "$project_dir" diff --cached HEAD -- . :/ 2>/dev/null || true)"
+      staged="$(git -C "$project_dir" diff --cached HEAD -- . :/ 2>/dev/null | _filter_diff_excluded "$exclude_awk_pat" || true)"
 
       # Unstaged changes: index vs working tree (git diff, NOT git diff HEAD)
       # Plan v4 correction: git diff HEAD would double-count staged changes.
-      unstaged="$(git -C "$project_dir" diff -- . :/ 2>/dev/null || true)"
+      unstaged="$(git -C "$project_dir" diff -- . :/ 2>/dev/null | _filter_diff_excluded "$exclude_awk_pat" || true)"
 
       # Untracked files
       untracked_files="$(git -C "$project_dir" ls-files --others --exclude-standard 2>/dev/null || true)"
@@ -215,10 +310,11 @@ compute_workspace_fingerprint() {
       # directories are excluded. project_prefix already has the trailing "/",
       # so no extra separator is added. Then strip the project_prefix from
       # diff path lines so the hash reflects project content, not absolute
-      # location.
-      staged="$(git -C "$git_root" diff --cached HEAD -- "$project_prefix" 2>/dev/null | _strip_diff_prefix "$project_prefix" || true)"
+      # location. Finally, apply the same exclusion filter as the git-root
+      # case so tracked and untracked files share one exclude list.
+      staged="$(git -C "$git_root" diff --cached HEAD -- "$project_prefix" 2>/dev/null | _strip_diff_prefix "$project_prefix" | _filter_diff_excluded "$exclude_awk_pat" || true)"
 
-      unstaged="$(git -C "$git_root" diff -- "$project_prefix" 2>/dev/null | _strip_diff_prefix "$project_prefix" || true)"
+      unstaged="$(git -C "$git_root" diff -- "$project_prefix" 2>/dev/null | _strip_diff_prefix "$project_prefix" | _filter_diff_excluded "$exclude_awk_pat" || true)"
 
       # Untracked: run from git_root with project_prefix as pathspec so the
       # output is scoped to our project AND relative to git_root. Then strip

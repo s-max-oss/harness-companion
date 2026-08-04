@@ -460,7 +460,7 @@ LOCK_DIR="$1"
 SENTINEL="$2"
 source "$CORE_LIB/lock-registry.sh"
 acquire_lock "$LOCK_DIR" 5 || { echo "HOLDER: acquire failed" >&2; exit 7; }
-date +%s.%N > "$SENTINEL"
+date +%s > "$SENTINEL"
 sleep 3
 release_lock "$LOCK_DIR"
 exit 0
@@ -473,12 +473,13 @@ set -uo pipefail
 export LOCK_REGISTRY_BACKEND=flock
 LOCK_DIR="$1"
 START_SENTINEL="$2"
-T_START=$(date +%s.%N)
+T_START=$(date +%s)
 source "$CORE_LIB/lock-registry.sh"
 acquire_lock "$LOCK_DIR" 10 || { echo "WAITER: acquire failed" >&2; exit 7; }
-T_END=$(date +%s.%N)
-# Record our waited time in seconds (with one decimal)
-awk -v s "$T_START" -v e "$T_END" 'BEGIN { printf "%.1f\n", e - s }' > "${START_SENTINEL}.waited"
+T_END=$(date +%s)
+# Record waited time in whole seconds (integer arithmetic — portable).
+DIFF=$(( T_END - T_START ))
+printf '%s\n' "$DIFF" > "${START_SENTINEL}.waited"
 release_lock "$LOCK_DIR"
 exit 0
 WAITER_EOF
@@ -525,11 +526,11 @@ WAITER_EOF
         assert_fail "T13: waiter finished but did not write waited file" "waiter_rc=$WAITER_RC"
       else
         WAIT_TIME="$(cat "$T13/waiter_started.waited")"
-        # Compare wait time ≥ 2.5s (holder held for 3s, waiter must wait at
-        # least most of that).
-        WAIT_OK=$(awk -v w "$WAIT_TIME" 'BEGIN { print (w >= 2.5) ? "yes" : "no" }')
-        if [ "$WAIT_OK" = "yes" ] && [ "$HOLDER_RC" = "0" ] && [ "$WAITER_RC" = "0" ]; then
-          assert_pass "T13: flock contention — waiter blocked ≥2.5s while holder mutated (waited=${WAIT_TIME}s)"
+        # Integer-second granularity. Holder holds for 3s; waiter must wait
+        # at least 2s (allow 1s of scheduling slack — flock contention on the
+        # acquire_lock's polling loop should consistently give us 2-3s).
+        if [ "${WAIT_TIME:-0}" -ge 2 ] 2>/dev/null && [ "$HOLDER_RC" = "0" ] && [ "$WAITER_RC" = "0" ]; then
+          assert_pass "T13: flock contention — waiter blocked ≥2s while holder mutated (waited=${WAIT_TIME}s)"
         else
           assert_fail "T13: flock contention" "waited=${WAIT_TIME}s holder_rc=$HOLDER_RC waiter_rc=$WAITER_RC"
         fi

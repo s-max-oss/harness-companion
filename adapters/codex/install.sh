@@ -301,6 +301,75 @@ PYEOF
     SOURCE_ORIGIN="git"
   fi
 
+  # Helper: regenerate integrity.files via python3 (works in jq-less envs).
+  # F14.2: must walk the actual installed files under $CODEX_DIR and write
+  # their sha256 hashes into receipt.integrity.files (not an empty object).
+  regenerate_integrity() {
+    local receipt_file="$1"
+    local target_dir="$2"
+    if ! command -v sha256sum >/dev/null 2>&1; then
+      echo "  [WARN] sha256sum not available — skipping integrity regeneration" >&2
+      return 0
+    fi
+    if [ ! -f "$receipt_file" ]; then
+      echo "  [WARN] receipt file missing — skipping integrity regeneration" >&2
+      return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+      TARGET_DIR="$target_dir" RECEIPT_FILE="$receipt_file" python3 - <<'PYEOF'
+import hashlib, json, os, sys
+target_dir = os.environ["TARGET_DIR"]
+receipt_file = os.environ["RECEIPT_FILE"]
+SKIP = {"install-receipt.json", "VERSION"}
+files = {}
+for root, dirs, fnames in os.walk(target_dir):
+    dirs.sort()
+    for fn in sorted(fnames):
+        full = os.path.join(root, fn)
+        rel = os.path.relpath(full, target_dir).replace(os.sep, "/")
+        if rel in SKIP:
+            continue
+        try:
+            with open(full, "rb") as f:
+                h = hashlib.sha256(f.read()).hexdigest()
+            files[rel] = h
+        except OSError:
+            continue
+try:
+    with open(receipt_file, "r", encoding="utf-8") as f:
+        r = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    r = {}
+r.setdefault("integrity", {})
+r["integrity"]["algorithm"] = "sha256"
+r["integrity"]["files"] = files
+tmp = receipt_file + ".tmp.integ"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(r, f, indent=2)
+    f.write("\n")
+os.replace(tmp, receipt_file)
+PYEOF
+      return $?
+    fi
+    # Fallback: jq-based path
+    local f path hash files_json="{}"
+    while IFS= read -r f; do
+      path="${f#$target_dir/}"
+      path="$(printf '%s' "$path" | tr '\\' '/')"
+      case "$path" in
+        install-receipt.json|VERSION) continue ;;
+      esac
+      hash="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        files_json="$(jq --arg p "$path" --arg h "$hash" '.[$p] = $h' <<<"$files_json")"
+      fi
+    done < <(find "$target_dir" -type f 2>/dev/null | sort)
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      jq --argjson files "$files_json" '.integrity.files = $files | .integrity.algorithm = "sha256"' "$receipt_file" > "$receipt_file.tmp" \
+        && mv "$receipt_file.tmp" "$receipt_file"
+    fi
+  }
+
   # Helper: build fresh receipt
   build_fresh_codex_receipt() {
     if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
@@ -397,6 +466,9 @@ PYEOF
       echo "  [ERROR] receipt file was not created: $RECEIPT" >&2
       exit 1
     fi
+
+    # F14.2: regenerate integrity.files by walking the installed tree
+    regenerate_integrity "$RECEIPT" "$CODEX_DIR"
   else
     # Existing receipt: check version for upgrade
     OLD_VERSION=""
@@ -407,12 +479,16 @@ PYEOF
     fi
 
     if [ "$OLD_VERSION" = "$VERSION" ]; then
-      # Same-version reinstall: update installed_at, NO upgrade_history
-      echo "  [receipt] Same-version reinstall ($VERSION) — updating installed_at"
+      # Same-version reinstall: update installed_at + regenerate integrity,
+      # NO upgrade_history. Integrity must reflect current disk state even on
+      # same-version reinstall (files may have been tampered or repaired).
+      echo "  [receipt] Same-version reinstall ($VERSION) — updating installed_at + integrity"
       if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
         jq --arg ts "$INSTALLED_AT" '.installed_at = $ts' "$RECEIPT" > "$RECEIPT.tmp" \
           && mv "$RECEIPT.tmp" "$RECEIPT"
       fi
+      # F14.2/G0-rev2: regenerate integrity on same-version reinstall
+      regenerate_integrity "$RECEIPT" "$CODEX_DIR"
     elif [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$VERSION" ]; then
       # Cross-version upgrade: update version, source, installed_at; append upgrade_history
       echo "  [receipt] Upgrade: $OLD_VERSION → $VERSION — appending upgrade_history"
@@ -464,6 +540,9 @@ with open(receipt_file, "w") as f:
     f.write("\n")
 PYEOF
       fi
+
+      # F14.2: regenerate integrity.files after upgrade mutation
+      regenerate_integrity "$RECEIPT" "$CODEX_DIR"
     else
       # Can't determine old version — update what we can
       echo "  [receipt] Unknown prior version — updating installed_at"

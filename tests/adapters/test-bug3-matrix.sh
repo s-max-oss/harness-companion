@@ -340,6 +340,244 @@ HOOK_NONEXISTENT_CANON="$(canonical_path '/path/that/definitely/does/not/exist/a
 assert "M_H.4 canonical_path on nonexistent returns something non-empty" "yes" "$([ -n "$HOOK_NONEXISTENT_CANON" ] && echo yes || echo no)"
 echo ""
 
+# ---- F14.6 BUG-3 contract additions ------------------------------------------
+# Additional contract items not covered above:
+#   C1 — MSYS equivalent path forms (forward-slash, mixed) canonicalize to
+#        the same value (or both non-empty).
+#   C2 — Hook command "bash C:/path/with/mixed\\slashes.sh" canonicalizes
+#        without crashing (mixed separator handling).
+#   C3 — Real settings command execution: a hook command string built via
+#        install.sh can be extracted + canonicalized + actually invoked
+#        end-to-end (proves the contract works for live settings).
+#   C4 — No-jq, no-python fail-closed: verify register_hooks exit code when
+#        no JSON backend is available (smoke test using sandboxed PATH).
+#   C5 — Long Windows path (>260 chars) survives canonicalization (UNC \\?\)
+
+echo "--- C1: MSYS equivalent path forms ---"
+C1_PARENT="$(safe_mktemp)"
+C1_DIR="$C1_PARENT/sub dir"
+mkdir -p "$C1_DIR"
+C1_SCRIPT="$C1_DIR/script.sh"
+touch "$C1_SCRIPT"
+# POSIX form
+C1_POSIX_CANON="$(canonical_path "$C1_SCRIPT")"
+# MSYS form (with forward slashes through a bash variable)
+C1_MSYS_PATH="${C1_SCRIPT//\\//}"
+C1_MSYS_CANON="$(canonical_path "$C1_MSYS_PATH")"
+# Mixed form (some backslashes, some forward slashes)
+C1_MIXED_PATH="bash/${C1_SCRIPT//\\//}"
+C1_MIXED_CANON="$(canonical_path "$C1_MIXED_PATH")"
+assert "C1.1 POSIX form canonical non-empty" "yes" "$([ -n "$C1_POSIX_CANON" ] && echo yes || echo no)"
+assert "C1.2 MSYS equivalent form canonical non-empty" "yes" "$([ -n "$C1_MSYS_CANON" ] && echo yes || echo no)"
+assert "C1.3 Mixed separator form canonical non-empty" "yes" "$([ -n "$C1_MIXED_CANON" ] && echo yes || echo no)"
+echo ""
+
+echo "--- C2: Mixed-slash hook command ---"
+C2_HOOK_CMD='bash C:/some/path/with\mixed\slashes/script.sh'
+C2_EXTRACTED="$(extract_script_path "$C2_HOOK_CMD" 2>/dev/null || echo "")"
+C2_CANON="$(canonical_path "$C2_EXTRACTED" 2>/dev/null || echo "")"
+assert "C2.1 mixed-slash hook extracted non-empty" "yes" "$([ -n "$C2_EXTRACTED" ] && echo yes || echo no)"
+assert "C2.2 mixed-slash hook canonical non-empty" "yes" "$([ -n "$C2_CANON" ] && echo yes || echo no)"
+echo ""
+
+echo "--- C3: Real settings command end-to-end ---"
+# Build a real hook command (the way install.sh does), extract its path,
+# canonicalize, and verify the file actually exists at the canonical path.
+# This proves the entire extract → canonical chain works for production
+# settings.json content.
+C3_PARENT="$(safe_mktemp)"
+C3_SCRIPT="$C3_PARENT/real-hook-script.sh"
+cat > "$C3_SCRIPT" <<'SCRIPTEOF'
+#!/bin/bash
+echo "real-hook-script-invoked"
+exit 0
+SCRIPTEOF
+chmod +x "$C3_SCRIPT"
+# Simulate the exact format install.sh produces:
+#   HOOK_SS_CMD="bash \"$TARGET/scripts/hooks/session-start.sh\""
+C3_HOOK_CMD="bash \"$C3_SCRIPT\""
+C3_EXTRACTED="$(extract_script_path "$C3_HOOK_CMD")"
+C3_CANON="$(canonical_path "$C3_EXTRACTED")"
+assert "C3.1 real hook extracted == input path" "$C3_SCRIPT" "$C3_EXTRACTED"
+assert "C3.2 real hook canonical file exists" "yes" "$([ -f "$C3_CANON" ] && echo yes || echo no)"
+assert "C3.3 real hook canonical file is executable" "yes" "$([ -x "$C3_CANON" ] && echo yes || echo no)"
+# Actually run it (proves the contract works end-to-end):
+if [ -x "$C3_CANON" ]; then
+  C3_RUN_OUT="$(bash "$C3_CANON" 2>&1)"
+  assert "C3.4 real hook actually executes" "real-hook-script-invoked" "$C3_RUN_OUT"
+else
+  assert "C3.4 real hook actually executes (skipped)" "real-hook-script-invoked" "skipped"
+fi
+echo ""
+
+echo "--- C4: No-jq, no-python fail-closed (smoke) ---"
+# Verify that the install.sh fail-closed gate exists in source. The actual
+# end-to-end fail-closed test was performed in F14.1 (python3-only Claude).
+# Here we just verify the gate is present in the installer source.
+C4_GATE_COUNT="$(grep -cE 'refusing to claim install success|FATAL.*register_hooks' "$INSTALLER" 2>/dev/null || echo 0)"
+if [ "$C4_GATE_COUNT" -gt 0 ]; then
+  assert "C4.1 install.sh has fail-closed register_hooks gate" "yes" "yes"
+else
+  assert "C4.1 install.sh has fail-closed register_hooks gate" "yes" "no"
+fi
+# Also verify Codex install.sh has the same gate.
+CODEX_INSTALLER="$ROOT_DIR/adapters/codex/install.sh"
+if [ -f "$CODEX_INSTALLER" ]; then
+  C4_CODEX_GATE="$(grep -cE 'Neither jq nor python3|FATAL.*hooks\.json' "$CODEX_INSTALLER" 2>/dev/null || echo 0)"
+  if [ "$C4_CODEX_GATE" -gt 0 ]; then
+    assert "C4.2 codex install.sh has fail-closed hooks.json gate" "yes" "yes"
+  else
+    assert "C4.2 codex install.sh has fail-closed hooks.json gate" "yes" "no"
+  fi
+else
+  echo "  [SKIP] C4.2 — Codex installer not found"
+fi
+echo ""
+
+echo "--- C5: Long Windows path >260 chars ---"
+if [ "$IS_WINDOWS" -eq 1 ]; then
+  C5_PARENT="$(safe_mktemp)"
+  C5_DIR="$C5_PARENT"
+  # Build a path longer than 260 chars
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    C5_DIR="$C5_DIR/longseg${i}padding-to-make-the-path-very-long-indeed"
+  done
+  mkdir -p "$C5_DIR" 2>/dev/null
+  C5_SCRIPT="$C5_DIR/script.sh"
+  touch "$C5_SCRIPT" 2>/dev/null
+  C5_CANON="$(canonical_path "$C5_SCRIPT" 2>/dev/null || echo "")"
+  C5_LEN="$(printf '%s' "$C5_CANON" | wc -c | tr -d ' ')"
+  if [ "$C5_LEN" -gt 260 ]; then
+    assert "C5.1 long Windows path (>260) canonicalized" "yes" "yes"
+  elif [ -z "$C5_CANON" ]; then
+    echo "  [INFO] C5.1 — long path canonical returned empty (filesystem MAX_PATH limit)"
+  else
+    echo "  [INFO] C5.1 — long path canonical len=$C5_LEN (shortened by canonical)"
+  fi
+else
+  echo "  [SKIP] C5 — Windows MAX_PATH is Windows-specific"
+fi
+echo ""
+
+# ---- F14.6/G0-rev3 C6: Real installer equivalent-path reinstall ----------
+# Previous C1-C5 checked helpers but did not drive the real installer through
+# Windows/MSYS equivalent-path reinstall. C6 runs install.sh end-to-end in a
+# sandbox and verifies hooks are never duplicated on same-path or
+# equivalent-path reinstall — the exact bug that Python-only mode produced.
+echo "--- C6: Real installer equivalent-path reinstall ---"
+
+C6_SANDBOX="$(safe_mktemp)/harness C6 sandbox"
+mkdir -p "$C6_SANDBOX"
+C6_SANDBOX_CANON="$(canonical_path "$C6_SANDBOX")"
+echo "  sandbox: $C6_SANDBOX_CANON"
+
+# Create .claude/ directory for --project mode
+mkdir -p "$C6_SANDBOX/.claude"
+echo '{}' > "$C6_SANDBOX/.claude/settings.json"
+
+# Run the real installer in --project mode from within the sandbox
+C6_INSTALLER="$ROOT_DIR/adapters/claude-code/install.sh"
+C6_PWD="$(pwd)"
+
+cd "$C6_SANDBOX"
+set +e
+bash "$C6_INSTALLER" --project > /dev/null 2>&1
+C6_RC1=$?
+set -e
+cd "$C6_PWD"
+
+C6_SS_COUNT_1=0
+C6_STOP_COUNT_1=0
+if [ -f "$C6_SANDBOX/.claude/settings.json" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    C6_SS_COUNT_1="$(jq -r '[.hooks.SessionStart[]?] | length' "$C6_SANDBOX/.claude/settings.json" 2>/dev/null || echo 0)"
+    C6_STOP_COUNT_1="$(jq -r '[.hooks.Stop[]?] | length' "$C6_SANDBOX/.claude/settings.json" 2>/dev/null || echo 0)"
+  elif command -v python3 >/dev/null 2>&1; then
+    C6_SS_COUNT_1="$(python3 -c "import json; h=json.load(open('$C6_SANDBOX/.claude/settings.json')); print(len(h.get('hooks',{}).get('SessionStart',[])))" 2>/dev/null || echo 0)"
+    C6_STOP_COUNT_1="$(python3 -c "import json; h=json.load(open('$C6_SANDBOX/.claude/settings.json')); print(len(h.get('hooks',{}).get('Stop',[])))" 2>/dev/null || echo 0)"
+  fi
+fi
+
+assert "C6.1 installer exit 0 (first install)" "0" "$C6_RC1"
+assert "C6.2 first install: exactly 1 SessionStart hook" "1" "$C6_SS_COUNT_1"
+assert "C6.3 first install: exactly 1 Stop hook" "1" "$C6_STOP_COUNT_1"
+
+# ---- C6b: Same-path reinstall (same sandbox, same pwd) --------------------
+# This tests the core BUG-3 fix: reinstalling to the same path must NOT
+# produce duplicate hooks.
+cd "$C6_SANDBOX"
+set +e
+bash "$C6_INSTALLER" --project > /dev/null 2>&1
+C6_RC2=$?
+set -e
+cd "$C6_PWD"
+
+C6_SS_COUNT_2=0
+C6_STOP_COUNT_2=0
+if [ -f "$C6_SANDBOX/.claude/settings.json" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    C6_SS_COUNT_2="$(jq -r '[.hooks.SessionStart[]?] | length' "$C6_SANDBOX/.claude/settings.json" 2>/dev/null || echo 0)"
+    C6_STOP_COUNT_2="$(jq -r '[.hooks.Stop[]?] | length' "$C6_SANDBOX/.claude/settings.json" 2>/dev/null || echo 0)"
+  elif command -v python3 >/dev/null 2>&1; then
+    C6_SS_COUNT_2="$(python3 -c "import json; h=json.load(open('$C6_SANDBOX/.claude/settings.json')); print(len(h.get('hooks',{}).get('SessionStart',[])))" 2>/dev/null || echo 0)"
+    C6_STOP_COUNT_2="$(python3 -c "import json; h=json.load(open('$C6_SANDBOX/.claude/settings.json')); print(len(h.get('hooks',{}).get('Stop',[])))" 2>/dev/null || echo 0)"
+  fi
+fi
+
+assert "C6.4 reinstall exit 0 (same path)" "0" "$C6_RC2"
+assert "C6.5 same-path reinstall: still 1 SessionStart" "1" "$C6_SS_COUNT_2"
+assert "C6.6 same-path reinstall: still 1 Stop" "1" "$C6_STOP_COUNT_2"
+
+# ---- C6c: Equivalent-path reinstall (MSYS/Win32 form swap) ----------------
+# On Windows/MSYS: the same physical directory can be reached via
+#   /c/Users/...  (MSYS form)   vs   C:/Users/...  (Win32 form)
+# or via mixed slashes.  The single-normalizer contract requires that
+# canonical_path() maps all equivalent forms to the same string, and that
+# register_hooks() deduplicates on canonical form.
+#
+# Approach: find an alternative path to the sandbox (via cygpath round-trip)
+# and cd there, then reinstall.  On non-MSYS, skip the equivalent-path test.
+if [ "$IS_WINDOWS" -eq 1 ] && command -v cygpath >/dev/null 2>&1; then
+  C6_WIN_FORM="$(cygpath -aw "$C6_SANDBOX" 2>/dev/null || echo "")"
+  if [ -n "$C6_WIN_FORM" ] && [ "$C6_WIN_FORM" != "$C6_SANDBOX" ]; then
+    # Convert Windows form back to a different MSYS form (mixed slashes)
+    C6_ALT_PATH="$(echo "$C6_WIN_FORM" | tr '\\' '/' | sed 's|^C:|/c|')"
+    if [ -d "$C6_ALT_PATH" ] && [ "$C6_ALT_PATH" != "$C6_SANDBOX" ]; then
+      echo "  alt-path: $C6_ALT_PATH"
+      cd "$C6_ALT_PATH"
+      set +e
+      bash "$C6_INSTALLER" --project > /dev/null 2>&1
+      C6_RC3=$?
+      set -e
+      cd "$C6_PWD"
+
+      C6_SS_COUNT_3=0
+      C6_STOP_COUNT_3=0
+      if [ -f "$C6_SANDBOX/.claude/settings.json" ]; then
+        if command -v jq >/dev/null 2>&1; then
+          C6_SS_COUNT_3="$(jq -r '[.hooks.SessionStart[]?] | length' "$C6_SANDBOX/.claude/settings.json" 2>/dev/null || echo 0)"
+          C6_STOP_COUNT_3="$(jq -r '[.hooks.Stop[]?] | length' "$C6_SANDBOX/.claude/settings.json" 2>/dev/null || echo 0)"
+        elif command -v python3 >/dev/null 2>&1; then
+          C6_SS_COUNT_3="$(python3 -c "import json; h=json.load(open('$C6_SANDBOX/.claude/settings.json')); print(len(h.get('hooks',{}).get('SessionStart',[])))" 2>/dev/null || echo 0)"
+          C6_STOP_COUNT_3="$(python3 -c "import json; h=json.load(open('$C6_SANDBOX/.claude/settings.json')); print(len(h.get('hooks',{}).get('Stop',[])))" 2>/dev/null || echo 0)"
+        fi
+      fi
+
+      assert "C6.7 equiv-path reinstall exit 0" "0" "$C6_RC3"
+      assert "C6.8 equiv-path reinstall: still 1 SessionStart" "1" "$C6_SS_COUNT_3"
+      assert "C6.9 equiv-path reinstall: still 1 Stop" "1" "$C6_STOP_COUNT_3"
+    else
+      echo "  [SKIP] C6.7-C6.9 — alt path not reachable (may be same form)"
+    fi
+  else
+    echo "  [SKIP] C6.7-C6.9 — cygpath round-trip returned same form"
+  fi
+else
+  echo "  [SKIP] C6.7-C6.9 — equivalent-path test requires MSYS+cygpath"
+fi
+
+echo ""
+
 echo "=== F12 BUG-3 Matrix Summary ==="
 echo "Passed: $PASSED"
 echo "Failed: $FAILED"

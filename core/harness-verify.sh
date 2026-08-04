@@ -221,7 +221,13 @@ SKIPPED=0
 FAILED_IDS=()
 EXECUTED=0
 
-while IFS= read -r cmd_id; do
+# Use a file descriptor to isolate the loop from commands that read stdin.
+# The <<< here-string would be consumed by test scripts, truncating the loop
+# after ~5 commands. We open the command list on fd 3 and read from there,
+# while every executed command gets </dev/null so it cannot steal the list.
+exec 3<<<"$(printf '%s\n' "${ALL_IDS[@]}")"
+
+while IFS= read -r -u 3 cmd_id; do
   [ -z "$cmd_id" ] && continue
   CMD_JSON="$(hc_command_for "$cmd_id")"
   if [ -z "$CMD_JSON" ]; then continue; fi
@@ -375,10 +381,10 @@ while IFS= read -r cmd_id; do
 
   EXIT_CODE=0
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${TIMEOUT_SECS}s" "${ARGV[@]}" >"$LOG_FILE" 2>&1
+    timeout "${TIMEOUT_SECS}s" "${ARGV[@]}" </dev/null >"$LOG_FILE" 2>&1
     EXIT_CODE=$?
   else
-    "${ARGV[@]}" >"$LOG_FILE" 2>&1
+    "${ARGV[@]}" </dev/null >"$LOG_FILE" 2>&1
     EXIT_CODE=$?
   fi
 
@@ -465,7 +471,10 @@ while IFS= read -r cmd_id; do
     FAILED=$((FAILED + 1))
     FAILED_IDS+=("$cmd_id")
   fi
-done <<<"$(printf '%s\n' "${ALL_IDS[@]}")"
+done
+
+# Close fd 3
+exec 3<&-
 
 # ---- Compute workspace fingerprint (verified) ----
 # Terminal event append must NOT change fingerprint (harness artifacts excluded)
@@ -589,20 +598,47 @@ elif [ "$FAILED" -gt 0 ]; then
   echo "Failed: ${FAILED_IDS[*]}"
 
 else
+  # ---- Required-coverage gate: all required commands MUST be executed ----
+  # Scan the run log to confirm every required command has a command_completed
+  # entry. If any required command was skipped/never-executed (e.g. because
+  # an earlier command consumed the loop's stdin), the run is NOT passed.
+  MISSING_REQUIRED=()
+  for req_id in "${REQUIRED_IDS[@]}"; do
+    [ -z "$req_id" ] && continue
+    if ! grep -q "\"command_id\":\"$req_id\"" ".harness/logs/runs/${RUN_ID}.ndjson" 2>/dev/null; then
+      MISSING_REQUIRED+=("$req_id")
+    fi
+  done
+
+  if [ "${#MISSING_REQUIRED[@]}" -gt 0 ]; then
+    echo "[FAIL] Required-coverage gate: ${#MISSING_REQUIRED[@]} required command(s) not executed: ${MISSING_REQUIRED[*]}"
+    MISSING_JSON="$(printf '%s
+' "${MISSING_REQUIRED[@]}" | jq -R -s 'split("
+") | map(select(length > 0))')"
+    TERMINAL="$(jq -n --arg event "run_failed" --argjson schema_version 2 --arg run_id "$RUN_ID" --arg completed_at "$COMPLETED_AT" --arg overall_result "failed" --arg workspace_fingerprint_verified "$WORKSPACE_FP_VERIFIED" --argjson planned_commands "$PLANNED" --argjson executed_commands "$EXECUTED" --argjson passed_commands "$PASSED" --argjson failed_commands "$FAILED" --argjson skipped_commands "$SKIPPED" --argjson failed_command_ids "$MISSING_JSON" '{
+      event: $event,
+      schema_version: $schema_version,
+      run_id: $run_id,
+      completed_at: $completed_at,
+      overall_result: $overall_result,
+      workspace_fingerprint_verified: $workspace_fingerprint_verified,
+      planned_commands: $planned_commands,
+      executed_commands: $executed_commands,
+      passed_commands: $passed_commands,
+      failed_commands: $failed_commands,
+      skipped_commands: $skipped_commands,
+      failed_command_ids: $failed_command_ids
+    }')"
+    if ! ev_write_terminal "$RUN_ID" "$TERMINAL"; then
+      echo "FATAL: failed to write run_failed terminal event" >&2
+      exit 2
+    fi
+    echo "Result: FAILED (required-coverage: ${#MISSING_REQUIRED[@]} required command(s) never executed)"
+    exit 1
+  fi
+
   # ---- run_completed (passed) path ----
-  TERMINAL="$(jq -n \
-    --arg event "run_completed" \
-    --argjson schema_version 2 \
-    --arg run_id "$RUN_ID" \
-    --arg completed_at "$COMPLETED_AT" \
-    --arg overall_result "passed" \
-    --arg workspace_fingerprint_verified "$WORKSPACE_FP_VERIFIED" \
-    --argjson planned_commands "$PLANNED" \
-    --argjson executed_commands "$EXECUTED" \
-    --argjson passed_commands "$PASSED" \
-    --argjson failed_commands "$FAILED" \
-    --argjson skipped_commands "$SKIPPED" \
-    '{
+  TERMINAL="$(jq -n --arg event "run_completed" --argjson schema_version 2 --arg run_id "$RUN_ID" --arg completed_at "$COMPLETED_AT" --arg overall_result "passed" --arg workspace_fingerprint_verified "$WORKSPACE_FP_VERIFIED" --argjson planned_commands "$PLANNED" --argjson executed_commands "$EXECUTED" --argjson passed_commands "$PASSED" --argjson failed_commands "$FAILED" --argjson skipped_commands "$SKIPPED" '{
       event: $event,
       schema_version: $schema_version,
       run_id: $run_id,

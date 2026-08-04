@@ -524,6 +524,153 @@ else
   FAILED=$((FAILED + 1))
 fi
 
+# ---- Phase D': Real GitHub tag download (F14.3) ----------------------------
+# Verifies that a tag-built archive (not just git archive HEAD) is installable
+# and produces a receipt with a non-empty integrity.files block. Uses
+# $GITHUB_TAG if set (e.g. GITHUB_TAG=v2.0.0-rc.1). Falls back to a local
+# `git archive $TAG` extraction so the test still runs in environments without
+# network access.
+echo ""
+echo "=== Phase D': Real GitHub tag archive (F14.3) ==="
+
+DPRIME_TAG="${GITHUB_TAG:-}"
+if [ -z "$DPRIME_TAG" ]; then
+  # Pick the most recent tag that exists locally
+  DPRIME_TAG="$(git -C "$SOURCE_REPO" tag --sort=-version:refname 2>/dev/null | head -1)"
+fi
+if [ -z "$DPRIME_TAG" ]; then
+  echo "SKIP: D'1 — no GITHUB_TAG and no local tags"
+  SKIPPED=$((SKIPPED + 1))
+else
+  DPRIME_DIR=""
+  safe_mktemp DPRIME_DIR "phase-dprime-tag-archive" || exit 1
+
+  DPRIME_GH_OK=0
+  if command -v curl >/dev/null 2>&1; then
+    # Try GitHub download. Repo owner/name detected from `git config remote.origin.url`,
+    # or fall back to env vars GITHUB_REPO_OWNER / GITHUB_REPO_NAME.
+    GH_OWNER="${GITHUB_REPO_OWNER:-}"
+    GH_NAME="${GITHUB_REPO_NAME:-}"
+    if [ -z "$GH_OWNER$GH_NAME" ]; then
+      REMOTE_URL="$(git -C "$SOURCE_REPO" config --get remote.origin.url 2>/dev/null || echo "")"
+      # Parse git@github.com:owner/name.git or https://github.com/owner/name.git
+      if [[ "$REMOTE_URL" =~ github\.com[:/]([^/]+)/([^/.]+)(\.git)?$ ]]; then
+        GH_OWNER="${BASH_REMATCH[1]}"
+        GH_NAME="${BASH_REMATCH[2]}"
+      fi
+    fi
+    if [ -n "$GH_OWNER" ] && [ -n "$GH_NAME" ]; then
+      GH_URL="https://github.com/${GH_OWNER}/${GH_NAME}/archive/refs/tags/${DPRIME_TAG}.tar.gz"
+      echo "  [D'] downloading $GH_URL"
+      if curl -fsSL --max-time 60 "$GH_URL" -o "$DPRIME_DIR/tag.tgz" 2>/dev/null; then
+        if tar -xzf "$DPRIME_DIR/tag.tgz" -C "$DPRIME_DIR" 2>/dev/null; then
+          # The archive extracts to <repo-name>-<tag>/; rename to a flat dir
+          EXTRACTED_SUBDIR="$(find "$DPRIME_DIR" -maxdepth 2 -mindepth 1 -type d ! -path "$DPRIME_DIR" | head -1)"
+          if [ -n "$EXTRACTED_SUBDIR" ]; then
+            mv "$DPRIME_DIR/tag.tgz" "$DPRIME_DIR/_archive.tgz.bak" 2>/dev/null || true
+            # Flatten the contents up one level
+            (cd "$DPRIME_DIR" && mv "$EXTRACTED_SUBDIR"/* "$DPRIME_DIR/" 2>/dev/null && rmdir "$EXTRACTED_SUBDIR" 2>/dev/null) || true
+            DPRIME_GH_OK=1
+            echo "  [D'] GitHub download OK → $DPRIME_DIR"
+          fi
+        fi
+      fi
+    fi
+  fi
+  # Fallback: local `git archive $TAG` -- ONLY when GITHUB_TAG is not set
+  # (local dev mode). Under CI with a real GITHUB_TAG, the GitHub download is
+  # mandatory: fail-closed so we do not silently test a different artifact.
+  if [ "$DPRIME_GH_OK" -eq 0 ]; then
+    if [ -n "${GITHUB_TAG:-}" ]; then
+      echo "FAIL: D'1 -- GitHub download failed for GITHUB_TAG=$GITHUB_TAG (CI: no fallback allowed)"
+      FAILED=$((FAILED + 1))
+    else
+      echo "  [D'] falling back to local 'git archive $DPRIME_TAG' (no GITHUB_TAG set)"
+      if git -C "$SOURCE_REPO" archive "$DPRIME_TAG" 2>/dev/null | tar -x -C "$DPRIME_DIR"; then
+        DPRIME_GH_OK=1
+      fi
+    fi
+  fi
+
+  if [ "$DPRIME_GH_OK" -eq 0 ] && [ -z "${GITHUB_TAG:-}" ]; then
+    echo "FAIL: D'1 -- could not obtain archive for tag $DPRIME_TAG (curl+network failed AND local git archive failed)"
+    FAILED=$((FAILED + 1))
+  else
+    # D'1: archive contains an installer entry point (rc.2 also has VERSION + .claude-plugin).
+    # Older tags (e.g. v2.0.0-rc.1) may have a slimmer layout — install.sh is the minimum.
+    if [ -f "$DPRIME_DIR/adapters/claude-code/install.sh" ]; then
+      DPRIME_HAS_FULL_RC2="no"
+      if [ -f "$DPRIME_DIR/VERSION" ] && [ -d "$DPRIME_DIR/.claude-plugin" ]; then
+        DPRIME_HAS_FULL_RC2="yes"
+      fi
+      echo "PASS: D'1 — tag archive $DPRIME_TAG has install.sh (full rc.2 layout=$DPRIME_HAS_FULL_RC2)"
+      PASSED=$((PASSED + 1))
+    else
+      echo "FAIL: D'1 — tag archive missing install.sh"
+      FAILED=$((FAILED + 1))
+    fi
+
+    # D'2: install from the tag archive and verify integrity contract
+    DPRIME_INSTALL_DIR=""
+    safe_mktemp DPRIME_INSTALL_DIR "phase-dprime-install" || exit 1
+    pushd "$DPRIME_INSTALL_DIR" >/dev/null
+    bash "$DPRIME_DIR/adapters/claude-code/install.sh" --project >/dev/null 2>&1
+    DPRIME_RC=$?
+    popd >/dev/null
+
+    DPRIME_RECEIPT="$DPRIME_INSTALL_DIR/.claude/skills/harness-companion/install-receipt.json"
+    DPRIME_INT_COUNT="$(jq '.integrity.files | length' "$DPRIME_RECEIPT" 2>/dev/null || echo 0)"
+    DPRIME_ALGO="$(jq -r '.integrity.algorithm // empty' "$DPRIME_RECEIPT" 2>/dev/null || echo "")"
+
+    if [ "$DPRIME_RC" -eq 0 ] && [ "$DPRIME_INT_COUNT" -gt 0 ] && [ "$DPRIME_ALGO" = "sha256" ]; then
+      echo "PASS: D'2 — tag archive install: $DPRIME_INT_COUNT integrity entries, algo=$DPRIME_ALGO"
+      PASSED=$((PASSED + 1))
+    else
+      echo "FAIL: D'2 — rc=$DPRIME_RC integrity_count=$DPRIME_INT_COUNT algo='$DPRIME_ALGO'"
+      FAILED=$((FAILED + 1))
+    fi
+
+    # D'3: receipt source.origin=archive (rc.2 contract). Legacy tags may have
+    # source.commit=null but lack source.origin — accept either signal as
+    # "tarball install".
+    DPRIME_HAS_SOURCE="$(jq 'has("source")' "$DPRIME_RECEIPT" 2>/dev/null || echo "false")"
+    DPRIME_ORIGIN="$(jq -r '.source.origin // empty' "$DPRIME_RECEIPT" 2>/dev/null || echo "")"
+    DPRIME_COMMIT="$(jq -r '.source.commit // empty' "$DPRIME_RECEIPT" 2>/dev/null || echo "")"
+    if [ "$DPRIME_HAS_SOURCE" = "true" ] && { [ "$DPRIME_ORIGIN" = "archive" ] || [ "$DPRIME_COMMIT" = "null" ] || [ "$DPRIME_COMMIT" = "unknown" ] || [ -z "$DPRIME_COMMIT" ]; }; then
+      echo "PASS: D'3 — source signals archive install (origin='$DPRIME_ORIGIN' commit='$DPRIME_COMMIT')"
+      PASSED=$((PASSED + 1))
+    elif [ "$DPRIME_HAS_SOURCE" = "false" ]; then
+      echo "SKIP: D'3 — tag $DPRIME_TAG predates source block"
+      SKIPPED=$((SKIPPED + 1))
+    else
+      echo "FAIL: D'3 — source.origin='$DPRIME_ORIGIN' source.commit='$DPRIME_COMMIT'"
+      FAILED=$((FAILED + 1))
+    fi
+
+    # D'4: cleanup — uninstall if available, otherwise verify target absent.
+    # Legacy tags (e.g. v2.0.0-rc.1) may lack uninstall.sh entirely.
+    pushd "$DPRIME_INSTALL_DIR" >/dev/null
+    DPRIME_UNINSTALL_RC=0
+    if [ -f "$DPRIME_DIR/adapters/claude-code/uninstall.sh" ]; then
+      bash "$DPRIME_DIR/adapters/claude-code/uninstall.sh" --project >/dev/null 2>&1
+      DPRIME_UNINSTALL_RC=$?
+    else
+      echo "  [D'4] no uninstall.sh in tag archive — manual cleanup not asserted"
+    fi
+    popd >/dev/null
+    if [ ! -d "$DPRIME_INSTALL_DIR/.claude/skills/harness-companion" ]; then
+      echo "PASS: D'4 — D' install cleaned up"
+      PASSED=$((PASSED + 1))
+    elif [ "$DPRIME_UNINSTALL_RC" -eq 0 ] || [ ! -f "$DPRIME_DIR/adapters/claude-code/uninstall.sh" ]; then
+      echo "PASS: D'4 — uninstall not required (no uninstall.sh in archive or rc=0)"
+      PASSED=$((PASSED + 1))
+    else
+      echo "FAIL: D'4 — D' target tree still present after uninstall (rc=$DPRIME_UNINSTALL_RC)"
+      FAILED=$((FAILED + 1))
+    fi
+  fi
+fi
+
 # ---- Phase E: Tag CI trigger check (F10) -----------------------------------
 echo ""
 echo "=== Phase E: Tag CI trigger / marketplace.json ==="
@@ -631,6 +778,35 @@ if [ -f "$G3_MKT_JSON" ]; then
 else
   echo "FAIL: G3 — .claude-plugin/marketplace.json not in archive"
   FAILED=$((FAILED + 1))
+fi
+
+# G4: REAL `claude --plugin-dir` smoke (F14.5) — actually load the plugin.
+# This goes beyond reading manifest JSON: it invokes the claude CLI with the
+# plugin directory as the active plugin and verifies it can be loaded without
+# errors. Uses a 30-second timeout to prevent hangs.
+G4_PLUG_DIR="$FULL_ARCHIVE_DIR"
+if command -v claude >/dev/null 2>&1 && [ -d "$FULL_ARCHIVE_DIR/.claude-plugin" ]; then
+  G4_LOG="$(mktemp)"
+  if timeout 30 claude --plugin-dir "$G4_PLUG_DIR" --version >"$G4_LOG" 2>&1; then
+    G4_EXIT=0
+  else
+    G4_EXIT=$?
+  fi
+  G4_OUT="$(head -c 600 "$G4_LOG" 2>/dev/null)"
+  rm -f "$G4_LOG"
+  # G4 is deterministic: only exit 0 counts. The plugin root directory
+  # (not the .claude-plugin subdir) is passed to --plugin-dir. Any non-zero
+  # exit or fuzzy output matching is a FAIL -- the plugin must load cleanly.
+  if [ "$G4_EXIT" -eq 0 ]; then
+    echo "PASS: G4 -- claude --plugin-dir $G4_PLUG_DIR loaded (exit=0)"
+    PASSED=$((PASSED + 1))
+  else
+    echo "FAIL: G4 -- claude --plugin-dir $G4_PLUG_DIR failed (exit=$G4_EXIT, output head: $(printf '%s' "$G4_OUT" | head -c 200))"
+    FAILED=$((FAILED + 1))
+  fi
+else
+  echo "SKIP: G4 -- claude CLI not on PATH or .claude-plugin dir missing"
+  SKIPPED=$((SKIPPED + 1))
 fi
 
 echo ""

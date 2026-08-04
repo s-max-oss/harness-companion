@@ -271,13 +271,14 @@ else
 fi
 
 # ============================================================================
-# G7 — Plugin manifest version is 2.0.0-rc.1
+# G7 — Plugin manifest version matches VERSION file
 # ============================================================================
 echo ""
 echo "=== G7: Plugin manifest ==="
+EXPECTED_VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
 if [ -f "$ROOT_DIR/.codex-plugin/plugin.json" ]; then
   v=$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$ROOT_DIR/.codex-plugin/plugin.json" | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-  assert_eq "G7 plugin.json version" "2.0.0-rc.1" "$v"
+  assert_eq "G7 plugin.json version" "$EXPECTED_VERSION" "$v"
 else
   fail "G7 plugin.json exists" "missing file"
 fi
@@ -363,8 +364,8 @@ echo "=== G10: CHANGELOG.md ==="
 assert_file_exists "G10 CHANGELOG.md exists" "$ROOT_DIR/CHANGELOG.md"
 
 # Must reference the 2.x release line
-if grep -qE '2\.0\.0-rc\.1|2\.0\.0' "$ROOT_DIR/CHANGELOG.md" 2>/dev/null; then
-  pass "G10 CHANGELOG.md mentions 2.0.0 / 2.0.0-rc.1"
+if grep -qE '2\.0\.0-rc\.[12]|2\.0\.0' "$ROOT_DIR/CHANGELOG.md" 2>/dev/null; then
+  pass "G10 CHANGELOG.md mentions 2.0.0 / 2.0.0-rc.x"
 else
   fail "G10 CHANGELOG.md mentions 2.0.0" "no version reference"
 fi
@@ -374,12 +375,13 @@ fi
 # ============================================================================
 echo ""
 echo "=== G11: Version consistency ==="
+EXPECTED_VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
 for doc in README.md README.zh-CN.md SKILL.md CHANGELOG.md; do
   fp="$ROOT_DIR/$doc"
-  if [ -f "$fp" ] && grep -q "2.0.0-rc.1" "$fp" 2>/dev/null; then
-    pass "G11 $doc mentions 2.0.0-rc.1"
+  if [ -f "$fp" ] && grep -q "$EXPECTED_VERSION" "$fp" 2>/dev/null; then
+    pass "G11 $doc mentions $EXPECTED_VERSION"
   else
-    fail "G11 $doc mentions 2.0.0-rc.1" "missing"
+    fail "G11 $doc mentions $EXPECTED_VERSION" "missing"
   fi
 done
 

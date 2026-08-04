@@ -345,6 +345,119 @@ else
   fi
 fi
 
+# ---- Phase C: installer round-trip inside extracted archive ------------------
+echo ""
+echo "=== Phase C: Installer round-trip (install → verify → uninstall) ==="
+C_ROUNDTRIP_DIR="$(mktemp -d)"
+add_cleanup "$C_ROUNDTRIP_DIR"
+
+# C1: Run Claude install.sh --project inside the extracted archive
+echo "--- C1: Claude install.sh --project ---"
+pushd "$C_ROUNDTRIP_DIR" >/dev/null
+bash "$FULL_ARCHIVE_DIR/adapters/claude-code/install.sh" --project >/dev/null 2>&1
+C1_INSTALL_RC=$?
+popd >/dev/null
+
+C1_TARGET="$C_ROUNDTRIP_DIR/.claude/skills/harness-companion"
+C1_SETTINGS="$C_ROUNDTRIP_DIR/.claude/settings.json"
+
+if [ "$C1_INSTALL_RC" -eq 0 ] && [ -f "$C1_TARGET/VERSION" ] && [ -f "$C1_TARGET/install-receipt.json" ]; then
+  echo "PASS: C1 — install.sh --project exit 0, VERSION + receipt present"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: C1 — install exit=$C1_INSTALL_RC, VERSION=$([ -f "$C1_TARGET/VERSION" ] && echo yes || echo no), receipt=$([ -f "$C1_TARGET/install-receipt.json" ] && echo yes || echo no)"
+  FAILED=$((FAILED + 1))
+fi
+
+# C2: Verify installed VERSION matches source VERSION
+C1_VERSION="$(cat "$C1_TARGET/VERSION" 2>/dev/null || echo "")"
+SOURCE_VERSION="$(cat "$FULL_ARCHIVE_DIR/VERSION" 2>/dev/null || echo "")"
+if [ "$C1_VERSION" = "$SOURCE_VERSION" ] && [ -n "$C1_VERSION" ]; then
+  echo "PASS: C2 — installed VERSION ($C1_VERSION) matches archive VERSION ($SOURCE_VERSION)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: C2 — installed VERSION='$C1_VERSION' vs archive VERSION='$SOURCE_VERSION'"
+  FAILED=$((FAILED + 1))
+fi
+
+# C3: Verify receipt fields
+C1_RCP_VERSION="$(jq -r '.version // empty' "$C1_TARGET/install-receipt.json" 2>/dev/null || echo "")"
+C1_RCP_SKILL="$(jq -r '.skill // empty' "$C1_TARGET/install-receipt.json" 2>/dev/null || echo "")"
+C1_SRC_ORIGIN="$(jq -r '.source.origin // empty' "$C1_TARGET/install-receipt.json" 2>/dev/null || echo "")"
+
+C3_OK=1
+if [ "$C1_RCP_VERSION" != "$SOURCE_VERSION" ]; then
+  echo "FAIL: C3 — receipt version='$C1_RCP_VERSION' expected='$SOURCE_VERSION'"
+  FAILED=$((FAILED + 1)); C3_OK=0
+fi
+if [ "$C1_RCP_SKILL" != "harness-companion" ]; then
+  echo "FAIL: C3 — receipt skill='$C1_RCP_SKILL' expected='harness-companion'"
+  FAILED=$((FAILED + 1)); C3_OK=0
+fi
+# In archive mode (no .git), source.origin should be "archive"
+if [ "$C1_SRC_ORIGIN" != "archive" ]; then
+  echo "FAIL: C3 — source.origin='$C1_SRC_ORIGIN' expected='archive' (no .git in archive)"
+  FAILED=$((FAILED + 1)); C3_OK=0
+fi
+if [ "$C3_OK" -eq 1 ]; then
+  echo "PASS: C3 — receipt version=$C1_RCP_VERSION, skill=$C1_RCP_SKILL, origin=$C1_SRC_ORIGIN"
+  PASSED=$((PASSED + 1))
+fi
+
+# C4: Verify hooks registered in settings.json
+C1_SS_COUNT="$(jq '.hooks.SessionStart | length' "$C1_SETTINGS" 2>/dev/null || echo "0")"
+C1_STOP_COUNT="$(jq '.hooks.Stop | length' "$C1_SETTINGS" 2>/dev/null || echo "0")"
+if [ "$C1_SS_COUNT" -ge 1 ] && [ "$C1_STOP_COUNT" -ge 1 ]; then
+  echo "PASS: C4 — hooks registered (SS=$C1_SS_COUNT, Stop=$C1_STOP_COUNT)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: C4 — hooks missing (SS=$C1_SS_COUNT, Stop=$C1_STOP_COUNT)"
+  FAILED=$((FAILED + 1))
+fi
+
+# C5: Invoke installed hooks
+printf '{"session_id":"test","cwd":"%s","hook_event_name":"SessionStart"}\n' "$C_ROUNDTRIP_DIR" \
+  | bash "$C1_TARGET/scripts/hooks/session-start.sh" >/dev/null 2>&1
+C5_SS_RC=$?
+printf '{"session_id":"test","cwd":"%s","hook_event_name":"Stop"}\n' "$C_ROUNDTRIP_DIR" \
+  | bash "$C1_TARGET/scripts/hooks/stop-handoff.sh" >/dev/null 2>&1
+C5_STOP_RC=$?
+if [ "$C5_SS_RC" -eq 0 ] && [ "$C5_STOP_RC" -eq 0 ]; then
+  echo "PASS: C5 — hooks invoked successfully (SS=$C5_SS_RC, Stop=$C5_STOP_RC)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: C5 — hook invocation failed (SS=$C5_SS_RC, Stop=$C5_STOP_RC)"
+  FAILED=$((FAILED + 1))
+fi
+
+# C6: Uninstall and verify cleanup
+pushd "$C_ROUNDTRIP_DIR" >/dev/null
+bash "$FULL_ARCHIVE_DIR/adapters/claude-code/uninstall.sh" --project >/dev/null 2>&1
+C6_UNINSTALL_RC=$?
+popd >/dev/null
+
+C6_SS_AFTER="$(jq '.hooks.SessionStart | length' "$C1_SETTINGS" 2>/dev/null || echo "0")"
+C6_STOP_AFTER="$(jq '.hooks.Stop | length' "$C1_SETTINGS" 2>/dev/null || echo "0")"
+C6_TARGET_EXISTS="$([ -d "$C1_TARGET" ] && echo YES || echo NO)"
+
+C6_OK=1
+if [ "$C6_UNINSTALL_RC" -ne 0 ]; then
+  echo "FAIL: C6 — uninstall exit=$C6_UNINSTALL_RC (expected 0)"
+  FAILED=$((FAILED + 1)); C6_OK=0
+fi
+if [ "$C6_SS_AFTER" -ne 0 ] || [ "$C6_STOP_AFTER" -ne 0 ]; then
+  echo "FAIL: C6 — hooks not fully deregistered (SS=$C6_SS_AFTER, Stop=$C6_STOP_AFTER)"
+  FAILED=$((FAILED + 1)); C6_OK=0
+fi
+if [ "$C6_TARGET_EXISTS" = "YES" ]; then
+  echo "FAIL: C6 — target tree not removed"
+  FAILED=$((FAILED + 1)); C6_OK=0
+fi
+if [ "$C6_OK" -eq 1 ]; then
+  echo "PASS: C6 — uninstall clean: hooks removed, target removed"
+  PASSED=$((PASSED + 1))
+fi
+
 echo ""
 echo "============================================"
 echo "  Release Archive Test Summary"

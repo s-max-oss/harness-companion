@@ -277,11 +277,11 @@ if [ -f "$ADAPTER_CONF" ]; then
     || assert_fail "G5.13 adapter.conf name=codex"
   grep -q '^knowledge_entry=AGENTS.md$' "$ADAPTER_CONF" && assert_pass "G5.13b adapter.conf knowledge_entry=AGENTS.md" \
     || assert_fail "G5.13b adapter.conf knowledge_entry=AGENTS.md"
-  # G5.13a: adapter.conf declares status=supported (NOT unsupported)
-  if grep -q '^status=supported$' "$ADAPTER_CONF"; then
-    assert_pass "G5.13a adapter.conf declares status=supported (UNSUPPORTED revoked)"
+  # G5.13a: adapter.conf declares status=code-complete-runtime-e2e-pending (AC-9 canonical wording)
+  if grep -q '^status=code-complete-runtime-e2e-pending$' "$ADAPTER_CONF"; then
+    assert_pass "G5.13a adapter.conf declares status=code-complete-runtime-e2e-pending"
   else
-    assert_fail "G5.13a adapter.conf declares status=supported" "missing"
+    assert_fail "G5.13a adapter.conf declares status=code-complete-runtime-e2e-pending" "missing"
   fi
 else
   assert_fail "G5.13 adapter.conf exists"

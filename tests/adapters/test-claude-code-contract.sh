@@ -82,6 +82,17 @@ assert_grep_absent() {
   fi
 }
 
+assert_file() {
+  local name="$1" path="$2"
+  if [ -f "$path" ]; then
+    PASSED=$((PASSED + 1))
+    printf '  [PASS] %s\n' "$name"
+  else
+    FAILED=$((FAILED + 1))
+    printf '  [FAIL] %s — file not found: %s\n' "$name" "$path"
+  fi
+}
+
 # Mock event JSON: real Claude Code sends e.g. {"session_id":"...","cwd":"/path","hook_event_name":"SessionStart"}
 mock_stdin() {
   local cwd="$1"
@@ -459,6 +470,36 @@ SS_COUNT="$(jq '.hooks.SessionStart | length' "$INSTALL_SETTINGS" 2>/dev/null)"
 STOP_COUNT="$(jq '.hooks.Stop | length' "$INSTALL_SETTINGS" 2>/dev/null)"
 assert "G9.5 SessionStart still 1 entry after re-install" "1" "$SS_COUNT"
 assert "G9.5 Stop still 1 entry after re-install" "1" "$STOP_COUNT"
+
+# G9.6: alternate-path install (BUG-3) — install in a different sandbox,
+# verify hook registration is correct (1 entry, not duplicated or mixed)
+ALT_SANDBOX="$(mktemp -d)"
+pushd "$ALT_SANDBOX" >/dev/null
+bash "$ROOT_DIR/adapters/claude-code/install.sh" --project >/dev/null 2>&1
+popd >/dev/null
+
+ALT_TARGET="$ALT_SANDBOX/.claude/skills/harness-companion"
+ALT_SETTINGS="$ALT_SANDBOX/.claude/settings.json"
+ALT_SS_COUNT="$(jq '.hooks.SessionStart | length' "$ALT_SETTINGS" 2>/dev/null)"
+ALT_STOP_COUNT="$(jq '.hooks.Stop | length' "$ALT_SETTINGS" 2>/dev/null)"
+assert "G9.6 alt-path SessionStart is 1 entry" "1" "$ALT_SS_COUNT"
+assert "G9.6 alt-path Stop is 1 entry" "1" "$ALT_STOP_COUNT"
+assert_file "G9.6 alt-path VERSION exists" "$ALT_TARGET/VERSION"
+
+# G9.7: uninstall from alternate sandbox — hooks deregistered, target removed
+pushd "$ALT_SANDBOX" >/dev/null
+bash "$ROOT_DIR/adapters/claude-code/uninstall.sh" --project >/dev/null 2>&1
+G97_UNINSTALL_RC=$?
+popd >/dev/null
+assert "G9.7 uninstall exit code" "0" "$G97_UNINSTALL_RC"
+
+G97_SS_AFTER="$(jq '.hooks.SessionStart | length' "$ALT_SETTINGS" 2>/dev/null)"
+G97_STOP_AFTER="$(jq '.hooks.Stop | length' "$ALT_SETTINGS" 2>/dev/null)"
+assert "G9.7 SessionStart hooks removed after uninstall" "0" "$G97_SS_AFTER"
+assert "G9.7 Stop hooks removed after uninstall" "0" "$G97_STOP_AFTER"
+assert "G9.7 target tree removed" "NO" "$([ -d "$ALT_TARGET" ] && echo YES || echo NO)"
+
+rm -rf "$ALT_SANDBOX" 2>/dev/null || true
 
 # ============================================================
 echo ""

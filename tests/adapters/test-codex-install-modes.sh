@@ -415,6 +415,118 @@ else
 fi
 
 # ============================================================
+# G5.M20–M22: rc.2 lifecycle coverage (BUG-1, BUG-2, tarball)
+# ============================================================
+
+echo ""
+echo "=== G5.M20: VERSION file ==="
+
+TMP_VERSION_SANDBOX="$(mktemp -d)"
+bash "$INSTALL" --repo "$TMP_VERSION_SANDBOX" >/dev/null 2>&1
+
+if [ -f "$TMP_VERSION_SANDBOX/.codex/VERSION" ]; then
+  assert_pass "G5.M20 VERSION file exists in target"
+  CODEX_VERSION="$(cat "$TMP_VERSION_SANDBOX/.codex/VERSION" 2>/dev/null || echo "")"
+  if [ -n "$CODEX_VERSION" ]; then
+    assert_pass "G5.M20 VERSION file is non-empty"
+  else
+    assert_fail "G5.M20 VERSION file is non-empty" " — got empty string"
+  fi
+else
+  assert_fail "G5.M20 VERSION file exists in target"
+  assert_fail "G5.M20 VERSION file is non-empty"
+fi
+
+bash "$UNINSTALL" --repo "$TMP_VERSION_SANDBOX" >/dev/null 2>&1
+rm -rf "$TMP_VERSION_SANDBOX"
+
+echo ""
+echo "=== G5.M21: Receipt upgrade contract ==="
+
+TMP_RCPT_SANDBOX="$(mktemp -d)"
+bash "$INSTALL" --repo "$TMP_RCPT_SANDBOX" >/dev/null 2>&1
+
+CODEX_RECEIPT="$TMP_RCPT_SANDBOX/.codex/install-receipt.json"
+# Convert to Windows path for python3 (MSYS /tmp/ not understood by native python3)
+PY_RECEIPT="$(cygpath -m "$CODEX_RECEIPT" 2>/dev/null || echo "$CODEX_RECEIPT")"
+
+if [ -f "$CODEX_RECEIPT" ]; then
+  assert_pass "G5.M21 receipt exists"
+
+  RCP_VERSION="$(python3 -c "import json; print(json.load(open('$PY_RECEIPT')).get('version',''))" 2>/dev/null || echo "")"
+  RCP_SKILL="$(python3 -c "import json; print(json.load(open('$PY_RECEIPT')).get('adapter',''))" 2>/dev/null || echo "")"
+  RCP_STATUS="$(python3 -c "import json; print(json.load(open('$PY_RECEIPT')).get('status',''))" 2>/dev/null || echo "")"
+
+  if [ -n "$RCP_VERSION" ]; then
+    assert_pass "G5.M21 receipt version is set ($RCP_VERSION)"
+  else
+    assert_fail "G5.M21 receipt version is set" " — empty"
+  fi
+
+  if [ "$RCP_SKILL" = "codex" ]; then
+    assert_pass "G5.M21 receipt adapter is codex"
+  else
+    assert_fail "G5.M21 receipt adapter is codex" " — got '$RCP_SKILL'"
+  fi
+
+  # Verify status is code-complete-runtime-e2e-pending (AC-9 canonical wording)
+  if [ "$RCP_STATUS" = "code-complete-runtime-e2e-pending" ]; then
+    assert_pass "G5.M21 receipt status is code-complete-runtime-e2e-pending"
+  else
+    assert_fail "G5.M21 receipt status is code-complete-runtime-e2e-pending" " — got $RCP_STATUS"
+  fi
+
+  # Same-version reinstall: upgrade_history should be empty
+  bash "$INSTALL" --repo "$TMP_RCPT_SANDBOX" >/dev/null 2>&1
+  HIST_LEN="$(python3 -c "import json; print(len(json.load(open('$PY_RECEIPT')).get('upgrade_history',[])))" 2>/dev/null || echo "error")"
+  if [ "$HIST_LEN" = "0" ]; then
+    assert_pass "G5.M21 same-version reinstall: upgrade_history empty"
+  else
+    assert_fail "G5.M21 same-version reinstall: upgrade_history empty" " — length=$HIST_LEN"
+  fi
+else
+  assert_fail "G5.M21 receipt exists"
+fi
+
+bash "$UNINSTALL" --repo "$TMP_RCPT_SANDBOX" >/dev/null 2>&1
+rm -rf "$TMP_RCPT_SANDBOX"
+
+echo ""
+echo "=== G5.M22: Tarball install (no .git) ==="
+
+TMP_TAR_SANDBOX="$(mktemp -d)"
+# Simulate tarball: copy source, remove .git
+TMP_TAR_SRC="$(mktemp -d)"
+cp -r "$ROOT_DIR"/* "$TMP_TAR_SRC/" 2>/dev/null
+rm -rf "$TMP_TAR_SRC/.git" 2>/dev/null || true
+
+bash "$TMP_TAR_SRC/adapters/codex/install.sh" --repo "$TMP_TAR_SANDBOX" >/dev/null 2>&1
+TAR_RECEIPT="$TMP_TAR_SANDBOX/.codex/install-receipt.json"
+PY_TAR_RECEIPT="$(cygpath -m "$TAR_RECEIPT" 2>/dev/null || echo "$TAR_RECEIPT")"
+
+if [ -f "$TAR_RECEIPT" ]; then
+  TAR_COMMIT="$(python3 -c "import json; print(json.load(open('$PY_TAR_RECEIPT')).get('source',{}).get('commit','MISSING'))" 2>/dev/null || echo "error")"
+  TAR_ORIGIN="$(python3 -c "import json; print(json.load(open('$PY_TAR_RECEIPT')).get('source',{}).get('origin','MISSING'))" 2>/dev/null || echo "error")"
+
+  if [ "$TAR_COMMIT" = "null" ] || [ "$TAR_COMMIT" = "None" ]; then
+    assert_pass "G5.M22 tarball source.commit is null"
+  else
+    assert_fail "G5.M22 tarball source.commit is null" " — got $TAR_COMMIT"
+  fi
+
+  if [ "$TAR_ORIGIN" = "archive" ]; then
+    assert_pass "G5.M22 tarball source.origin is archive"
+  else
+    assert_fail "G5.M22 tarball source.origin is archive" " — got $TAR_ORIGIN"
+  fi
+else
+  assert_fail "G5.M22 tarball receipt exists"
+fi
+
+bash "$TMP_TAR_SRC/adapters/codex/uninstall.sh" --repo "$TMP_TAR_SANDBOX" >/dev/null 2>&1
+rm -rf "$TMP_TAR_SANDBOX" "$TMP_TAR_SRC"
+
+# ============================================================
 echo ""
 echo "=== Summary ==="
 echo "Passed: $PASSED"

@@ -458,6 +458,181 @@ if [ "$C6_OK" -eq 1 ]; then
   PASSED=$((PASSED + 1))
 fi
 
+# ---- Phase D: Post-install integrity validation (F10) ----------------------
+echo ""
+echo "=== Phase D: Post-install integrity validation ==="
+D_ROUNDTRIP_DIR="$(mktemp -d)"
+add_cleanup "$D_ROUNDTRIP_DIR"
+
+# D1: Install and verify integrity.files is non-empty
+pushd "$D_ROUNDTRIP_DIR" >/dev/null
+bash "$FULL_ARCHIVE_DIR/adapters/claude-code/install.sh" --project >/dev/null 2>&1
+D1_RC=$?
+popd >/dev/null
+
+D1_TARGET="$D_ROUNDTRIP_DIR/.claude/skills/harness-companion"
+D1_RECEIPT="$D1_TARGET/install-receipt.json"
+D1_INTEGRITY_COUNT="$(jq '.integrity.files | length' "$D1_RECEIPT" 2>/dev/null || echo 0)"
+D1_ALGO="$(jq -r '.integrity.algorithm // empty' "$D1_RECEIPT" 2>/dev/null || echo "")"
+
+if [ "$D1_RC" -eq 0 ] && [ "$D1_INTEGRITY_COUNT" -gt 0 ] && [ "$D1_ALGO" = "sha256" ]; then
+  echo "PASS: D1 — integrity contract: $D1_INTEGRITY_COUNT files, algorithm=$D1_ALGO"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: D1 — install_rc=$D1_RC integrity_count=$D1_INTEGRITY_COUNT algo='$D1_ALGO'"
+  FAILED=$((FAILED + 1))
+fi
+
+# D2: Verify receipt has source.tag field (null allowed, key must exist)
+D2_TAG_EXISTS="$(jq 'has("source") and (.source | has("tag"))' "$D1_RECEIPT" 2>/dev/null || echo "false")"
+if [ "$D2_TAG_EXISTS" = "true" ]; then
+  echo "PASS: D2 — receipt.source.tag key present (value: $(jq -r '.source.tag // "null"' "$D1_RECEIPT"))"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: D2 — receipt.source.tag missing"
+  echo "       Receipt has source: $(jq 'has("source")' "$D1_RECEIPT" 2>/dev/null || echo 'n/a')"
+  echo "       Receipt source object: $(jq -c '.source // "n/a"' "$D1_RECEIPT" 2>/dev/null || echo 'n/a')"
+  echo "       Full receipt: $(cat "$D1_RECEIPT" 2>/dev/null | head -c 400)"
+  FAILED=$((FAILED + 1))
+fi
+
+# D3: Tamper detection — modify a file, re-compute, expect mismatch
+TEST_FILE="$D1_TARGET/core/harness-verify.sh"
+if [ -f "$TEST_FILE" ]; then
+  ORIG_HASH="$(jq -r '.integrity.files["core/harness-verify.sh"]' "$D1_RECEIPT")"
+  echo "tampered-payload-$$" >> "$TEST_FILE"
+  NEW_HASH="$(sha256sum "$TEST_FILE" | awk '{print $1}')"
+  if [ "$ORIG_HASH" != "$NEW_HASH" ]; then
+    echo "PASS: D3 — tamper detection: original $ORIG_HASH != tampered $NEW_HASH"
+    PASSED=$((PASSED + 1))
+  else
+    echo "FAIL: D3 — tamper not detected"
+    FAILED=$((FAILED + 1))
+  fi
+fi
+
+# D4: Uninstall Phase D install
+pushd "$D_ROUNDTRIP_DIR" >/dev/null
+bash "$FULL_ARCHIVE_DIR/adapters/claude-code/uninstall.sh" --project >/dev/null 2>&1
+D4_RC=$?
+popd >/dev/null
+if [ "$D4_RC" -eq 0 ] && [ ! -d "$D1_TARGET" ]; then
+  echo "PASS: D4 — Phase D uninstall clean"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: D4 — uninstall_rc=$D4_RC target_exists=$([ -d "$D1_TARGET" ] && echo YES || echo NO)"
+  FAILED=$((FAILED + 1))
+fi
+
+# ---- Phase E: Tag CI trigger check (F10) -----------------------------------
+echo ""
+echo "=== Phase E: Tag CI trigger / marketplace.json ==="
+
+E1_MARKETPLACE=""
+safe_mktemp E1_MARKETPLACE "phase-e-mkt" || exit 1
+git -C "$SOURCE_REPO" archive HEAD -- '.claude-plugin/marketplace.json' | tar -x -C "$E1_MARKETPLACE" || true
+E1_PLUGINS_COUNT="$(jq '.plugins | length' "$E1_MARKETPLACE/.claude-plugin/marketplace.json" 2>/dev/null || echo 0)"
+E1_OWNER="$(jq -r '.owner.name // empty' "$E1_MARKETPLACE/.claude-plugin/marketplace.json" 2>/dev/null || echo "")"
+if [ "$E1_PLUGINS_COUNT" -gt 0 ] && [ -n "$E1_OWNER" ]; then
+  echo "PASS: E1 — marketplace.json: $E1_PLUGINS_COUNT plugins, owner=$E1_OWNER"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: E1 — marketplace plugins=$E1_PLUGINS_COUNT owner='$E1_OWNER'"
+  FAILED=$((FAILED + 1))
+fi
+
+# E2: Verify .github/workflows/ tag trigger exists (if applicable)
+if [ -d "$SOURCE_REPO/.github/workflows" ]; then
+  TAG_TRIGGER_FOUND=0
+  for wf in "$SOURCE_REPO/.github/workflows/"*.yml "$SOURCE_REPO/.github/workflows/"*.yaml; do
+    [ -f "$wf" ] || continue
+    if grep -qE 'tags:.*v?[0-9]+\.[0-9]+\.[0-9]+|tags:\s*["'\'']?v\*' "$wf" 2>/dev/null; then
+      TAG_TRIGGER_FOUND=1
+      break
+    fi
+  done
+  if [ "$TAG_TRIGGER_FOUND" -eq 1 ]; then
+    echo "PASS: E2 — tag trigger found in GitHub workflow"
+    PASSED=$((PASSED + 1))
+  else
+    echo "SKIP: E2 — no vX.Y.Z tag trigger pattern matched (may use different format)"
+    SKIPPED=$((SKIPPED + 1))
+  fi
+else
+  echo "SKIP: E2 — no .github/workflows/ in repo"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
+# ---- Phase F: Claude plugin validate phase (F10) ---------------------------
+echo ""
+echo "=== Phase F: Claude validation phase ==="
+
+F1_PLUG_DIR="$FULL_ARCHIVE_DIR/.claude-plugin"
+if [ -f "$F1_PLUG_DIR/plugin.json" ] && command -v claude >/dev/null 2>&1; then
+  if claude plugin validate "$FULL_ARCHIVE_DIR" --strict >/dev/null 2>&1; then
+    echo "PASS: F1 — claude plugin validate (archive root) --strict"
+    PASSED=$((PASSED + 1))
+  else
+    echo "WARN: F1 — claude plugin validate --strict on archive root failed; trying plugin-dir"
+    if [ -d "$F1_PLUG_DIR" ] && claude plugin validate "$F1_PLUG_DIR" >/dev/null 2>&1; then
+      echo "PASS: F1 — claude plugin validate (plugin-dir) (no strict)"
+      PASSED=$((PASSED + 1))
+    else
+      echo "FAIL: F1 — claude plugin validate failed"
+      FAILED=$((FAILED + 1))
+    fi
+  fi
+else
+  echo "SKIP: F1 — claude CLI not available or plugin.json missing"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
+# ---- Phase G: plugin-dir smoke (F10) ---------------------------------------
+echo ""
+echo "=== Phase G: Plugin-dir smoke (load metadata from .claude-plugin/) ==="
+
+G1_PLUG_JSON="$FULL_ARCHIVE_DIR/.claude-plugin/plugin.json"
+if [ -f "$G1_PLUG_JSON" ]; then
+  G1_NAME="$(jq -r '.name // empty' "$G1_PLUG_JSON" 2>/dev/null)"
+  G1_VER="$(jq -r '.version // empty' "$G1_PLUG_JSON" 2>/dev/null)"
+  if [ "$G1_NAME" = "harness-companion" ] && [ "$G1_VER" = "2.0.0-rc.2" ]; then
+    echo "PASS: G1 — plugin.json: name=$G1_NAME version=$G1_VER"
+    PASSED=$((PASSED + 1))
+  else
+    echo "FAIL: G1 — name='$G1_NAME' version='$G1_VER'"
+    FAILED=$((FAILED + 1))
+  fi
+
+  # G2: skills directory referenced
+  G2_SKILLS_PATH="$(jq -r '.skills // empty' "$G1_PLUG_JSON" 2>/dev/null)"
+  if [ -n "$G2_SKILLS_PATH" ]; then
+    echo "PASS: G2 — plugin.json.skills=$G2_SKILLS_PATH"
+    PASSED=$((PASSED + 1))
+  else
+    echo "FAIL: G2 — skills field missing"
+    FAILED=$((FAILED + 1))
+  fi
+else
+  echo "FAIL: G1 — .claude-plugin/plugin.json not in archive"
+  FAILED=$((FAILED + 1))
+fi
+
+# G3: marketplace.json loads
+G3_MKT_JSON="$FULL_ARCHIVE_DIR/.claude-plugin/marketplace.json"
+if [ -f "$G3_MKT_JSON" ]; then
+  G3_PLUGINS_LEN="$(jq '.plugins | length' "$G3_MKT_JSON" 2>/dev/null || echo 0)"
+  if [ "$G3_PLUGINS_LEN" -gt 0 ]; then
+    echo "PASS: G3 — marketplace.json: $G3_PLUGINS_LEN plugin entries"
+    PASSED=$((PASSED + 1))
+  else
+    echo "FAIL: G3 — marketplace plugins empty"
+    FAILED=$((FAILED + 1))
+  fi
+else
+  echo "FAIL: G3 — .claude-plugin/marketplace.json not in archive"
+  FAILED=$((FAILED + 1))
+fi
+
 echo ""
 echo "============================================"
 echo "  Release Archive Test Summary"

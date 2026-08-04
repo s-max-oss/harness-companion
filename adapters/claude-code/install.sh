@@ -223,6 +223,7 @@ build_fresh_receipt() {
       --arg installed_at "$INSTALLED_AT" \
       --arg installed_to "$TARGET" \
       --arg origin "$SOURCE_ORIGIN" \
+      --arg tag_json "$SOURCE_TAG_JSON" \
       '{
         skill: $skill,
         version: $version,
@@ -231,6 +232,7 @@ build_fresh_receipt() {
           repository: "s-max-oss/harness-companion",
           commit: (if $commit == "null" then null else $commit end),
           commit_short: (if $commit_short == "null" then null else $commit_short end),
+          tag: ($tag_json | fromjson),
           origin: $origin
         },
         installed_at: $installed_at,
@@ -240,16 +242,18 @@ build_fresh_receipt() {
       }' > "$RECEIPT"
     return 0
   elif command -v python3 >/dev/null 2>&1; then
+    SOURCE_COMMIT="$SOURCE_COMMIT" \
+    SOURCE_COMMIT_SHORT="$SOURCE_COMMIT_SHORT" \
+    SOURCE_TAG="$SOURCE_TAG" \
+    SOURCE_ORIGIN="$SOURCE_ORIGIN" \
     VERSION="$VERSION" \
     INSTALLED_AT="$INSTALLED_AT" \
     TARGET="$TARGET" \
-    SOURCE_COMMIT="$SOURCE_COMMIT" \
-    SOURCE_COMMIT_SHORT="$SOURCE_COMMIT_SHORT" \
-    SOURCE_ORIGIN="$SOURCE_ORIGIN" \
     python3 - <<'PYEOF'
 import json, os
 commit = os.environ["SOURCE_COMMIT"]
 commit_short = os.environ["SOURCE_COMMIT_SHORT"]
+source_tag = os.environ.get("SOURCE_TAG", "").strip()
 receipt = {
   "skill": "harness-companion",
   "version": os.environ["VERSION"],
@@ -258,6 +262,7 @@ receipt = {
     "repository": "s-max-oss/harness-companion",
     "commit": commit if commit != "null" else None,
     "commit_short": commit_short if commit_short != "null" else None,
+    "tag": source_tag if source_tag else None,
     "origin": os.environ["SOURCE_ORIGIN"],
   },
   "installed_at": os.environ["INSTALLED_AT"],
@@ -272,11 +277,25 @@ PYEOF
     return 0
   else
     echo "[WARN] Neither jq nor python3 available — writing minimal receipt" >&2
+    # F10: minimal fallback must still include source (BUG-3 contract).
+    # Build tag JSON literal manually since we have no JSON encoder.
+    if [ "$SOURCE_TAG_JSON" = "null" ] || [ -z "$SOURCE_TAG_JSON" ]; then
+      TAG_LIT="null"
+    else
+      TAG_LIT="$SOURCE_TAG_JSON"
+    fi
     cat > "$RECEIPT" <<JSON
 {
   "skill": "harness-companion",
   "version": "$VERSION",
   "schema_version": "2.0.0",
+  "source": {
+    "repository": "s-max-oss/harness-companion",
+    "commit": $SOURCE_COMMIT,
+    "commit_short": $SOURCE_COMMIT_SHORT,
+    "tag": $TAG_LIT,
+    "origin": "$SOURCE_ORIGIN"
+  },
   "installed_at": "$INSTALLED_AT",
   "installed_to": "$TARGET",
   "integrity": { "algorithm": "sha256", "files": {} },
@@ -290,6 +309,25 @@ if [ ! -f "$RECEIPT" ]; then
   # ---- Fresh install: write new receipt ---------------------------------------
   echo "[receipt] Fresh install — writing new receipt"
   build_fresh_receipt
+
+  # ---- Validate receipt JSON was actually written and parses -----------------
+  # F7: Python-only backend silent success — must verify, not assume.
+  if [ -f "$RECEIPT" ]; then
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      jq -e . "$RECEIPT" >/dev/null 2>&1 || {
+        echo "[ERROR] generated receipt failed jq validation: $RECEIPT" >&2
+        exit 1
+      }
+    elif command -v python3 >/dev/null 2>&1; then
+      python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$RECEIPT" >/dev/null 2>&1 || {
+        echo "[ERROR] generated receipt failed python3 validation: $RECEIPT" >&2
+        exit 1
+      }
+    fi
+  else
+    echo "[ERROR] receipt file was not created: $RECEIPT" >&2
+    exit 1
+  fi
 else
   # ---- Existing receipt: upgrade logic ----------------------------------------
   OLD_VERSION=""
@@ -319,9 +357,11 @@ else
         --arg old_ver "$OLD_VERSION" \
         --arg new_ver "$VERSION" \
         --arg at "$INSTALLED_AT" \
+        --arg tag_json "$SOURCE_TAG_JSON" \
         '.version = $version
          | .source.commit = (if $commit == "null" then null else $commit end)
          | .source.commit_short = (if $commit_short == "null" then null else $commit_short end)
+         | .source.tag = ($tag_json | fromjson)
          | .source.origin = $origin
          | .installed_at = $ts
          | .upgrade_history += [{from: $old_ver, to: $new_ver, at: $at}]' \
@@ -333,6 +373,7 @@ else
       INSTALLED_AT="$INSTALLED_AT" \
       SOURCE_COMMIT="$SOURCE_COMMIT" \
       SOURCE_COMMIT_SHORT="$SOURCE_COMMIT_SHORT" \
+      SOURCE_TAG="$SOURCE_TAG" \
       SOURCE_ORIGIN="$SOURCE_ORIGIN" \
       RECEIPT="$RECEIPT" \
       python3 - <<'PYEOF'
@@ -341,9 +382,11 @@ receipt_file = os.environ["RECEIPT"]
 with open(receipt_file) as f:
     r = json.load(f)
 commit = os.environ["SOURCE_COMMIT"]
+source_tag = os.environ.get("SOURCE_TAG", "").strip()
 r["version"] = os.environ["VERSION"]
 r["source"]["commit"] = commit if commit != "null" else None
 r["source"]["commit_short"] = os.environ["SOURCE_COMMIT_SHORT"] if os.environ["SOURCE_COMMIT_SHORT"] != "null" else None
+r["source"]["tag"] = source_tag if source_tag else None
 r["source"]["origin"] = os.environ["SOURCE_ORIGIN"]
 r["installed_at"] = os.environ["INSTALLED_AT"]
 r.setdefault("upgrade_history", []).append({
@@ -364,6 +407,21 @@ PYEOF
         && mv "$RECEIPT.tmp" "$RECEIPT"
     fi
   fi
+
+  # F7: Validate receipt is still valid JSON after mutation
+  if [ -f "$RECEIPT" ]; then
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      jq -e . "$RECEIPT" >/dev/null 2>&1 || {
+        echo "[ERROR] receipt became invalid JSON after upgrade mutation: $RECEIPT" >&2
+        exit 1
+      }
+    elif command -v python3 >/dev/null 2>&1; then
+      python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$RECEIPT" >/dev/null 2>&1 || {
+        echo "[ERROR] receipt became invalid JSON after upgrade mutation: $RECEIPT" >&2
+        exit 1
+      }
+    fi
+  fi
 fi
 
 # Regenerate integrity.files on every install run
@@ -371,11 +429,38 @@ echo "[integrity] Regenerating integrity manifest..."
 regenerate_integrity "$RECEIPT" "$TARGET"
 echo "  integrity regenerated"
 
+# F7: Final receipt sanity check — must be valid JSON, must contain required fields
+if [ -f "$RECEIPT" ]; then
+  if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+    if ! jq -e '.version and .skill and .installed_at and .installed_to and .integrity and .upgrade_history and .source' "$RECEIPT" >/dev/null 2>&1; then
+      echo "[ERROR] receipt missing required fields (version, skill, installed_at, installed_to, integrity, upgrade_history)" >&2
+      exit 1
+    fi
+  elif command -v python3 >/dev/null 2>&1; then
+    if ! python3 -c "
+import json, sys
+r = json.load(open(sys.argv[1]))
+for k in ('version','skill','installed_at','installed_to','integrity','upgrade_history'):
+    assert k in r, f'missing field: {k}'
+" "$RECEIPT" >/dev/null 2>&1; then
+      echo "[ERROR] receipt missing required fields" >&2
+      exit 1
+    fi
+  fi
+fi
+
 # ===============================================================================
 # BUG-3 fix: Hook path normalization + fail-closed
 # ===============================================================================
 
 # ---- Canonical path resolver --------------------------------------------------
+# F12 (LR3 full BUG-3 matrix): canonical_path must:
+#   - Round-trip through cygpath on MSYS to normalize /c/Users vs C:\Users
+#   - Resolve symlinks (junctions on Windows) via readlink -f so the SAME
+#     real inode yields the SAME canonical string regardless of access path
+#   - Normalize case-only differences on Windows (cygpath -aw upper-cases the
+#     drive letter; on case-insensitive NTFS, readlink -f returns the on-disk
+#     form which is whatever the directory was created with).
 canonical_path() {
   local p="$1"
   local resolved=""
@@ -386,6 +471,22 @@ canonical_path() {
         # Round-trip: POSIX → Windows → POSIX forces canonical MSYS form
         resolved="$(cygpath -u "$(cygpath -aw "$p" 2>/dev/null)" 2>/dev/null || echo "")"
         if [ -n "$resolved" ]; then
+          # Resolve symlinks/junctions if GNU readlink is available (Git Bash ships it)
+          if command -v readlink >/dev/null 2>&1; then
+            local resolved2
+            resolved2="$(readlink -f "$resolved" 2>/dev/null || echo "")"
+            if [ -n "$resolved2" ]; then
+              resolved="$resolved2"
+            fi
+          fi
+          # Re-round-trip through cygpath in case readlink -f emitted Windows-style
+          if command -v cygpath >/dev/null 2>&1 && printf '%s' "$resolved" | grep -q '\\\\'; then
+            local resolved3
+            resolved3="$(cygpath -u "$resolved" 2>/dev/null || echo "")"
+            if [ -n "$resolved3" ]; then
+              resolved="$resolved3"
+            fi
+          fi
           printf '%s' "$resolved"
           return 0
         fi
@@ -435,8 +536,8 @@ else
   mkdir -p "$(dirname "$SETTINGS_FILE")" 2>/dev/null || true
 fi
 
-HOOK_SS_CMD="bash $TARGET/scripts/hooks/session-start.sh"
-HOOK_STOP_CMD="bash $TARGET/scripts/hooks/stop-handoff.sh"
+HOOK_SS_CMD="bash \"$TARGET/scripts/hooks/session-start.sh\""
+HOOK_STOP_CMD="bash \"$TARGET/scripts/hooks/stop-handoff.sh\""
 
 # Pre-compute canonical hook script paths
 HOOK_SS_SCRIPT_PATH="$(extract_script_path "$HOOK_SS_CMD")"

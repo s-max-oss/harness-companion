@@ -285,9 +285,19 @@ PYEOF
   # Source metadata — null for archive/tarball installs
   if [ "$IS_ARCHIVE" -eq 1 ]; then
     SOURCE_COMMIT="null"
+    SOURCE_COMMIT_SHORT="null"
+    SOURCE_TAG=""
+    SOURCE_TAG_JSON="null"
     SOURCE_ORIGIN="archive"
   else
     SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+    SOURCE_COMMIT_SHORT="$(printf '%s' "$SOURCE_COMMIT" | cut -c1-12)"
+    SOURCE_TAG="$(git -C "$REPO_ROOT" tag --points-at HEAD 2>/dev/null | head -1 || true)"
+    if [ -n "${SOURCE_TAG:-}" ]; then
+      SOURCE_TAG_JSON="\"$SOURCE_TAG\""
+    else
+      SOURCE_TAG_JSON="null"
+    fi
     SOURCE_ORIGIN="git"
   fi
 
@@ -295,6 +305,7 @@ PYEOF
   build_fresh_codex_receipt() {
     if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
       SOURCE_COMMIT="$SOURCE_COMMIT" \
+      SOURCE_TAG_JSON="$SOURCE_TAG_JSON" \
       INSTALLED_AT="$INSTALLED_AT" \
       CODEX_DIR="$CODEX_DIR" \
       INSTALLED_HOOKS_DIR="$INSTALLED_HOOKS_DIR" \
@@ -311,20 +322,24 @@ PYEOF
         --arg plugin_root "$INSTALLED_HOOKS_DIR" \
         --arg origin "$SOURCE_ORIGIN" \
         --arg status "code-complete-runtime-e2e-pending" \
+        --arg tag_json "$SOURCE_TAG_JSON" \
         '{
           adapter:$adapter, version:$version, schema_version:$schema,
           mode:$mode, status:$status,
           source:{
             repository:"harness-engineering",
             commit:(if $commit == "null" then null else $commit end),
+            tag:($tag_json | fromjson),
             origin:$origin
           },
           installed_at:$installed_at, installed_to:$installed_to,
           plugin_root:$plugin_root,
+          integrity:{algorithm:"sha256",files:{}},
           upgrade_history:[]
         }' > "$RECEIPT"
     elif command -v python3 >/dev/null 2>&1; then
       SOURCE_COMMIT="$SOURCE_COMMIT" \
+      SOURCE_TAG="$SOURCE_TAG" \
       INSTALLED_AT="$INSTALLED_AT" \
       CODEX_DIR="$CODEX_DIR" \
       INSTALLED_HOOKS_DIR="$INSTALLED_HOOKS_DIR" \
@@ -333,6 +348,7 @@ PYEOF
       python3 - <<'PYEOF'
 import json, os
 commit = os.environ["SOURCE_COMMIT"]
+source_tag = os.environ.get("SOURCE_TAG", "").strip()
 receipt = {
   "adapter": "codex",
   "version": os.environ["VERSION"],
@@ -342,11 +358,13 @@ receipt = {
   "source": {
     "repository": "harness-engineering",
     "commit": commit if commit != "null" else None,
+    "tag": source_tag if source_tag else None,
     "origin": os.environ["SOURCE_ORIGIN"],
   },
   "installed_at": os.environ["INSTALLED_AT"],
   "installed_to": os.environ["CODEX_DIR"],
   "plugin_root": os.environ["INSTALLED_HOOKS_DIR"],
+  "integrity": {"algorithm": "sha256", "files": {}},
   "upgrade_history": [],
 }
 with open(os.environ["CODEX_DIR"] + "/install-receipt.json", "w") as f:
@@ -361,6 +379,24 @@ PYEOF
     # Fresh install
     echo "  [receipt] Fresh install — writing new receipt"
     build_fresh_codex_receipt
+
+    # F7: Validate freshly-built receipt
+    if [ -f "$RECEIPT" ]; then
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        jq -e . "$RECEIPT" >/dev/null 2>&1 || {
+          echo "  [ERROR] generated receipt failed jq validation: $RECEIPT" >&2
+          exit 1
+        }
+      elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$RECEIPT" >/dev/null 2>&1 || {
+          echo "  [ERROR] generated receipt failed python3 validation: $RECEIPT" >&2
+          exit 1
+        }
+      fi
+    else
+      echo "  [ERROR] receipt file was not created: $RECEIPT" >&2
+      exit 1
+    fi
   else
     # Existing receipt: check version for upgrade
     OLD_VERSION=""
@@ -389,8 +425,10 @@ PYEOF
           --arg old_ver "$OLD_VERSION" \
           --arg new_ver "$VERSION" \
           --arg at "$INSTALLED_AT" \
+          --arg tag_json "$SOURCE_TAG_JSON" \
           '.version = $version
            | .source.commit = (if $commit == "null" then null else $commit end)
+           | .source.tag = ($tag_json | fromjson)
            | .source.origin = $origin
            | .installed_at = $ts
            | .upgrade_history += [{from: $old_ver, to: $new_ver, at: $at}]' \
@@ -401,6 +439,7 @@ PYEOF
         VERSION="$VERSION" \
         INSTALLED_AT="$INSTALLED_AT" \
         SOURCE_COMMIT="$SOURCE_COMMIT" \
+        SOURCE_TAG="$SOURCE_TAG" \
         SOURCE_ORIGIN="$SOURCE_ORIGIN" \
         RECEIPT="$RECEIPT" \
         python3 - <<'PYEOF'
@@ -409,8 +448,10 @@ receipt_file = os.environ["RECEIPT"]
 with open(receipt_file) as f:
     r = json.load(f)
 commit = os.environ["SOURCE_COMMIT"]
+source_tag = os.environ.get("SOURCE_TAG", "").strip()
 r["version"] = os.environ["VERSION"]
 r["source"]["commit"] = commit if commit != "null" else None
+r["source"]["tag"] = source_tag if source_tag else None
 r["source"]["origin"] = os.environ["SOURCE_ORIGIN"]
 r["installed_at"] = os.environ["INSTALLED_AT"]
 r.setdefault("upgrade_history", []).append({
@@ -431,8 +472,43 @@ PYEOF
           && mv "$RECEIPT.tmp" "$RECEIPT"
       fi
     fi
+
+    # F7: Validate receipt is still valid JSON after mutation
+    if [ -f "$RECEIPT" ]; then
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        jq -e . "$RECEIPT" >/dev/null 2>&1 || {
+          echo "  [ERROR] receipt became invalid JSON after upgrade mutation: $RECEIPT" >&2
+          exit 1
+        }
+      elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$RECEIPT" >/dev/null 2>&1 || {
+          echo "  [ERROR] receipt became invalid JSON after upgrade mutation: $RECEIPT" >&2
+          exit 1
+        }
+      fi
+    fi
   fi
   echo "  receipt written: $RECEIPT"
+
+  # F7: Final receipt sanity check — must contain required fields
+  if [ -f "$RECEIPT" ]; then
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      if ! jq -e '.version and .adapter and .installed_at and .installed_to and .integrity and .upgrade_history and .source' "$RECEIPT" >/dev/null 2>&1; then
+        echo "  [ERROR] receipt missing required fields (version, adapter, installed_at, installed_to, integrity, upgrade_history, source)" >&2
+        exit 1
+      fi
+    elif command -v python3 >/dev/null 2>&1; then
+      if ! python3 -c "
+import json, sys
+r = json.load(open(sys.argv[1]))
+for k in ('version','adapter','installed_at','installed_to','integrity','upgrade_history','source'):
+    assert k in r, f'missing field: {k}'
+" "$RECEIPT" >/dev/null 2>&1; then
+        echo "  [ERROR] receipt missing required fields" >&2
+        exit 1
+      fi
+    fi
+  fi
 
   echo ""
   echo "=== Repo-local install complete (Phase 5b) ==="

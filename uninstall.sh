@@ -11,7 +11,8 @@
 #
 # Adapter flags (passed through):
 #   --user:    Uninstall from user global location (default)
-#   --project: Uninstall from project-local location
+#   --project: Uninstall from project-local location (Claude Code only;
+#              for Codex, --project maps to --repo $(pwd))
 
 set -euo pipefail
 
@@ -19,7 +20,9 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 ADAPTER="claude"
 MODE="--user"
+EXTRA_CODEX_ARGS=()  # extra positional args for Codex uninstall (e.g. --repo target)
 
+# Parse: collect extras as we see --repo <path> for codex adapter
 for arg in "$@"; do
   case "$arg" in
     --codex)  ADAPTER="codex" ;;
@@ -35,6 +38,10 @@ for arg in "$@"; do
       echo "  --all      Uninstall both adapters"
       echo "  --user     User global install (default)"
       echo "  --project  Project-local install"
+      echo ""
+      echo "Note: Codex adapter uses different flags internally:"
+      echo "  bash adapters/codex/uninstall.sh --repo [path]"
+      echo "  bash adapters/codex/uninstall.sh --user"
       exit 0
       ;;
     *)
@@ -47,17 +54,30 @@ done
 echo "=== harness-companion uninstall ==="
 echo ""
 
+# Map MODE → adapter-specific flags
+# Claude Code: --user / --project
+# Codex: --user or --repo $(pwd) for project mode
+claude_args=("$MODE")
+case "$MODE" in
+  --project)
+    codex_args=("--repo" "$(pwd)")
+    ;;
+  --user)
+    codex_args=("--user")
+    ;;
+esac
+
 RC=0
 case "$ADAPTER" in
   claude)
-    bash "$REPO_ROOT/adapters/claude-code/uninstall.sh" "$MODE" || RC=$?
+    bash "$REPO_ROOT/adapters/claude-code/uninstall.sh" "${claude_args[@]}" || RC=$?
     ;;
   codex)
-    bash "$REPO_ROOT/adapters/codex/uninstall.sh" "$MODE" || RC=$?
+    bash "$REPO_ROOT/adapters/codex/uninstall.sh" "${codex_args[@]}" || RC=$?
     ;;
   all)
-    bash "$REPO_ROOT/adapters/claude-code/uninstall.sh" "$MODE" || RC=$?
-    bash "$REPO_ROOT/adapters/codex/uninstall.sh" "$MODE" || RC=$?
+    bash "$REPO_ROOT/adapters/claude-code/uninstall.sh" "${claude_args[@]}" || RC=$?
+    bash "$REPO_ROOT/adapters/codex/uninstall.sh" "${codex_args[@]}" || RC=$?
     ;;
 esac
 

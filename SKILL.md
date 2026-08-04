@@ -1,217 +1,177 @@
 ---
 name: harness-companion
-description: Use when working on projects that have harness engineering files (feature_list.json, AGENTS.md, init.sh), when the user wants to set up or audit harness practices, when the user asks about harness status, feature tracking, verification, session handoff, or harness initialization, or when the user wants to check if their project follows harness engineering discipline. Also use when the user says "harness" in any context related to agent engineering workflows.
+description: Use when working on projects that have harness engineering files (feature_list.json, AGENTS.md, init.sh) — when the user wants to set up or audit Harness Engineering practices, drive an evidence-backed feature pipeline, surface stale evidence or WIP violations at session start, hand off cleanly between sessions, or run the 7-subsystem health / 5-axis audit dashboard. v2 splits the runtime into core/ (business semantics) and adapters/ (host protocol mapping for Claude Code and Codex), with v1 compat wrappers preserved.
 ---
 
 # Harness Companion
 
-## Overview
+A Core/Adapter refactor of the v1.1.2 Harness Engineering skill. The runtime now lives in two layers:
 
-Harness Companion is the operational assistant for Harness Engineering's 7 subsystems. It helps agents and developers initialize, inspect, manage, verify, hand off, and audit harness files — turning the 13-lesson course knowledge into executable workflows.
+- **`core/`** — business semantics only. Plain-text status composition, WIP=1 detection, passing-without-evidence detection, stale-evidence comparison against SessionStart baseline, handoff warnings, and the 7-subsystem × 5-axis audit dashboard. No protocol awareness.
+- **`adapters/`** — host protocol mapping. Reads stdin, parses cwd, calls core, JSON-encodes, wraps in the host envelope, fail-open on error. Two adapters ship today: Claude Code (default) and Codex.
 
-**Core principle**: Harness files are the project's "agent OS." Harness Companion keeps that OS healthy.
+## When to use
 
-## When to Use
+- The user is in a project that has harness files (`feature_list.json`, `AGENTS.md`, `init.sh`)
+- They want to bootstrap / audit / drive / verify / hand off a Harness Engineering workflow
+- They need to interpret the 7-subsystem health dashboard or the 5-axis audit
+- They want to surface stale evidence or WIP violations at session boundaries
+- They want Codex to follow the same workflow as Claude Code
 
-Trigger this skill when:
-- The user asks about harness status, health, or audit
-- The user wants to initialize harness files in a new project
-- The user needs to manage `feature_list.json` (add, list, update features)
-- The user wants to verify a feature is truly complete (not just claimed)
-- The user is about to end a session and needs handoff
-- The user wants a comprehensive diagnosis of harness maturity
-- The project has `feature_list.json` and the user mentions any harness concept
+## When NOT to use
 
-**Do NOT use when**:
-- The project has no harness files and the user doesn't want to set them up
-- The user is asking about non-harness topics (general git, npm, etc.)
+- Projects without any harness files (the skill will see no `feature_list.json` and emit `suppressOutput`)
+- Pure refactor / business-logic tasks (the skill is a meta-tool about the workflow, not the work)
 
-## Quick Reference
+## Commands
 
-| Command | Trigger | What It Does |
-|---------|---------|--------------|
-| `/harness:init` | "initialize harness", "set up harness files" | Generate harness scaffold from templates |
-| `/harness:status` | "harness status", "how is harness health" | Dashboard of file existence, feature progress, WIP state |
-| `/harness:feature` | "feature list", "add feature", "update status" | Read/write feature_list.json |
-| `/harness:verify` | "verify feature", "is it really done" | Run check→build→test chain, fill evidence |
-| `/harness:handoff` | "handoff", "end session", "wrap up" | Generate handoff doc, run checklist verification |
-| `/harness:audit` | "audit harness", "diagnose harness" | Score all 7 subsystems, rank improvements |
+| Command | Purpose |
+|---------|---------|
+| `/harness:init` | Bootstrap harness files in a project (AGENTS.md, CLAUDE.md, init.sh, feature_list.json). **Canonical impl** in `scripts/harness-init.sh`. |
+| `/harness:status` | Compact 7-subsystem health dashboard. Cheap to run, run often. |
+| `/harness:feature <id> <status> [evidence...]` | Update a feature in `feature_list.json` with a structured evidence record |
+| `/harness:verify` | Run the verification chain (config-driven or `checklist.sh`) and capture evidence |
+| `/harness:handoff` | Render handoff warnings (uncommitted files, dangling `in_progress`, passing-without-evidence, stale evidence, checklist reminder). **Canonical impl** in `scripts/harness-handoff.sh`. |
+| `/harness:audit` | Detailed 5-axis scoring per subsystem. Total out of 21. Verbose mode via `HARNESS_VERBOSE=1`. |
 
-## Workflows
+## Architecture (v2)
 
-### /harness:init — Initialize Harness Scaffold
-
-**When**: New project needs harness files, or existing project is missing core harness files.
-
-**Process**:
-1. Detect project type (Node/TS, Python, generic) by reading `package.json` or similar
-2. Ask which harness files to generate (minimum: AGENTS.md + CLAUDE.md + feature_list.json + init.sh)
-3. Copy templates from `templates/` to project root, filling in project-specific placeholders
-4. Make scripts executable (`chmod +x init.sh`)
-5. Run `bash init.sh` to verify the scaffold works
-6. Report what was created and what the user should customize
-
-**Template mapping**:
-- `AGENTS.md` → project root
-- `CLAUDE.md` → project root
-- `feature_list.json` → project root (user fills in features)
-- `init.sh` → project root (adapt commands to project)
-- `claude-progress.md` → project root (optional, for multi-session projects)
-- `session-handoff.md` → project root (optional)
-- `clean-state-checklist.md` → project root (optional)
-- `checklist.sh` → project root (optional)
-
-**Minimum viable harness** (4 files): AGENTS.md, CLAUDE.md, feature_list.json, init.sh
-
-### /harness:status — Harness Health Dashboard
-
-**When**: User wants to see current harness state at a glance.
-
-**Process**:
-1. Scan for harness files in project root — report Present/Missing/Stale for each
-2. If `feature_list.json` exists:
-   - Count features by status (not_started, in_progress, blocked, passing)
-   - Detect WIP=1 violations (>1 feature in_progress)
-   - Detect unverified passing features (status=passing but evidence is empty)
-3. If `claude-progress.md` exists: report last session date, current blocker, next step
-4. If `agent.log` exists: report last action timestamp, check for CLOSE marker
-5. Output a compact dashboard (not raw JSON — a formatted summary)
-
-**Output format**:
 ```
-Harness Health: project-name
-─────────────────────────────
-Knowledge:   AGENTS.md ✓  CLAUDE.md ✓
-Environment: init.sh ✓ (last run: 2026-07-27)
-Progress:    claude-progress.md ✓ (2 sessions logged)
-Scope:       feature_list.json ✓ (3/8 passing, WIP=1 ✓)
-Verification: checklist.sh ✓
-Observability: agent.log ✓ (last: 2026-07-27T10:00:00Z, CLOSE ✓)
-Handoff:     session-handoff.md ✓  clean-state-checklist.md ✓
-
-⚠ Warnings:
-  - feature "chat-login" is in_progress since 2026-07-25 (2 days stale)
+harness-companion/
+├── core/                              # Business semantics — no protocol awareness
+│   ├── harness-{verify,feature,status,audit}.sh   # CLI entrypoints
+│   └── lib/                           # Shared helpers (json-helpers, baseline, evidence, status-renderer, ...)
+├── adapters/
+│   ├── claude-code/                   # Claude Code protocol mapping (Phase 4)
+│   │   ├── install.sh
+│   │   └── hooks/
+│   │       ├── session-start.sh       # SessionStart → status text via core
+│   │       └── stop-handoff.sh        # Stop → handoff warnings via core
+│   └── codex/                         # Codex protocol mapping (Phase 5b)
+│       ├── adapter.conf               # protocol_version=1
+│       ├── install.sh                 # 3 modes: plugin / --repo / --user
+│       ├── uninstall.sh
+│       ├── UNSUPPORTED.md
+│       ├── hooks/                     # session-start, stop-handoff, pre-tool-use
+│       └── templates/
+├── .codex-plugin/
+│   ├── plugin.json                    # Codex plugin manifest (v 2.0.0-rc.1)
+│   ├── README.md
+│   └── skills/                        # Codex-discoverable skill bundle
+├── hooks/
+│   ├── hooks.json                     # Codex event-keyed hook registry
+│   └── README.md
+├── scripts/                           # v1 compat wrappers (≤5 lines each)
+│   ├── harness-init.sh                # ← canonical impl (4-file scaffold)
+│   ├── harness-handoff.sh             # ← canonical impl (generate handoff + checklist)
+│   ├── harness-{verify,feature,status,audit}.sh   # → ../core/<name>.sh
+│   └── hooks/{session-start,stop-handoff}.sh      # → ../../adapters/claude-code/hooks/<name>.sh
+├── templates/                         # 8 file templates (AGENTS, CLAUDE, feature_list, init, ...)
+├── references/                        # harness-files.md, subsystems-mapping.md
+├── tests/                             # Per-file runnable tests
+│   ├── core/                          # Pure-bash unit + integration
+│   ├── golden/                        # Snapshot fixtures
+│   └── adapters/                      # Claude Code + Codex contract tests
+└── SKILL.md                           # This file
 ```
 
-### /harness:feature — Manage Feature List
+### Boundaries (Design v5 §6.2)
 
-**When**: User wants to list, add, or update features in `feature_list.json`.
+| Concern | Owner |
+|---------|-------|
+| Status text rendering (file checks, feature stats, WIP=1, passing-without-evidence) | `core/lib/status-renderer.sh` |
+| Handoff warnings (uncommitted files, dangling `in_progress`, stale evidence, checklist reminder) | `core/lib/status-renderer.sh` |
+| SessionStart baseline persistence | `core/lib/baseline.sh` |
+| Stale-evidence comparison vs baseline | `core/lib/status-renderer.sh` |
+| Claude Code JSON envelope wrapping (`hookSpecificOutput.additionalContext`, `systemMessage`) | `adapters/claude-code/hooks/*.sh` |
+| Codex hook command construction (`hooks.json`, `${PLUGIN_ROOT}` paths) | `adapters/codex/` |
+| Fail-open trap (`{"continue":true,"suppressOutput":true}`) | each adapter's hook script |
 
-**Sub-commands** (inferred from user's language):
+**Hard constraint:** adapters do host protocol mapping only. Business semantics stay in `core/`. Adapters MUST NOT contain `.status=="passing"` filters, WIP detection, evidence comparison, or `fingerprint` logic — those are checked by the contract tests.
 
-**List features**:
-- Read `feature_list.json` and display a table: id, title, status, priority
-- Highlight current in_progress feature
-- Show completion percentage
+## v1 compatibility
 
-**Add feature**:
-- Ask for: id, title, area, user_visible_behavior, priority
-- Auto-fill: status="not_started", evidence=[], verification=[]
-- Validate JSON after writing
+v1.1.2 callers keep working unchanged. The `scripts/harness-{verify,feature,status,audit}.sh` and `scripts/hooks/{session-start,stop-handoff}.sh` wrappers are 4-line forwarders:
 
-**Update status**:
-- Show current features, ask which one
-- Validate: cannot mark as `passing` without evidence (warn if evidence is empty)
-- Validate: cannot have >1 `in_progress` (warn if WIP=1 rule would be violated)
-- Update `last_updated` timestamp
-
-**Key rules enforced**:
-- WIP=1: at most one feature `in_progress`
-- Evidence required: `passing` must have non-empty evidence
-- Timestamp updated on every change
-
-### /harness:verify — Run Verification Chain
-
-**When**: User wants to verify a feature is truly complete, not just claimed.
-
-**Process**:
-1. Identify which feature to verify (ask if not specified)
-2. Run the verification chain:
-   a. `npm run check` (or `npx tsc --noEmit`) — typecheck
-   b. `npm run build` — build
-   c. `npm test` — test suite
-3. Capture output and exit codes from each step
-4. If all pass: auto-fill the feature's `evidence` field with command outputs and timestamps
-5. If any fail: report exactly what failed, do NOT update feature status
-6. Update `feature_list.json` status to `passing` only if all steps pass
-
-**Evidence format** written to feature_list.json:
-```
-"evidence": [
-  "2026-07-27: typecheck passed (0 errors)",
-  "2026-07-27: build succeeded (exit 0)",
-  "2026-07-27: tests passed (42/42)"
-]
+```bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec bash "$SCRIPT_DIR/../core/$(basename "$0")" "$@"
 ```
 
-### /harness:handoff — Session Handoff
+`scripts/harness-init.sh` and `scripts/harness-handoff.sh` are NOT wrappers — they are the **canonical implementations** (4-file scaffold generator and handoff doc generator respectively). v2 core does not re-implement them.
 
-**When**: User is ending a session and wants clean handoff.
+Identity is guaranteed by the contract test (`tests/adapters/test-claude-code-contract.sh` G3) — byte-for-byte equal output between direct core invocation and wrapper invocation.
 
-**Process**:
-1. Run `checklist.sh` if it exists; otherwise run equivalent checks manually:
-   - Build verification (typecheck + build)
-   - Feature status sync (detect dangling in_progress)
-   - Progress documentation (claude-progress.md exists and updated)
-   - Change record (uncommitted changes?)
-   - Agent log close marker
-2. Generate/update `session-handoff.md`:
-   - Fill "Verified Now" with command results
-   - Fill "Changed This Session" from git diff
-   - Fill "Next Best Step" from feature_list.json pending items
-3. If `claude-progress.md` exists: append a new session log entry
-4. Report any items that need human attention before closing
+## Hook envelopes
 
-**Output**: A clear summary of what's clean and what needs attention before the session ends.
+### Claude Code
 
-### /harness:audit — Comprehensive Harness Diagnosis
-
-**When**: User wants a deep assessment of harness maturity across all 7 subsystems.
-
-**Process**:
-1. For each of the 7 subsystems, check file existence, content completeness, and freshness
-2. Score each subsystem 0-3 (see `references/subsystems-mapping.md` for rubric)
-3. Compute total score (max 21)
-4. Rank improvements by impact (what would raise the score most with least effort)
-
-**Output format**:
-```
-Harness Audit: project-name
-─────────────────────────────
-Knowledge:    2/3  (AGENTS.md ✓, CLAUDE.md ✓, docs/ ✗)
-Environment:  3/3  (init.sh covers install+check+build+audit)
-Progress:     1/3  (claude-progress.md exists, last updated 5 days ago)
-Scope:        2/3  (feature_list.json ✓, WIP=1 enforced, evidence incomplete)
-Verification: 2/3  (tests exist, checklist.sh ✓, no full chain automation)
-Observability:1/3  (agent.log ✓, no structured logging in services)
-Handoff:      1/3  (session-handoff.md ✓, no clean-state-checklist.md)
-─────────────────────────────
-Total: 12/21 (57%)
-
-Top improvements (by impact):
-  1. [Progress] Update claude-progress.md — 5 min, +1 point
-  2. [Observability] Add service-level structured logging — 30 min, +1 point
-  3. [Handoff] Create clean-state-checklist.md from template — 5 min, +1 point
+**SessionStart:**
+```json
+{"continue":true,"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"<status text as JSON string>"}}
 ```
 
-## Common Mistakes
+**Stop (with warnings):**
+```json
+{"continue":true,"systemMessage":"<handoff warnings as JSON string>"}
+```
 
-| Mistake | Why It Happens | Fix |
-|---------|---------------|-----|
-| Skipping init.sh at session start | Agent is eager to start coding | SessionStart hook auto-reminds; run `bash init.sh` first |
-| Multiple features in_progress | "This one is almost done, I'll start the next" | feature_list.json WIP=1 rule; `/harness:status` detects violations |
-| Marking passing without evidence | Agent is confident it works | `/harness:verify` enforces evidence-before-status |
-| Not updating claude-progress.md | "I'll do it next session" | Stop hook auto-reminds; `/harness:handoff` generates it |
-| Giant AGENTS.md | Everything seems important | `/harness:audit` flags files > 500 lines; split into docs/ |
-| Agent.log without CLOSE marker | Session ended abruptly | Stop hook writes CLOSE; `/harness:status` detects missing CLOSE |
+**Stop (no warnings) — fail-open:**
+```json
+{"continue":true,"suppressOutput":true}
+```
 
-## Hook Integration
+### Codex
 
-This skill works alongside two automatic hooks (configured in `~/.claude/settings.json`):
+Codex hooks are registered via `.codex/hooks.json` (or `~/.codex/config.toml` in `--user` mode). Three events:
 
-| Hook | When | What |
-|------|------|------|
-| SessionStart | Every new/resumed session | Checks harness file health, injects status into context |
-| Stop | Every session end | Reminds about uncommitted changes, feature sync, checklist |
+| Event | Adapter action |
+|-------|----------------|
+| `SessionStart` | Same status injection as Claude Code, mapped to Codex `hookSpecificOutput.additionalContext` |
+| `Stop` | Same handoff warnings, mapped to Codex `systemMessage` |
+| `PreToolUse` | Permissive fail-open — `policy not enabled` (Phase 5b) |
 
-If hooks are not yet configured, run the install script or ask the user to set them up.
+## Installation
+
+```sh
+# Top-level dispatcher (default = Claude Code adapter)
+bash install.sh                                       # global, Claude Code
+bash install.sh --project                             # project-local, Claude Code
+bash install.sh --codex                               # Codex adapter (--repo $(pwd))
+bash install.sh --all                                 # both adapters
+bash install.sh --symlink-core                        # symlink core/ (no-op on Windows)
+
+# Direct adapter invocation
+bash adapters/claude-code/install.sh --user
+bash adapters/claude-code/install.sh --project --symlink-core
+bash adapters/codex/install.sh --repo ~/my-project
+bash adapters/codex/install.sh --user
+```
+
+The install script:
+1. Copies `core/`, `templates/`, `references/`, `adapters/<x>/`, `.codex-plugin/` (Codex only), `scripts/` v1 compat wrappers
+2. Stamps `install-receipt.json` with `installed_at`, source commit, and SHA-256 integrity hashes
+3. Registers `SessionStart` and `Stop` hooks in the appropriate settings file:
+   - Claude Code `--user` → `~/.claude/settings.json`
+   - Claude Code `--project` → `<project>/.claude/settings.json`
+   - Existing `hooks` block is **merged** (existing entries preserved)
+   - A unique timestamped backup of `settings.json` is written before any modification
+   - Repeated installs are idempotent (no duplicate hook entries)
+
+After install, restart Claude Code (or Codex) to load hooks.
+
+## See also
+
+- `core/lib/status-renderer.sh` — reusable plain-text rendering
+- `core/lib/baseline.sh` — SessionStart baseline persistence
+- `core/lib/evidence.sh` — evidence record validation
+- `core/lib/json-helpers.sh` — stdin JSON parsing helpers
+- `tests/adapters/test-claude-code-contract.sh` — Claude Code adapter contract tests (G1–G7)
+- `tests/adapters/test-codex-contract.sh` — Codex adapter contract tests
+- `tests/adapters/test-codex-install-modes.sh` — Codex install mode tests
+- `tests/migration/test-v1-compat.sh` — v1-compat migration tests (Phase 2)
+- `tests/core/` — core unit + integration tests
+
+## Repository
+
+https://github.com/s-max-oss/harness-companion

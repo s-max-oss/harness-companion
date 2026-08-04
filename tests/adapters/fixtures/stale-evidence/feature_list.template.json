@@ -1,0 +1,22 @@
+{
+  "version": "2",
+  "schema_version": "2.0.0",
+  "revision": 0,
+  "last_updated": "2026-08-01",
+  "features": [
+    {
+      "id": "feat-stale-001",
+      "title": "Feature with stale-fingerprint passing evidence (v2)",
+      "status": "passing",
+      "evidence_associations": [],
+      "legacy_audit_evidence": []
+    },
+    {
+      "id": "feat-stale-002",
+      "title": "Feature with matching passing evidence (NOT stale)",
+      "status": "passing",
+      "evidence_associations": [],
+      "legacy_audit_evidence": []
+    }
+  ]
+}

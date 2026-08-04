@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://harness-engineering/schemas/harness-config.schema.json",
+  "title": "harness-companion v2 config",
+  "description": "Schema for .harness/config.json. capability_level is NOT a user field — it is computed by core at runtime (design Errata E1).",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["project_type", "verification"],
+  "properties": {
+    "project_type": {
+      "type": "string",
+      "enum": ["node", "python", "rust", "go", "docs", "generic"],
+      "description": "Project type. Used by init.sh detection; affects which verification commands are suggested."
+    },
+    "verification_scope": {
+      "type": "string",
+      "description": "Root-relative path constraining the workspace fingerprint scope (no-git path only). Default: entire project."
+    },
+    "fingerprint_exclude": {
+      "type": "array",
+      "description": "User-configurable glob patterns to exclude from workspace fingerprint. Built-in excludes (.harness/, feature_list.json) cannot be overridden (design §11.0).",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "default": ["node_modules/", ".git/", "__pycache__/", "*.pyc", ".DS_Store", "Thumbs.db"]
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commands"],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "description": "Verification commands. Empty array → no_checks (L1 docs-only project).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "command", "required_for_passing"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]*$",
+                "description": "Stable command identifier. Lowercase letters, digits, dashes, underscores."
+              },
+              "command": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string" },
+                "description": "Command argv array (e.g. [\"npx\", \"tsc\", \"--noEmit\"])"
+              },
+              "required_for_passing": {
+                "type": "boolean",
+                "description": "If true, this command must pass for the feature to be eligible for passing. Optional commands execute but don't gate eligibility."
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3600,
+                "default": 300,
+                "description": "Per-command timeout in seconds. Default 300 (5 minutes)."
+              },
+              "applies_when": {
+                "type": "object",
+                "description": "Optional predicate. The command runs iff any listed pattern matches an entry under the project root. If absent, command always applies. has_files entries are bash shell glob patterns relative to the project root (e.g. \"package.json\", \"src/**/*.py\", \"*.lock\"). Patterns without glob metacharacters (* ? [) match exact paths; patterns with metacharacters match any file the shell would expand them to.",
+                "additionalProperties": false,
+                "properties": {
+                  "has_files": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                  }
+                }
+              },
+              "command_origin": {
+                "type": "string",
+                "enum": ["configured", "detected"],
+                "default": "configured",
+                "description": "configured = user-defined; detected = scaffolded from project-type heuristics."
+              },
+              "confirmation": {
+                "type": "string",
+                "enum": ["not_required", "pending", "confirmed", "rejected"],
+                "default": "not_required",
+                "description": "Whether user has confirmed this command. configured→not_required, detected→pending until reviewed. Note: configured+pending and configured+rejected are INVALID combinations (see not.confirmation_combination)."
+              }
+            },
+            "allOf": [
+              {
+                "description": "configured+pending and configured+rejected are INVALID: configured commands don't go through a user review state; only detected commands use pending/confirmed/rejected to gate review.",
+                "if": {
+                  "properties": {
+                    "command_origin": { "const": "configured" }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "confirmation": { "enum": ["not_required", "confirmed"] }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "not": {
+    "description": "Reject capability_level as a user field. capability_level is COMPUTED by core (design Errata E1).",
+    "required": ["capability_level"]
+  }
+}

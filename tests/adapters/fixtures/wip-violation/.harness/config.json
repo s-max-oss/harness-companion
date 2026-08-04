@@ -1,0 +1,15 @@
+{
+  "project_type": "generic",
+  "verification": {
+    "commands": [
+      {
+        "id": "lint",
+        "command": ["bash", "-c", "echo lint"],
+        "command_origin": "configured",
+        "confirmation": "not_required",
+        "required_for_passing": true,
+        "timeout_seconds": 30
+      }
+    ]
+  }
+}

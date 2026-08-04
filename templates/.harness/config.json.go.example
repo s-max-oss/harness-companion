@@ -1,0 +1,32 @@
+{
+  "project_type": "go",
+  "fingerprint_exclude": [".git/", "vendor/", ".DS_Store"],
+  "verification": {
+    "commands": [
+      {
+        "id": "vet",
+        "command": ["go", "vet", "./..."],
+        "required_for_passing": true,
+        "timeout_seconds": 120,
+        "command_origin": "configured",
+        "confirmation": "not_required"
+      },
+      {
+        "id": "build",
+        "command": ["go", "build", "./..."],
+        "required_for_passing": true,
+        "timeout_seconds": 600,
+        "command_origin": "configured",
+        "confirmation": "not_required"
+      },
+      {
+        "id": "unit-test",
+        "command": ["go", "test", "./..."],
+        "required_for_passing": true,
+        "timeout_seconds": 600,
+        "command_origin": "configured",
+        "confirmation": "not_required"
+      }
+    ]
+  }
+}

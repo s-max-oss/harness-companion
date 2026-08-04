@@ -1,0 +1,15 @@
+{
+  "version": "2",
+  "schema_version": "2.0.0",
+  "revision": 0,
+  "last_updated": "2026-08-01",
+  "features": [
+    {
+      "id": "feat-clean-001",
+      "title": "Sample feature in passing state (v2 canonical)",
+      "status": "passing",
+      "evidence_associations": [],
+      "legacy_audit_evidence": []
+    }
+  ]
+}

@@ -1,48 +1,86 @@
 #!/bin/bash
-# harness-init.sh — Generate harness scaffold from templates
+# harness-init.sh — Unified v1+v2 project scaffold generator
 #
-# Usage: bash harness-init.sh [project-dir] [--minimal|--full]
+# Phase 2 merge: combines v1 (AGENTS.md, CLAUDE.md, project env init.sh) and
+# v2 (.harness/config.json + project-type detection, .harness/logs/runs/, v2
+# feature_list.json with revision: 1, .gitignore updates) into one entry point.
 #
-# Copies templates from the skill's templates/ directory
-# to the target project, filling in project-specific placeholders.
+# Usage:
+#   bash harness-init.sh [project_dir] [--minimal|--full] [--host=claude|codex] [--force-config]
+#
+# Output (in target project):
+#   AGENTS.md                              (always)
+#   CLAUDE.md                              (--host=claude, default) OR
+#   codex-progress.md                      (--host=codex)
+#   init.sh                                (project environment helper, executable)
+#   .harness/config.json                   (project-type specific example)
+#   .harness/logs/runs/                    (run-log directory)
+#   feature_list.json                      (v2 schema, revision: 1)
+#   .gitignore                             (added .harness/logs/ etc.)
+#
+# --full adds: claude-progress.md, session-handoff.md, clean-state-checklist.md, checklist.sh
 
 set -euo pipefail
 
-# Resolve script directory
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TEMPLATES_DIR="$SCRIPT_DIR/../templates"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TEMPLATES_DIR="$ROOT_DIR/templates"
+V2_INIT="$TEMPLATES_DIR/init.sh"
 
-TARGET="${1:-.}"
-MODE="${2:---minimal}"
+# ---- Argument parsing -------------------------------------------------------
+TARGET=""
+MODE="--minimal"
+HOST="claude"
+FORCE_CONFIG="false"
 
+for arg in "$@"; do
+  case "$arg" in
+    --minimal|--full) MODE="$arg" ;;
+    --host=*)         HOST="${arg#--host=}" ;;
+    --force-config)   FORCE_CONFIG="true" ;;
+    --help|-h)
+      sed -n '2,30p' "$0"
+      exit 0
+      ;;
+    -*)
+      echo "harness-init.sh: unknown flag '$arg'" >&2
+      exit 2
+      ;;
+    *)
+      if [ -z "$TARGET" ]; then
+        TARGET="$arg"
+      else
+        echo "harness-init.sh: multiple target dirs not supported: '$TARGET' and '$arg'" >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+TARGET="${TARGET:-.}"
 if [ ! -d "$TARGET" ]; then
-  echo "Error: Target directory '$TARGET' does not exist."
+  echo "harness-init.sh: target directory '$TARGET' does not exist" >&2
   exit 1
 fi
+TARGET="$(cd "$TARGET" && pwd)"
+PROJECT_NAME="$(basename "$TARGET")"
 
-cd "$TARGET"
-PROJECT_NAME=$(basename "$PWD")
-
-echo "=== Harness Init: $PROJECT_NAME ==="
+echo "=== Harness Init (v1+v2 merge): $PROJECT_NAME ==="
+echo "Mode:  $MODE"
+echo "Host:  $HOST"
 echo ""
 
-# --- Helper: copy template with placeholder replacement ----------------------
+# ---- helper: copy template with placeholder replacement ---------------------
 copy_template() {
-  local src="$1"
-  local dest="$2"
-  local description="$3"
-
+  local src="$1" dest="$2" description="$3"
   if [ -f "$dest" ]; then
     echo "  SKIP: $dest already exists"
     return
   fi
-
   if [ ! -f "$src" ]; then
     echo "  MISSING TEMPLATE: $src"
     return
   fi
-
-  # Copy and replace placeholders
   sed -e "s/replace-with-project-name/$PROJECT_NAME/g" \
       -e "s/YYYY-MM-DD/$(date +%Y-%m-%d 2>/dev/null || date +%F)/g" \
       -e "s/\[Replace with a short paragraph describing what this project is and its key characteristics.\]/[Describe your project here.]/g" \
@@ -51,50 +89,76 @@ copy_template() {
       -e "s/\[Add your project's key rules here\]//g" \
       -e "s/\[Describe the architectural layers of your project. For Electron apps:\]//g" \
       "$src" > "$dest"
-
   echo "  OK: $dest ($description)"
 }
 
-# --- Minimal harness (4 files) -----------------------------------------------
-echo "[Minimal Harness — 4 files]"
+# ---- Phase C: v2 scaffold (.harness/*, v2 feature_list.json, .gitignore) ----
+# Run BEFORE Phase A so that project-type detection (which inspects *.md,
+# package.json, etc.) reflects the user's true target state — not the AGENTS.md
+# or CLAUDE.md we are about to scaffold.
+echo ""
+echo "[Phase C — v2 .harness scaffold (run first so detection reflects target state)]"
 
-copy_template "$TEMPLATES_DIR/AGENTS.md"   "AGENTS.md"   "Agent operating manual"
-copy_template "$TEMPLATES_DIR/CLAUDE.md"  "CLAUDE.md"  "Claude Code quick reference"
-copy_template "$TEMPLATES_DIR/feature_list.json" "feature_list.json" "Feature registry"
-copy_template "$TEMPLATES_DIR/init.sh"   "init.sh"   "Environment verification"
+if [ ! -f "$V2_INIT" ]; then
+  echo "  ERROR: v2 init.sh template missing at $V2_INIT" >&2
+  exit 1
+fi
 
-# Make init.sh executable
-if [ -f "init.sh" ]; then
-  chmod +x init.sh 2>/dev/null || true
+V2_FLAGS=()
+[ "$FORCE_CONFIG" = "true" ] && V2_FLAGS+=(--force-config)
+bash "$V2_INIT" "$TARGET" "${V2_FLAGS[@]}"
+
+# ---- Phase A: v1 scaffold (knowledge + project env init.sh) ----------------
+echo ""
+echo "[Phase A — v1 knowledge + project env scaffold]"
+
+copy_template "$TEMPLATES_DIR/AGENTS.md" "$TARGET/AGENTS.md" "Agent operating manual (universal entry)"
+
+if [ "$HOST" = "codex" ]; then
+  copy_template "$TEMPLATES_DIR/claude-progress.md" "$TARGET/codex-progress.md" "Codex progress log"
+else
+  copy_template "$TEMPLATES_DIR/CLAUDE.md" "$TARGET/CLAUDE.md" "Claude Code quick reference"
+fi
+
+# Project environment helper init.sh — comes from templates/env-init.sh
+# (different from the v2 templates/init.sh scaffold generator — this is the
+# per-project env verification script that v1 users expect).
+copy_template "$TEMPLATES_DIR/env-init.sh" "$TARGET/init.sh" "Project environment helper (chmod +x below)"
+if [ -f "$TARGET/init.sh" ]; then
+  chmod +x "$TARGET/init.sh" 2>/dev/null || true
   echo "  OK: init.sh made executable"
 fi
 
-echo ""
-
-# --- Full harness (additional files) -----------------------------------------
+# ---- Phase B: --full extra files --------------------------------------------
 if [ "$MODE" = "--full" ]; then
-  echo "[Extended Harness — +4 files]"
-
-  copy_template "$TEMPLATES_DIR/claude-progress.md"      "claude-progress.md"      "Session progress log"
-  copy_template "$TEMPLATES_DIR/session-handoff.md"      "session-handoff.md"      "Session handoff doc"
-  copy_template "$TEMPLATES_DIR/clean-state-checklist.md" "clean-state-checklist.md" "Pre-commit verification"
-  copy_template "$TEMPLATES_DIR/checklist.sh"             "checklist.sh"             "Executable handoff checklist"
-
-  if [ -f "checklist.sh" ]; then
-    chmod +x checklist.sh 2>/dev/null || true
+  echo ""
+  echo "[Phase A.5 — --full extra files]"
+  if [ "$HOST" = "codex" ]; then
+    copy_template "$TEMPLATES_DIR/claude-progress.md" "$TARGET/codex-progress.md" "Codex progress log"
+  else
+    copy_template "$TEMPLATES_DIR/claude-progress.md" "$TARGET/claude-progress.md" "Session progress log"
+  fi
+  copy_template "$TEMPLATES_DIR/session-handoff.md"      "$TARGET/session-handoff.md"      "Session handoff doc"
+  copy_template "$TEMPLATES_DIR/clean-state-checklist.md" "$TARGET/clean-state-checklist.md" "Pre-commit verification"
+  copy_template "$TEMPLATES_DIR/checklist.sh"             "$TARGET/checklist.sh"             "Executable handoff checklist"
+  if [ -f "$TARGET/checklist.sh" ]; then
+    chmod +x "$TARGET/checklist.sh" 2>/dev/null || true
     echo "  OK: checklist.sh made executable"
   fi
-
-  echo ""
 fi
 
-# --- Summary -----------------------------------------------------------------
-echo "=== Harness scaffold complete ==="
+echo ""
+echo "=== Harness scaffold complete (v1+v2 merge) ==="
+echo ""
+echo "Created:"
+echo "  Knowledge entry:  AGENTS.md (universal) + $([ "$HOST" = "codex" ] && echo codex-progress.md || echo CLAUDE.md)"
+echo "  Env helper:       init.sh (executable)"
+echo "  v2 config:        .harness/config.json (auto-detected type)"
+echo "  v2 run logs:      .harness/logs/runs/"
+echo "  v2 features:      feature_list.json (revision: 1)"
+echo "  .gitignore:       .harness/logs/ + .harness/.registry.lock/"
 echo ""
 echo "Next steps:"
-echo "  1. Edit feature_list.json — add your real features"
-echo "  2. Edit AGENTS.md — update layer boundaries and conventions"
-echo "  3. Edit CLAUDE.md — update build commands and key files"
-echo "  4. Run 'bash init.sh' to verify the environment"
-echo ""
-echo "For full harness: re-run with --full"
+echo "  1. Review .harness/config.json — adjust verification commands"
+echo "  2. Edit feature_list.json — add your real features"
+echo "  3. Run 'bash init.sh' to verify the project environment"

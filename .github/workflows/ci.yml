@@ -1,0 +1,295 @@
+name: harness-companion CI
+
+# CI for the harness-companion standalone repository.
+#
+# Runs on every push to master and every PR targeting master. Executes:
+#   1. Core regression suite (tests/core/test-*.sh)
+#   2. Claude Code adapter contract suite (tests/adapters/test-claude-code-contract.sh)
+#   3. Codex adapter contract suite (tests/adapters/test-codex-contract.sh)
+#   4. Codex install-modes suite (tests/adapters/test-codex-install-modes.sh)
+#   5. Migration / v1-compat suite (tests/migration/test-v1-compat.sh)
+#   6. Official Codex validate_plugin.py against the plugin root (blocking)
+#   7. Release archive gate — git archive + representative inner smoke tests + validator
+#      (HARNESS_VALIDATOR_SKIP_OK=1 because Phase 6 already validates the plugin)
+#   8. Negative gate tests — prove gates exit non-zero on mktemp/fixture/validator failure
+#
+# Phase 6 has THREE outcomes surfaced via step output:
+#   passed  — validator located AND exited 0
+#   failed  — validator located AND exited non-zero (CI BLOCKED)
+#   skipped — validator could not be located (not the same as passed;
+#             summary step reads steps.phase6.outputs.phase6_result to
+#             tell the three states apart).
+#
+# Phase 7 validates the release archive end-to-end, including Phase B tests
+# run inside the extracted archive (no .git). The archive tests use
+# HARNESS_VALIDATOR_SKIP_OK=1 because CI doesn't have validate_plugin.py
+# installed — Phase 6 already covers that check.
+#
+# Phase 8 proves the release gate itself is reliable: it DELIBERATELY
+# causes failures and asserts each gate exits non-zero. Phase 8 exits 0
+# only if ALL gates correctly fail-closed.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 15 test scripts + Codex plugin validator
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show environment
+        run: |
+          echo "Runner:    $RUNNER_OS"
+          echo "Bash:      $(bash --version | head -1)"
+          echo "jq:        $(jq --version 2>/dev/null || echo 'missing')"
+          echo "python3:   $(python3 --version 2>/dev/null || echo 'missing')"
+          echo "PyYAML:    $(python3 -c 'import yaml; print(yaml.__version__)' 2>/dev/null || echo 'missing')"
+          echo "git:       $(git --version)"
+
+      - name: Install runtime helpers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq bash >/dev/null
+
+      # ------------------------------------------------------------------
+      # Phase 1 — Core regression suite
+      # ------------------------------------------------------------------
+      - name: Phase 1 — core regression
+        id: phase1
+        run: |
+          set +e
+          FAILED=0
+          for t in tests/core/test-*.sh; do
+            echo ""
+            echo "============================================"
+            echo "  $t"
+            echo "============================================"
+            bash "$t"
+            rc=$?
+            [ "$rc" -ne 0 ] && FAILED=$((FAILED + 1))
+          done
+          echo ""
+          echo "Phase 1 summary: $FAILED core suite(s) failed"
+          [ "$FAILED" -eq 0 ]
+
+      # ------------------------------------------------------------------
+      # Phase 2 — Claude Code adapter contract
+      # ------------------------------------------------------------------
+      - name: Phase 2 — Claude Code adapter contract
+        run: bash tests/adapters/test-claude-code-contract.sh
+
+      # ------------------------------------------------------------------
+      # Phase 3 — Codex adapter contract
+      # ------------------------------------------------------------------
+      - name: Phase 3 — Codex adapter contract
+        run: bash tests/adapters/test-codex-contract.sh
+
+      # ------------------------------------------------------------------
+      # Phase 4 — Codex install modes
+      # ------------------------------------------------------------------
+      - name: Phase 4 — Codex install modes
+        run: bash tests/adapters/test-codex-install-modes.sh
+
+      # ------------------------------------------------------------------
+      # Phase 5 — Migration / v1-compat
+      # ------------------------------------------------------------------
+      - name: Phase 5 — migration v1-compat
+        run: bash tests/migration/test-v1-compat.sh
+
+      # ------------------------------------------------------------------
+      # Phase 6 — Official Codex validate_plugin.py (BLOCKING when found)
+      #
+      # Lifecycle: clone → locate validator → run → exit (blocking) → cleanup.
+      # $CODEX_DIR is NOT removed between location and execution. A trap
+      # ensures cleanup whether we exit 0, exit 1, or are killed.
+      #
+      # Validator argument: "." (the PLUGIN ROOT, not .codex-plugin/).
+      # Inside validate_plugin.py: Path(args.plugin_path) / ".codex-plugin" / "plugin.json"
+      #
+      # Step output (phase6_result):
+      #   passed  — validator located AND exited 0
+      #   failed  — validator located AND exited non-zero (CI is BLOCKED)
+      #   skipped — validator not located (summary step reads this value,
+      #             NOT step outcome, to distinguish skipped from passed)
+      # ------------------------------------------------------------------
+      - name: Install PyYAML (deterministic, pinned)
+        run: python3 -m pip install --quiet "PyYAML>=6.0,<7.0"
+
+      - name: Phase 6 — Codex validate_plugin.py
+        id: phase6
+        run: |
+          set +e
+          CODEX_DIR=""
+          CODEX_DIR="$(mktemp -d 2>/dev/null)"
+          mktemp_rc=$?
+          if [ "$mktemp_rc" -ne 0 ] || [ -z "$CODEX_DIR" ] || [ ! -d "$CODEX_DIR" ] || [ ! -w "$CODEX_DIR" ]; then
+            echo "::error::Could not create a writable temporary directory for the Codex validator"
+            echo "phase6_result=failed" >> "$GITHUB_OUTPUT"
+            echo "phase6_detail=mktemp failed or returned an invalid directory" >> "$GITHUB_OUTPUT"
+            if [ -n "$CODEX_DIR" ] && [ -d "$CODEX_DIR" ]; then
+              rm -rf -- "$CODEX_DIR" 2>/dev/null
+            fi
+            exit 1
+          fi
+          # Trap: clean up regardless of exit code, but never target an empty
+          # or already-absent path.
+          cleanup() {
+            if [ -n "$CODEX_DIR" ] && [ -d "$CODEX_DIR" ]; then
+              rm -rf -- "$CODEX_DIR" 2>/dev/null
+            fi
+          }
+          trap cleanup EXIT
+
+          if ! git clone --depth 1 https://github.com/openai/codex.git "$CODEX_DIR" 2>/dev/null; then
+            echo "::warning::Could not clone github.com/openai/codex — phase SKIPPED (NOT counted as passed)"
+            echo "phase6_result=skipped" >> "$GITHUB_OUTPUT"
+            echo "phase6_detail=clone failed" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VALIDATOR=""
+          for cand in \
+            "$CODEX_DIR/codex-rs/skills/src/assets/samples/plugin-creator/scripts/validate_plugin.py" \
+            "$CODEX_DIR/scripts/validate_plugin.py" \
+            "$CODEX_DIR/plugin/validate_plugin.py" \
+            "$CODEX_DIR/scripts/validate-plugin.py" \
+            "$CODEX_DIR/validate_plugin.py"; do
+            if [ -f "$cand" ]; then
+              VALIDATOR="$cand"
+              break
+            fi
+          done
+
+          if [ -z "$VALIDATOR" ]; then
+            echo "::warning::validate_plugin.py not located in Codex CLI repo — phase SKIPPED (NOT counted as passed)"
+            echo "phase6_result=skipped" >> "$GITHUB_OUTPUT"
+            echo "phase6_detail=validator not found in clone" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Validator located at: $VALIDATOR"
+          PYTHONIOENCODING=utf-8 python3 "$VALIDATOR" .
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "phase6_result=passed" >> "$GITHUB_OUTPUT"
+            echo "phase6_detail=validator exit 0" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::validate_plugin.py exited $rc — phase FAILED (CI BLOCKED)"
+            echo "phase6_result=failed" >> "$GITHUB_OUTPUT"
+            echo "phase6_detail=validator exit $rc" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      # ------------------------------------------------------------------
+      # Phase 7 — Release archive gate
+      #
+      # Runs test-release-archive.sh which:
+      #   Phase A (outer): verifies git-ls-files, git archive extraction
+      #   Phase B (inner): runs representative core smoke tests plus adapter
+      #     contracts and migration inside the extracted archive (no .git),
+      #     then validate_plugin.py. Full core regression already ran in Phase 1.
+      #
+      # HARNESS_VALIDATOR_SKIP_OK=1 ONLY if Phase 6 explicitly passed.
+      # If Phase 6 was skipped (validator not found) or failed, Phase 7
+      # MUST BLOCK — the release archive gate requires Phase 6 proof.
+      #
+      # This step runs unconditionally (if: always()) so it always appears
+      # in CI output, but exits 1 when Phase 6 result ≠ "passed".
+      # ------------------------------------------------------------------
+      - name: Phase 7 — Release archive gate
+        id: phase7
+        if: always()
+        run: |
+          PHASE6_RESULT="${{ steps.phase6.outputs.phase6_result }}"
+          if [ "$PHASE6_RESULT" != "passed" ]; then
+            echo "::error::Release archive gate BLOCKED"
+            echo "  Phase 6 (validate_plugin.py) result: '$PHASE6_RESULT'"
+            echo "  Phase 7 requires Phase 6 to be 'passed' — not 'skipped' or 'failed'."
+            echo "  Reason: the validator exemption (HARNESS_VALIDATOR_SKIP_OK=1) is"
+            echo "  only valid when Phase 6 independently proved the plugin validates."
+            echo ""
+            echo "phase7_result=blocked" >> "$GITHUB_OUTPUT"
+            echo "phase7_detail=phase6_not_passed ($PHASE6_RESULT)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "Phase 6 passed — release archive gate permitted (HARNESS_VALIDATOR_SKIP_OK=1)"
+          if HARNESS_VALIDATOR_SKIP_OK=1 bash tests/release/test-release-archive.sh; then
+            echo "phase7_result=passed" >> "$GITHUB_OUTPUT"
+          else
+            rc=$?
+            echo "phase7_result=failed" >> "$GITHUB_OUTPUT"
+            exit $rc
+          fi
+
+      # ------------------------------------------------------------------
+      # Phase 8 — Negative gate tests (prove gates fail-closed)
+      #
+      # This phase DELIBERATELY causes failures (fake mktemp, corrupted git
+      # repos, missing validator without SKIP_OK) and asserts each gate
+      # exits non-zero. Phase 8 exits 0 ONLY if ALL gates correctly
+      # fail-closed — proving that the release gate catches real failures.
+      # ------------------------------------------------------------------
+      - name: Phase 8 — Negative gate tests
+        id: phase8
+        if: always()
+        run: bash tests/release/test-negative-gates.sh
+
+      # ------------------------------------------------------------------
+      # Summary — reads steps.phase6.outputs.phase6_result (NOT step outcome)
+      # so that "skipped" is distinguished from "passed".
+      # ------------------------------------------------------------------
+      - name: Summary
+        if: always()
+        run: |
+          echo "============================================"
+          echo "  harness-companion CI summary"
+          echo "============================================"
+          echo "Phase 1 (core regression):       ${{ steps.phase1.outcome }}"
+          echo "Phase 6 (validate_plugin.py):"
+          echo "  result: ${{ steps.phase6.outputs.phase6_result }}"
+          echo "  detail: ${{ steps.phase6.outputs.phase6_detail }}"
+          echo "Phase 7 (release archive gate):"
+          echo "  result: ${{ steps.phase7.outputs.phase7_result }}"
+          echo "  detail: ${{ steps.phase7.outputs.phase7_detail }}"
+          echo "Phase 8 (negative gate tests):   ${{ steps.phase8.outcome }}"
+          echo "Phases 2/3/4/5 see raw output above."
+          case "${{ steps.phase6.outputs.phase6_result }}" in
+            skipped)
+              echo "::warning::Phase 6 (validate_plugin.py) was SKIPPED — NOT the same as passed. Release-gate record must note this."
+              ;;
+            failed)
+              echo "::error::Phase 6 (validate_plugin.py) FAILED — release blocker"
+              ;;
+          esac
+          case "${{ steps.phase7.outputs.phase7_result }}" in
+            blocked)
+              echo "::error::Phase 7 (release archive) BLOCKED — Phase 6 must pass before release archive validation is permitted"
+              ;;
+            failed)
+              echo "::error::Phase 7 (release archive gate) FAILED — release blocker"
+              ;;
+            skipped|"")
+              echo "::warning::Phase 7 (release archive gate) did not run — result is '${{ steps.phase7.outputs.phase7_result }}'"
+              ;;
+          esac
+          if [ "${{ steps.phase6.outcome }}" = "failure" ]; then
+            echo "::error::Phase 6 step FAILED — CI blocked"
+          fi
+          if [ "${{ steps.phase7.outcome }}" = "failure" ]; then
+            echo "::error::Phase 7 step FAILED — CI blocked"
+          fi

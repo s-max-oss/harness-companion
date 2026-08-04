@@ -9,7 +9,7 @@ name: harness-companion CI
 #   4. Codex install-modes suite (tests/adapters/test-codex-install-modes.sh)
 #   5. Migration / v1-compat suite (tests/migration/test-v1-compat.sh)
 #   6. Official Codex validate_plugin.py against the plugin root (blocking)
-#   7. Release archive gate — git archive + inner tests + validator
+#   7. Release archive gate — git archive + representative inner smoke tests + validator
 #      (HARNESS_VALIDATOR_SKIP_OK=1 because Phase 6 already validates the plugin)
 #   8. Negative gate tests — prove gates exit non-zero on mktemp/fixture/validator failure
 #
@@ -134,9 +134,25 @@ jobs:
         id: phase6
         run: |
           set +e
-          CODEX_DIR="$(mktemp -d)"
-          # Trap: clean up regardless of exit code.
-          cleanup() { rm -rf "$CODEX_DIR" 2>/dev/null; }
+          CODEX_DIR=""
+          CODEX_DIR="$(mktemp -d 2>/dev/null)"
+          mktemp_rc=$?
+          if [ "$mktemp_rc" -ne 0 ] || [ -z "$CODEX_DIR" ] || [ ! -d "$CODEX_DIR" ] || [ ! -w "$CODEX_DIR" ]; then
+            echo "::error::Could not create a writable temporary directory for the Codex validator"
+            echo "phase6_result=failed" >> "$GITHUB_OUTPUT"
+            echo "phase6_detail=mktemp failed or returned an invalid directory" >> "$GITHUB_OUTPUT"
+            if [ -n "$CODEX_DIR" ] && [ -d "$CODEX_DIR" ]; then
+              rm -rf -- "$CODEX_DIR" 2>/dev/null
+            fi
+            exit 1
+          fi
+          # Trap: clean up regardless of exit code, but never target an empty
+          # or already-absent path.
+          cleanup() {
+            if [ -n "$CODEX_DIR" ] && [ -d "$CODEX_DIR" ]; then
+              rm -rf -- "$CODEX_DIR" 2>/dev/null
+            fi
+          }
           trap cleanup EXIT
 
           if ! git clone --depth 1 https://github.com/openai/codex.git "$CODEX_DIR" 2>/dev/null; then
@@ -148,6 +164,7 @@ jobs:
 
           VALIDATOR=""
           for cand in \
+            "$CODEX_DIR/codex-rs/skills/src/assets/samples/plugin-creator/scripts/validate_plugin.py" \
             "$CODEX_DIR/scripts/validate_plugin.py" \
             "$CODEX_DIR/plugin/validate_plugin.py" \
             "$CODEX_DIR/scripts/validate-plugin.py" \
@@ -183,22 +200,38 @@ jobs:
       #
       # Runs test-release-archive.sh which:
       #   Phase A (outer): verifies git-ls-files, git archive extraction
-      #   Phase B (inner): runs core/adapters/migration tests inside the
-      #     extracted archive (no .git) + validate_plugin.py
+      #   Phase B (inner): runs representative core smoke tests plus adapter
+      #     contracts and migration inside the extracted archive (no .git),
+      #     then validate_plugin.py. Full core regression already ran in Phase 1.
       #
-      # HARNESS_VALIDATOR_SKIP_OK=1 because Phase 6 already validates the
-      # plugin against the source repo root. The archive test's validator
-      # check is redundant in CI (but blocks locally when a user omits it).
+      # HARNESS_VALIDATOR_SKIP_OK=1 ONLY if Phase 6 explicitly passed.
+      # If Phase 6 was skipped (validator not found) or failed, Phase 7
+      # MUST BLOCK — the release archive gate requires Phase 6 proof.
+      #
+      # This step runs unconditionally (if: always()) so it always appears
+      # in CI output, but exits 1 when Phase 6 result ≠ "passed".
       # ------------------------------------------------------------------
       - name: Phase 7 — Release archive gate
         id: phase7
+        if: always()
         run: |
-          echo "HARNESS_VALIDATOR_SKIP_OK=1 (CI: Phase 6 already validates the plugin)"
-          HARNESS_VALIDATOR_SKIP_OK=1 bash tests/release/test-release-archive.sh
-          rc=$?
-          if [ "$rc" -eq 0 ]; then
+          PHASE6_RESULT="${{ steps.phase6.outputs.phase6_result }}"
+          if [ "$PHASE6_RESULT" != "passed" ]; then
+            echo "::error::Release archive gate BLOCKED"
+            echo "  Phase 6 (validate_plugin.py) result: '$PHASE6_RESULT'"
+            echo "  Phase 7 requires Phase 6 to be 'passed' — not 'skipped' or 'failed'."
+            echo "  Reason: the validator exemption (HARNESS_VALIDATOR_SKIP_OK=1) is"
+            echo "  only valid when Phase 6 independently proved the plugin validates."
+            echo ""
+            echo "phase7_result=blocked" >> "$GITHUB_OUTPUT"
+            echo "phase7_detail=phase6_not_passed ($PHASE6_RESULT)" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "Phase 6 passed — release archive gate permitted (HARNESS_VALIDATOR_SKIP_OK=1)"
+          if HARNESS_VALIDATOR_SKIP_OK=1 bash tests/release/test-release-archive.sh; then
             echo "phase7_result=passed" >> "$GITHUB_OUTPUT"
           else
+            rc=$?
             echo "phase7_result=failed" >> "$GITHUB_OUTPUT"
             exit $rc
           fi
@@ -213,6 +246,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Phase 8 — Negative gate tests
         id: phase8
+        if: always()
         run: bash tests/release/test-negative-gates.sh
 
       # ------------------------------------------------------------------
@@ -229,6 +263,10 @@ jobs:
           echo "Phase 6 (validate_plugin.py):"
           echo "  result: ${{ steps.phase6.outputs.phase6_result }}"
           echo "  detail: ${{ steps.phase6.outputs.phase6_detail }}"
+          echo "Phase 7 (release archive gate):"
+          echo "  result: ${{ steps.phase7.outputs.phase7_result }}"
+          echo "  detail: ${{ steps.phase7.outputs.phase7_detail }}"
+          echo "Phase 8 (negative gate tests):   ${{ steps.phase8.outcome }}"
           echo "Phases 2/3/4/5 see raw output above."
           case "${{ steps.phase6.outputs.phase6_result }}" in
             skipped)
@@ -238,6 +276,20 @@ jobs:
               echo "::error::Phase 6 (validate_plugin.py) FAILED — release blocker"
               ;;
           esac
+          case "${{ steps.phase7.outputs.phase7_result }}" in
+            blocked)
+              echo "::error::Phase 7 (release archive) BLOCKED — Phase 6 must pass before release archive validation is permitted"
+              ;;
+            failed)
+              echo "::error::Phase 7 (release archive gate) FAILED — release blocker"
+              ;;
+            skipped|"")
+              echo "::warning::Phase 7 (release archive gate) did not run — result is '${{ steps.phase7.outputs.phase7_result }}'"
+              ;;
+          esac
           if [ "${{ steps.phase6.outcome }}" = "failure" ]; then
             echo "::error::Phase 6 step FAILED — CI blocked"
+          fi
+          if [ "${{ steps.phase7.outcome }}" = "failure" ]; then
+            echo "::error::Phase 7 step FAILED — CI blocked"
           fi

@@ -64,17 +64,6 @@ _lr_flock_path() {
   printf '%s/flock.lock' "$1"
 }
 
-# fd storage for flock backend. We need to remember which fd maps to which
-# lock_dir so release_lock can flock -u the right fd. We use a simple file
-# under $TMPDIR or /tmp with the lock_dir path encoded.
-_lr_fd_dir="${TMPDIR:-/tmp}/.lock-registry-fds.$$"
-mkdir -p "$_lr_fd_dir" 2>/dev/null || _lr_fd_dir="/tmp/.lock-registry-fds.$$-$$"
-mkdir -p "$_lr_fd_dir" 2>/dev/null || true
-_lr_fd_path() {
-  # Encode lock_dir to a flat filename so we can mktemp safely.
-  printf '%s/%s' "$_lr_fd_dir" "$(printf '%s' "$1" | tr '/' '_')"
-}
-
 # ---- token generation -------------------------------------------------------
 
 # ---- token generation -------------------------------------------------------
@@ -433,7 +422,6 @@ _lr_mkdir_release() {
 #   <lock_dir>/                       — caller-supplied directory
 #   <lock_dir>/flock.lock             — regular file flock(1) operates on
 #   <lock_dir>/.lr_owner              — file containing our 32-char token
-#   $_lr_fd_dir/<encoded_lock_dir>    — file with the fd number for release
 
 # _lr_flock_acquire <lock_dir> [timeout_s]
 # IMPORTANT: opens FD 9 in the CALLING shell via `exec 9>>`. The caller must
@@ -540,7 +528,6 @@ _lr_flock_release() {
   # waiters (proven by test-lock-registry T13).
   flock -u 9 2>/dev/null || true
   exec 9>&- 2>/dev/null || true
-  rm -f "$(_lr_fd_path "$lock_dir")" 2>/dev/null || true
   rm -f "$lock_dir/.lr_owner" 2>/dev/null || true
   LOCK_REGISTRY_TOKEN=""
   return 0

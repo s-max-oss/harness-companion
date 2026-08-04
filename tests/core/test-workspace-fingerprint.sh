@@ -23,19 +23,73 @@ PASSED=0
 FAILED=0
 
 # Cumulative cleanup: add_cleanup accumulates dirs; single EXIT trap cleans them all.
-cleanup_dirs=""
-add_cleanup() { cleanup_dirs="$cleanup_dirs $1"; }
-trap 'for d in $cleanup_dirs; do rm -rf "$d" 2>/dev/null; done' EXIT
+cleanup_dirs=()
+add_cleanup() { cleanup_dirs+=("$1"); }
+cleanup_all() {
+  local d
+  for d in "${cleanup_dirs[@]}"; do
+    [ -n "$d" ] && rm -rf -- "$d" 2>/dev/null
+  done
+}
+trap cleanup_all EXIT
 
-# Safe mktemp — fail immediately if temp dir cannot be created.
+# Safe mktemp — runs in PARENT shell (no subshell), validates the dir in
+# place, refuses to assign an empty/relative path, registers cleanup in the
+# parent's trap state, and aborts the parent on mktemp failure.
+#
+# Usage: safe_mktemp VAR "label"   # sets parent-shell VAR to the new dir
+#
+# IMPORTANT: This MUST NOT be called as `VAR="$(safe_mktemp ...)"`. The whole
+# point is to run inside the parent shell so add_cleanup() and the EXIT trap
+# see the dir. Calling it via command substitution forks a subshell whose
+# trap state is discarded on exit, leaving parent temp dirs untracked.
+#
+# On failure the function returns non-zero. Every caller must check that
+# status explicitly because this test suite intentionally does not use set -e.
 safe_mktemp() {
-  local _label="$1"
-  local _dir; _dir="$(mktemp -d)" || { echo "FATAL: mktemp failed ($_label)" >&2; exit 1; }
+  local _varname="$1" _label="${2:-unknown}"
+
+  # Validate the variable name is a legal bash identifier.
+  if ! [[ "$_varname" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "FATAL: safe_mktemp received illegal varname '$_varname'" >&2
+    return 1
+  fi
+
+  # mktemp -d can return empty string AND exit 0 in some kernel/cygwin
+  # conditions; treat empty stdout as failure regardless of exit code.
+  local _dir=""
+  _dir="$(mktemp -d 2>/dev/null)" || _dir=""
+  if [ -z "$_dir" ] || [ ! -d "$_dir" ] || [ ! -w "$_dir" ]; then
+    echo "FATAL: mktemp failed or produced invalid dir (label=$_label)" >&2
+    return 1
+  fi
+
+  # Register first so even an unexpected assignment failure is cleaned by trap.
   add_cleanup "$_dir"
-  printf '%s' "$_dir"
+  printf -v "$_varname" '%s' "$_dir" || {
+    echo "FATAL: could not assign temp dir to '$_varname'" >&2
+    return 1
+  }
 }
 
-TMPDIR="$(safe_mktemp "workspace-fp main")"
+# Initialize parent-shell WORKSPACE_TMP. After this call WORKSPACE_TMP is non-empty,
+# the dir is writable, and it is registered in the EXIT trap.
+WORKSPACE_TMP=""
+safe_mktemp WORKSPACE_TMP "workspace-fp main" || exit 1
+if [ -z "$WORKSPACE_TMP" ] || [ ! -d "$WORKSPACE_TMP" ]; then
+  echo "FATAL: WORKSPACE_TMP not initialized after safe_mktemp" >&2
+  exit 1
+fi
+if [ -n "${HARNESS_EXPECTED_TMP_ROOT:-}" ]; then
+  case "$WORKSPACE_TMP" in
+    "$HARNESS_EXPECTED_TMP_ROOT"/*) ;;
+    *)
+      echo "FATAL: workspace temp escaped assigned sandbox: $WORKSPACE_TMP" >&2
+      exit 1
+      ;;
+  esac
+fi
+cd "$WORKSPACE_TMP" || { echo "FATAL: cd into WORKSPACE_TMP failed" >&2; exit 1; }
 
 # Helper: assert fingerprint equals expected
 assert_fp_equals() {
@@ -65,7 +119,8 @@ assert_fp_not_equals() {
 # ============================================================================
 echo "=== Test 1: Clean git repo ==="
 
-cd "$TMPDIR"
+# Already cd'd into WORKSPACE_TMP at top of script. Verify it before any test work.
+[ -d "$WORKSPACE_TMP" ] || { echo "FATAL: WORKSPACE_TMP disappeared before Test 1" >&2; exit 1; }
 git init --quiet . || { echo "FATAL: git init failed" >&2; exit 1; }
 git config user.email "test@test"
 git config user.name "Tester"
@@ -73,7 +128,7 @@ echo "hello" > README.md
 git add README.md
 git commit -m "init" --quiet || { echo "FATAL: git commit failed" >&2; exit 1; }
 
-FP1="$(compute_workspace_fingerprint "$TMPDIR")"
+FP1="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "clean git repo returns 'clean'" "$FP1" "clean"
 
 # ============================================================================
@@ -83,7 +138,7 @@ echo ""
 echo "=== Test 2: Dirty git repo (unstaged) ==="
 
 echo "dirty" >> README.md
-FP2="$(compute_workspace_fingerprint "$TMPDIR")"
+FP2="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_not_equals "unstaged change produces non-clean fingerprint" "$FP2" "clean"
 # Should start with sha256:
 case "$FP2" in
@@ -98,14 +153,14 @@ echo ""
 echo "=== Test 3: Staged vs unstaged non-overlap ==="
 
 git add README.md
-FP3="$(compute_workspace_fingerprint "$TMPDIR")"
+FP3="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 # After staging, working tree matches index (no unstaged changes), but staged differs from HEAD
 # So staged != 0, unstaged == 0 → different fingerprint from pure-unstaged
 assert_fp_not_equals "staged fingerprint differs from unstaged fingerprint" "$FP3" "$FP2"
 
 # Reset for next test
 git commit -m "dirty" --quiet
-FP3b="$(compute_workspace_fingerprint "$TMPDIR")"
+FP3b="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "after commit, returns to clean" "$FP3b" "clean"
 
 # ============================================================================
@@ -115,15 +170,15 @@ echo ""
 echo "=== Test 4: Terminal append stability ==="
 
 # Create .harness/logs/runs/ directory and write a run log
-mkdir -p "$TMPDIR/.harness/logs/runs"
-echo '{"event":"run_started"}' > "$TMPDIR/.harness/logs/runs/test.ndjson"
+mkdir -p "$WORKSPACE_TMP/.harness/logs/runs"
+echo '{"event":"run_started"}' > "$WORKSPACE_TMP/.harness/logs/runs/test.ndjson"
 
-FP4_before="$(compute_workspace_fingerprint "$TMPDIR")"
+FP4_before="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 
 # Append a terminal event
-echo '{"event":"run_completed"}' >> "$TMPDIR/.harness/logs/runs/test.ndjson"
+echo '{"event":"run_completed"}' >> "$WORKSPACE_TMP/.harness/logs/runs/test.ndjson"
 
-FP4_after="$(compute_workspace_fingerprint "$TMPDIR")"
+FP4_after="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "fingerprint stable after appending to .harness/logs/" "$FP4_before" "$FP4_after"
 
 # ============================================================================
@@ -133,8 +188,8 @@ echo ""
 echo "=== Test 5: Built-in exclude immunity ==="
 
 # Create a config that tries to include .harness/logs in fingerprint
-mkdir -p "$TMPDIR/.harness"
-cat > "$TMPDIR/.harness/config.json" <<'CONF'
+mkdir -p "$WORKSPACE_TMP/.harness"
+cat > "$WORKSPACE_TMP/.harness/config.json" <<'CONF'
 {
   "project_type": "generic",
   "fingerprint_exclude": [],
@@ -143,12 +198,12 @@ cat > "$TMPDIR/.harness/config.json" <<'CONF'
 CONF
 
 # Create a file in .harness/logs and verify it's still excluded
-echo "should be ignored" > "$TMPDIR/.harness/logs/should-be-ignored.txt"
+echo "should be ignored" > "$WORKSPACE_TMP/.harness/logs/should-be-ignored.txt"
 
-FP5="$(compute_workspace_fingerprint "$TMPDIR")"
+FP5="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 # Remove the file and fingerprint should be same
-rm "$TMPDIR/.harness/logs/should-be-ignored.txt"
-FP5_after="$(compute_workspace_fingerprint "$TMPDIR")"
+rm "$WORKSPACE_TMP/.harness/logs/should-be-ignored.txt"
+FP5_after="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals ".harness/ files excluded even with empty exclude list" "$FP5" "$FP5_after"
 
 # ============================================================================
@@ -157,13 +212,13 @@ assert_fp_equals ".harness/ files excluded even with empty exclude list" "$FP5" 
 echo ""
 echo "=== Test 6: Lock and temp file exclusion ==="
 
-mkdir -p "$TMPDIR/.harness/.registry.lock"
-echo "lock" > "$TMPDIR/.harness/.registry.lock/pid"
-echo "temp" > "$TMPDIR/.harness/stuff.tmp.12345"
+mkdir -p "$WORKSPACE_TMP/.harness/.registry.lock"
+echo "lock" > "$WORKSPACE_TMP/.harness/.registry.lock/pid"
+echo "temp" > "$WORKSPACE_TMP/.harness/stuff.tmp.12345"
 
-FP6_before="$(compute_workspace_fingerprint "$TMPDIR")"
-rm -rf "$TMPDIR/.harness/.registry.lock" "$TMPDIR/.harness/stuff.tmp.12345"
-FP6_after="$(compute_workspace_fingerprint "$TMPDIR")"
+FP6_before="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
+rm -rf "$WORKSPACE_TMP/.harness/.registry.lock" "$WORKSPACE_TMP/.harness/stuff.tmp.12345"
+FP6_after="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals ".harness lock and temp files excluded" "$FP6_before" "$FP6_after"
 
 # ============================================================================
@@ -174,12 +229,12 @@ echo "=== Test 7: NUL temp file outside fingerprint scope ==="
 
 # The implementation uses mktemp which creates files in system tmpdir (outside project).
 # Verify that the fingerprint computation itself doesn't create files in the project.
-before_count="$(find "$TMPDIR" -newer "$TMPDIR" -type f 2>/dev/null | wc -l || echo 0)"
+before_count="$(find "$WORKSPACE_TMP" -newer "$WORKSPACE_TMP" -type f 2>/dev/null | wc -l || echo 0)"
 
-FP7="$(compute_workspace_fingerprint "$TMPDIR")"
+FP7="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 
 # Compute again — should be stable (temp file cleaned up, no project files modified)
-FP7_again="$(compute_workspace_fingerprint "$TMPDIR")"
+FP7_again="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "fingerprint stable across recomputation (temp file outside scope)" "$FP7" "$FP7_again"
 
 # ============================================================================
@@ -189,13 +244,13 @@ echo ""
 echo "=== Test 8: Special filename handling ==="
 
 # Create files with spaces and special characters
-echo "special" > "$TMPDIR/file with spaces.txt"
-echo "quotes" > "$TMPDIR/file-with-dashes.txt"
+echo "special" > "$WORKSPACE_TMP/file with spaces.txt"
+echo "quotes" > "$WORKSPACE_TMP/file-with-dashes.txt"
 
-FP8="$(compute_workspace_fingerprint "$TMPDIR")"
+FP8="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_not_equals "special filenames produce valid fingerprint" "$FP8" "clean"
 
-rm "$TMPDIR/file with spaces.txt" "$TMPDIR/file-with-dashes.txt"
+rm "$WORKSPACE_TMP/file with spaces.txt" "$WORKSPACE_TMP/file-with-dashes.txt"
 
 # ============================================================================
 # Test 9: Configurable exclude from config.json
@@ -203,11 +258,11 @@ rm "$TMPDIR/file with spaces.txt" "$TMPDIR/file-with-dashes.txt"
 echo ""
 echo "=== Test 9: Configurable exclude ==="
 
-mkdir -p "$TMPDIR/dist"
-echo "build" > "$TMPDIR/dist/output.js"
-echo "source" > "$TMPDIR/app.js"
+mkdir -p "$WORKSPACE_TMP/dist"
+echo "build" > "$WORKSPACE_TMP/dist/output.js"
+echo "source" > "$WORKSPACE_TMP/app.js"
 
-cat > "$TMPDIR/.harness/config.json" <<'CONF'
+cat > "$WORKSPACE_TMP/.harness/config.json" <<'CONF'
 {
   "project_type": "generic",
   "fingerprint_exclude": ["dist/"],
@@ -215,15 +270,15 @@ cat > "$TMPDIR/.harness/config.json" <<'CONF'
 }
 CONF
 
-FP9_with_dist="$(compute_workspace_fingerprint "$TMPDIR")"
+FP9_with_dist="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 
-rm -rf "$TMPDIR/dist"
-FP9_without_dist="$(compute_workspace_fingerprint "$TMPDIR")"
+rm -rf "$WORKSPACE_TMP/dist"
+FP9_without_dist="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 
 assert_fp_equals "configurable exclude: dist/ removed doesn't change fingerprint" "$FP9_with_dist" "$FP9_without_dist"
 
 # Cleanup extra files
-rm -f "$TMPDIR/app.js" "$TMPDIR/.harness/config.json"
+rm -f "$WORKSPACE_TMP/app.js" "$WORKSPACE_TMP/.harness/config.json"
 
 # ============================================================================
 # Test 10: Nested Git repo (project is subdir of git root)
@@ -231,7 +286,8 @@ rm -f "$TMPDIR/app.js" "$TMPDIR/.harness/config.json"
 echo ""
 echo "=== Test 10: Nested Git repo — project as subdir of git root ==="
 
-NESTED_TMP="$(safe_mktemp "workspace-fp nested")"
+NESTED_TMP=""
+safe_mktemp NESTED_TMP "workspace-fp nested" || exit 1
 
 # Build a parent git repo with:
 #   projects/app/   — the project we fingerprint
@@ -383,11 +439,11 @@ echo ""
 echo "=== Test 14: Tracked file diff exclusion ==="
 
 # Reset to a clean repo
-cd "$TMPDIR"
+cd "$WORKSPACE_TMP"
 git clean -fd >/dev/null 2>&1
 git checkout -- . >/dev/null 2>&1 || true
 # Drop the .harness config from earlier tests so its excludes don't bleed in
-rm -rf "$TMPDIR/.harness" 2>/dev/null
+rm -rf "$WORKSPACE_TMP/.harness" 2>/dev/null
 
 # Minimal project content
 echo "src" > src.txt
@@ -397,20 +453,20 @@ git add src.txt && git commit -m "init" --quiet
 echo '{"features":[]}' > feature_list.json
 git add feature_list.json && git commit -m "add feature_list" --quiet
 
-FP_T14_baseline="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T14_baseline="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 
 # Edit feature_list.json, leave it UNSTAGED (working tree only)
 cat > feature_list.json <<'FL'
 {"features":[{"id":"f1","status":"in_progress"}]}
 FL
 
-FP_T14_edited_unstaged="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T14_edited_unstaged="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "tracked feature_list.json edit (unstaged) does NOT change fingerprint" \
   "$FP_T14_baseline" "$FP_T14_edited_unstaged"
 
 # Now STAGE the edit and recompute
 git add feature_list.json
-FP_T14_edited_staged="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T14_edited_staged="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "tracked feature_list.json edit (STAGED) does NOT change fingerprint" \
   "$FP_T14_baseline" "$FP_T14_edited_staged"
 
@@ -419,23 +475,23 @@ git checkout -- feature_list.json
 git reset HEAD feature_list.json >/dev/null 2>&1 || true
 
 # (b) Same for .harness/config.json
-mkdir -p "$TMPDIR/.harness"
-cat > "$TMPDIR/.harness/config.json" <<'CF'
+mkdir -p "$WORKSPACE_TMP/.harness"
+cat > "$WORKSPACE_TMP/.harness/config.json" <<'CF'
 {"project_type":"generic","verification":{"commands":[]}}
 CF
 git add .harness/config.json && git commit -m "add config" --quiet
 
-FP_T14_config_baseline="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T14_config_baseline="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 
-cat > "$TMPDIR/.harness/config.json" <<'CF'
+cat > "$WORKSPACE_TMP/.harness/config.json" <<'CF'
 {"project_type":"node","verification":{"commands":[{"id":"x","command":["true"]}]}}
 CF
-FP_T14_config_unstaged="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T14_config_unstaged="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "tracked .harness/config.json edit (unstaged) does NOT change fingerprint" \
   "$FP_T14_config_baseline" "$FP_T14_config_unstaged"
 
 git add .harness/config.json
-FP_T14_config_staged="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T14_config_staged="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "tracked .harness/config.json edit (STAGED) does NOT change fingerprint" \
   "$FP_T14_config_baseline" "$FP_T14_config_staged"
 
@@ -444,20 +500,20 @@ git checkout -- .harness/config.json
 git reset HEAD .harness/config.json >/dev/null 2>&1 || true
 
 # (c) Tracked harness run-log also excluded
-mkdir -p "$TMPDIR/.harness/logs/runs"
-echo '{"event":"run_started"}' > "$TMPDIR/.harness/logs/runs/run.ndjson"
+mkdir -p "$WORKSPACE_TMP/.harness/logs/runs"
+echo '{"event":"run_started"}' > "$WORKSPACE_TMP/.harness/logs/runs/run.ndjson"
 git add .harness/logs/runs/run.ndjson && git commit -m "add run log" --quiet
 
-FP_T14_log_baseline="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T14_log_baseline="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 
 # Append a terminal event
-echo '{"event":"run_completed"}' >> "$TMPDIR/.harness/logs/runs/run.ndjson"
-FP_T14_log_unstaged="$(compute_workspace_fingerprint "$TMPDIR")"
+echo '{"event":"run_completed"}' >> "$WORKSPACE_TMP/.harness/logs/runs/run.ndjson"
+FP_T14_log_unstaged="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "tracked harness run-log append (unstaged) does NOT change fingerprint" \
   "$FP_T14_log_baseline" "$FP_T14_log_unstaged"
 
 git add .harness/logs/runs/run.ndjson
-FP_T14_log_staged="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T14_log_staged="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "tracked harness run-log append (STAGED) does NOT change fingerprint" \
   "$FP_T14_log_baseline" "$FP_T14_log_staged"
 
@@ -476,23 +532,23 @@ git checkout -- . >/dev/null 2>&1 || true
 git reset HEAD -- . >/dev/null 2>&1 || true
 
 # Baseline before verify
-FP_T15_before="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T15_before="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 
 # Simulate verify: append run event AND write association into feature_list.json
-echo '{"event":"verify_started","cmd":"typecheck"}' >> "$TMPDIR/.harness/logs/runs/run.ndjson"
-echo '{"event":"verify_passed","cmd":"typecheck","exit":0}' >> "$TMPDIR/.harness/logs/runs/run.ndjson"
+echo '{"event":"verify_started","cmd":"typecheck"}' >> "$WORKSPACE_TMP/.harness/logs/runs/run.ndjson"
+echo '{"event":"verify_passed","cmd":"typecheck","exit":0}' >> "$WORKSPACE_TMP/.harness/logs/runs/run.ndjson"
 
 cat > feature_list.json <<'FL'
 {"features":[{"id":"f1","status":"passing","evidence_associations":[{"run_id":"run","ts":"2026-08-03T00:00:00Z"}]}]}
 FL
 
-FP_T15_after="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T15_after="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "verify write: fingerprint stable after evidence-association write" \
   "$FP_T15_before" "$FP_T15_after"
 
 # Even when staged
 git add feature_list.json .harness/logs/runs/run.ndjson
-FP_T15_staged="$(compute_workspace_fingerprint "$TMPDIR")"
+FP_T15_staged="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals "verify write: fingerprint stable after STAGE of evidence + run log" \
   "$FP_T15_before" "$FP_T15_staged"
 
@@ -502,7 +558,8 @@ assert_fp_equals "verify write: fingerprint stable after STAGE of evidence + run
 echo ""
 echo "=== Test 16: Equal content at different nested prefixes ==="
 
-TWIN_TMP="$(safe_mktemp "workspace-fp twin")"
+TWIN_TMP=""
+safe_mktemp TWIN_TMP "workspace-fp twin" || exit 1
 
 cd "$TWIN_TMP"
 git init --quiet .
@@ -614,7 +671,8 @@ echo "=== Test 18: Precise match negative ==="
 # Each sub-assertion gets a FRESH git repo so residual state from one
 # sub-test cannot pollute another.
 
-T18_TMP="$(safe_mktemp "workspace-fp test18")"
+T18_TMP=""
+safe_mktemp T18_TMP "workspace-fp test18" || exit 1
 
 # setup_t18_fixture: create a clean git repo in $1 with baseline files.
 # Returns the fingerprint of the clean baseline via stdout.
@@ -694,7 +752,8 @@ assert_fp_not_equals "path with brackets NOT excluded — fingerprint CHANGES" \
 echo ""
 echo "=== Test 19: Rename into excluded dir ==="
 
-T19_TMP="$(safe_mktemp "workspace-fp test19")"
+T19_TMP=""
+safe_mktemp T19_TMP "workspace-fp test19" || exit 1
 cd "$T19_TMP" || { echo "FATAL: cd into test19 dir failed" >&2; exit 1; }
 
 mkdir -p src .harness/logs/runs

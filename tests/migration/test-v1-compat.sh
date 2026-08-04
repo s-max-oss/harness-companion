@@ -30,15 +30,44 @@ FAILED=0
 SKIPPED=0
 
 # Cumulative cleanup: add_cleanup accumulates dirs; single EXIT trap cleans them all.
-cleanup_dirs=""
-add_cleanup() { cleanup_dirs="$cleanup_dirs $1"; }
-trap 'for d in $cleanup_dirs; do rm -rf "$d" 2>/dev/null; done' EXIT
+cleanup_dirs=()
+add_cleanup() { cleanup_dirs+=("$1"); }
+cleanup_all() {
+  local d
+  for d in "${cleanup_dirs[@]}"; do
+    [ -n "$d" ] && rm -rf -- "$d" 2>/dev/null
+  done
+}
+trap cleanup_all EXIT
 
-# Safe mktemp — fail immediately if temp dir cannot be created.
+# Safe mktemp — runs in PARENT shell (no subshell). Validates the dir,
+# refuses to assign an empty/non-existent path, registers cleanup in the
+# parent's trap state, and returns non-zero on failure.
+#
+# Usage: safe_mktemp VAR [label]
+#
+# MUST NOT be called as VAR="$(safe_mktemp ...)" — the subshell would lose
+# the trap state. Call directly: `safe_mktemp VAR label` then use $VAR.
 safe_mktemp() {
-  local _dir; _dir="$(mktemp -d)" || { echo "FATAL: mktemp failed" >&2; exit 1; }
+  local _varname="$1" _label="${2:-unknown}"
+
+  if ! [[ "$_varname" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "FATAL: safe_mktemp received illegal varname '$_varname'" >&2
+    return 1
+  fi
+
+  local _dir=""
+  _dir="$(mktemp -d 2>/dev/null)" || _dir=""
+  if [ -z "$_dir" ] || [ ! -d "$_dir" ] || [ ! -w "$_dir" ]; then
+    echo "FATAL: mktemp failed (label=$_label)" >&2
+    return 1
+  fi
+
   add_cleanup "$_dir"
-  printf '%s' "$_dir"
+  printf -v "$_varname" '%s' "$_dir" || {
+    echo "FATAL: could not assign temp dir to '$_varname'" >&2
+    return 1
+  }
 }
 
 pass() {
@@ -143,7 +172,8 @@ done
 # ============================================================================
 echo ""
 echo "=== G3: scripts/harness-init.sh creates 4 scaffold files ==="
-TMPINIT="$(safe_mktemp)"
+TMPINIT=""
+safe_mktemp TMPINIT "G3 init" || exit 1
 
 if bash "$ROOT_DIR/scripts/harness-init.sh" "$TMPINIT" >/dev/null 2>&1; then
   for f in AGENTS.md CLAUDE.md feature_list.json init.sh; do
@@ -168,7 +198,8 @@ fi
 # ============================================================================
 echo ""
 echo "=== G4: scripts/harness-handoff.sh outputs summary ==="
-TMPHAND="$(safe_mktemp)"
+TMPHAND=""
+safe_mktemp TMPHAND "G4 handoff" || exit 1
 
 # Set up a minimal harness project
 echo '{"features":[],"last_updated":"2026-08-03"}' > "$TMPHAND/feature_list.json" || { echo "FATAL: G4 setup write failed" >&2; exit 1; }
@@ -373,7 +404,8 @@ init_e2e() {
   local marker="$2"
   local expected_type="$3"
 
-  local tmp; tmp="$(safe_mktemp)"
+  local tmp=""
+  safe_mktemp tmp "G12 $name" || return 1
   if [ -n "$marker" ]; then
     touch "$tmp/$marker"
   fi
@@ -511,7 +543,8 @@ fi
 
 # git archive HEAD verification (per user requirement: must be in commit, not just working tree)
 if git -C "$ROOT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
-  ARCHIVE_TMP="$(safe_mktemp)"
+  ARCHIVE_TMP=""
+  safe_mktemp ARCHIVE_TMP "G13 archive" || exit 1
   git -C "$ROOT_DIR" archive HEAD -- 'templates/.harness/*' | tar -x -C "$ARCHIVE_TMP"
   archive_count=$(find "$ARCHIVE_TMP/templates/.harness/" -type f 2>/dev/null | wc -l | tr -d ' ')
   if [ "$archive_count" -eq 7 ]; then
@@ -529,7 +562,8 @@ fi
 # ============================================================================
 echo ""
 echo "=== G14: --host=codex produces codex-progress.md ==="
-TMP_CODEX="$(safe_mktemp)"
+TMP_CODEX=""
+safe_mktemp TMP_CODEX "G14 codex" || exit 1
 touch "$TMP_CODEX/package.json"
 bash "$ROOT_DIR/scripts/harness-init.sh" "$TMP_CODEX" --host=codex >/dev/null 2>&1
 if [ -f "$TMP_CODEX/codex-progress.md" ] && [ ! -f "$TMP_CODEX/CLAUDE.md" ]; then
@@ -544,7 +578,8 @@ rm -rf "$TMP_CODEX"
 # ============================================================================
 echo ""
 echo "=== G15: --full produces extra files ==="
-TMP_FULL="$(safe_mktemp)"
+TMP_FULL=""
+safe_mktemp TMP_FULL "G15 full" || exit 1
 touch "$TMP_FULL/package.json"
 bash "$ROOT_DIR/scripts/harness-init.sh" "$TMP_FULL" --full >/dev/null 2>&1
 for f in claude-progress.md session-handoff.md clean-state-checklist.md checklist.sh; do

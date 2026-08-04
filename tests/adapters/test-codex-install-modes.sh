@@ -172,13 +172,13 @@ else
   assert_fail "G5.M7 --repo copies adapters/codex/UNSUPPORTED.md"
 fi
 
-# G5.M8: install-receipt.json written + status=supported
+# G5.M8: install-receipt.json written + status=code-complete-runtime-e2e-pending (AC-9 rc.2)
 if [ -f "$TMP_REPO/.codex/install-receipt.json" ]; then
   assert_pass "G5.M8 --repo writes install-receipt.json"
   MODE_FIELD="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1], encoding='utf-8')); print(d.get('mode',''))" "$TMP_REPO/.codex/install-receipt.json" 2>/dev/null || echo "")"
   assert_eq "G5.M8 install-receipt.json mode=repo-local" "repo-local" "$MODE_FIELD"
   STATUS_FIELD="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1], encoding='utf-8')); print(d.get('status',''))" "$TMP_REPO/.codex/install-receipt.json" 2>/dev/null || echo "")"
-  assert_eq "G5.M8 install-receipt.json status=supported" "supported" "$STATUS_FIELD"
+  assert_eq "G5.M8 install-receipt.json status=code-complete-runtime-e2e-pending" "code-complete-runtime-e2e-pending" "$STATUS_FIELD"
 else
   assert_fail "G5.M8 --repo writes install-receipt.json"
 fi

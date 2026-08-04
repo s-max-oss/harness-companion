@@ -6,6 +6,8 @@
 #   - templates/                  (config templates)
 #   - adapters/claude-code/       (Claude Code SessionStart + Stop protocol mapping)
 #   - scripts/                    (v1 compat wrappers — zero business logic)
+#   - VERSION                     (semver from repo root)
+#   - install-receipt.json        (upgrade-safe, with integrity manifest)
 #
 # Usage:
 #   bash adapters/claude-code/install.sh [--user|--project] [--symlink-core]
@@ -14,8 +16,17 @@
 # --project:        Install to ./.claude/skills/harness-companion/ (project-local)
 # --symlink-core:   Symlink core/ instead of copying (Linux/macOS only; Windows copies)
 #
-# Hooks registered in ~/.claude/settings.json point at scripts/hooks/*.sh so that
+# Hooks registered in settings.json point at scripts/hooks/*.sh so that
 # v1 callers keep working.
+#
+# BUG-1 fix (rc.2): Receipt upgrade contract — same-version reinstall updates
+# installed_at + regenerates integrity.files without appending upgrade_history;
+# cross-version upgrade appends upgrade_history[] entry.
+#
+# BUG-2 fix (rc.2): Reads version from $REPO_ROOT/VERSION; writes $TARGET/VERSION.
+#
+# BUG-3 fix (rc.2): Hook idempotency uses canonical path resolution (cygpath round-trip
+# on MSYS, readlink -f on Linux/macOS). Fail-closed if neither jq nor python3 available.
 
 set -euo pipefail
 
@@ -47,6 +58,20 @@ if [ "$USE_SYMLINK_CORE" -eq 1 ] && [ "$IS_WINDOWS" -eq 1 ]; then
   USE_SYMLINK_CORE=0
 fi
 
+# ---- Read version (BUG-2: single source of truth) ------------------------------
+if [ -f "$REPO_ROOT/VERSION" ]; then
+  VERSION="$(cat "$REPO_ROOT/VERSION" | head -1 | tr -d '[:space:]')"
+else
+  echo "[WARN] No VERSION file at repo root — using fallback '2.0.0'" >&2
+  VERSION="2.0.0"
+fi
+
+# ---- Detect archive/tarball install (no .git) ----------------------------------
+IS_ARCHIVE=0
+if ! git -C "$REPO_ROOT" rev-parse HEAD >/dev/null 2>&1; then
+  IS_ARCHIVE=1
+fi
+
 # ---- Resolve target ------------------------------------------------------------
 if [ "$MODE" = "--project" ]; then
   TARGET="$(pwd)/.claude/skills/harness-companion"
@@ -56,6 +81,7 @@ fi
 
 echo "=== Harness Companion Install (Phase 4 — Claude Code adapter) ==="
 echo ""
+echo "Version:    $VERSION"
 echo "Mode:       $MODE"
 echo "Symlink:    $USE_SYMLINK_CORE"
 echo "Target:     $TARGET"
@@ -64,7 +90,7 @@ echo ""
 mkdir -p "$TARGET"
 
 # ---- Copy core/ (or symlink if requested) -------------------------------------
-echo "[1/4] Installing core..."
+echo "[1/5] Installing core..."
 SRC_CORE="$REPO_ROOT/core"
 if [ "$USE_SYMLINK_CORE" -eq 1 ]; then
   ln -sfn "$SRC_CORE" "$TARGET/core"
@@ -76,7 +102,7 @@ else
 fi
 
 # ---- Copy templates/ -----------------------------------------------------------
-echo "[2/4] Installing templates..."
+echo "[2/5] Installing templates..."
 rm -rf "$TARGET/templates" 2>/dev/null || true
 cp -r "$REPO_ROOT/templates" "$TARGET/templates"
 echo "  copied templates/ ($(find "$TARGET/templates" -type f | wc -l | tr -d ' ') files)"
@@ -110,6 +136,10 @@ else
   echo "  [WARN] SKILL.md missing in source tree — skill will not be discoverable" >&2
 fi
 
+# ---- Write VERSION to target (BUG-2) ------------------------------------------
+printf '%s\n' "$VERSION" > "$TARGET/VERSION"
+echo "  VERSION = $VERSION"
+
 # ---- Make all .sh files executable --------------------------------------------
 chmod +x "$TARGET/scripts/"*.sh 2>/dev/null || true
 chmod +x "$TARGET/scripts/hooks/"*.sh 2>/dev/null || true
@@ -117,61 +147,286 @@ chmod +x "$TARGET/core/"*.sh 2>/dev/null || true
 chmod +x "$TARGET/adapters/claude-code/hooks/"*.sh 2>/dev/null || true
 chmod +x "$TARGET/adapters/claude-code/install.sh" 2>/dev/null || true
 
-# ---- Stamp installed_at + generate integrity manifest -------------------------
+# ===============================================================================
+# BUG-1 fix: Receipt upgrade contract
+# ===============================================================================
+
 INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)"
-SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+
+# Source metadata — null for archive/tarball installs
+if [ "$IS_ARCHIVE" -eq 1 ]; then
+  SOURCE_COMMIT="null"
+  SOURCE_COMMIT_SHORT="null"
+  SOURCE_TAG_JSON="null"
+  SOURCE_ORIGIN="archive"
+else
+  SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  SOURCE_COMMIT_SHORT="$(printf '%s' "$SOURCE_COMMIT" | cut -c1-12)"
+  SOURCE_TAG="$(git -C "$REPO_ROOT" tag --points-at HEAD 2>/dev/null | head -1 || true)"
+  if [ -n "${SOURCE_TAG:-}" ]; then
+    SOURCE_TAG_JSON="\"$SOURCE_TAG\""
+  else
+    SOURCE_TAG_JSON="null"
+  fi
+  SOURCE_ORIGIN="git"
+fi
 
 RECEIPT="$TARGET/install-receipt.json"
-if [ ! -f "$RECEIPT" ]; then
-  cat > "$RECEIPT" <<JSON
-{
+
+# Helper: generate integrity.files JSON via jq or python3
+regenerate_integrity() {
+  local receipt_file="$1"
+  local target_dir="$2"
+  local files_json="{}"
+
+  if command -v sha256sum >/dev/null 2>&1 && [ -f "$receipt_file" ]; then
+    # Collect all regular files under TARGET, compute sha256, build JSON
+    local f path hash
+    while IFS= read -r f; do
+      # Compute relative path with forward slashes
+      path="${f#$target_dir/}"
+      path="$(printf '%s' "$path" | tr '\\' '/')"
+      # Skip receipt, VERSION, settings.json (not in target tree, but VERSION is)
+      case "$path" in
+        install-receipt.json|VERSION) continue ;;
+      esac
+      hash="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        files_json="$(jq --arg p "$path" --arg h "$hash" '.[$p] = $h' <<<"$files_json")"
+      fi
+    done < <(find "$target_dir" -type f 2>/dev/null | sort)
+  fi
+
+  # Write integrity back into receipt
+  if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+    jq --argjson files "$files_json" '.integrity.files = $files | .integrity.algorithm = "sha256"' "$receipt_file" > "$receipt_file.tmp" \
+      && mv "$receipt_file.tmp" "$receipt_file"
+  fi
+}
+
+# Build fresh receipt JSON
+build_fresh_receipt() {
+  if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+    VERSION="$VERSION" \
+    INSTALLED_AT="$INSTALLED_AT" \
+    TARGET="$TARGET" \
+    SOURCE_COMMIT="$SOURCE_COMMIT" \
+    SOURCE_COMMIT_SHORT="$SOURCE_COMMIT_SHORT" \
+    SOURCE_TAG_JSON="$SOURCE_TAG_JSON" \
+    SOURCE_ORIGIN="$SOURCE_ORIGIN" \
+    jq -n \
+      --arg skill "harness-companion" \
+      --arg version "$VERSION" \
+      --arg schema "2.0.0" \
+      --arg commit "$SOURCE_COMMIT" \
+      --arg commit_short "$SOURCE_COMMIT_SHORT" \
+      --arg installed_at "$INSTALLED_AT" \
+      --arg installed_to "$TARGET" \
+      --arg origin "$SOURCE_ORIGIN" \
+      '{
+        skill: $skill,
+        version: $version,
+        schema_version: $schema,
+        source: {
+          repository: "s-max-oss/harness-companion",
+          commit: (if $commit == "null" then null else $commit end),
+          commit_short: (if $commit_short == "null" then null else $commit_short end),
+          origin: $origin
+        },
+        installed_at: $installed_at,
+        installed_to: $installed_to,
+        integrity: { algorithm: "sha256", files: {} },
+        upgrade_history: []
+      }' > "$RECEIPT"
+    return 0
+  elif command -v python3 >/dev/null 2>&1; then
+    VERSION="$VERSION" \
+    INSTALLED_AT="$INSTALLED_AT" \
+    TARGET="$TARGET" \
+    SOURCE_COMMIT="$SOURCE_COMMIT" \
+    SOURCE_COMMIT_SHORT="$SOURCE_COMMIT_SHORT" \
+    SOURCE_ORIGIN="$SOURCE_ORIGIN" \
+    python3 - <<'PYEOF'
+import json, os
+commit = os.environ["SOURCE_COMMIT"]
+commit_short = os.environ["SOURCE_COMMIT_SHORT"]
+receipt = {
   "skill": "harness-companion",
-  "version": "2.0.0",
+  "version": os.environ["VERSION"],
   "schema_version": "2.0.0",
   "source": {
-    "repository": "harness-engineering",
-    "branch": "$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)",
-    "commit": "$SOURCE_COMMIT",
-    "commit_short": "$(printf '%s' "$SOURCE_COMMIT" | cut -c1-12)"
+    "repository": "s-max-oss/harness-companion",
+    "commit": commit if commit != "null" else None,
+    "commit_short": commit_short if commit_short != "null" else None,
+    "origin": os.environ["SOURCE_ORIGIN"],
   },
+  "installed_at": os.environ["INSTALLED_AT"],
+  "installed_to": os.environ["TARGET"],
+  "integrity": {"algorithm": "sha256", "files": {}},
+  "upgrade_history": [],
+}
+with open(os.environ["TARGET"] + "/install-receipt.json", "w") as f:
+    json.dump(receipt, f, indent=2)
+    f.write("\n")
+PYEOF
+    return 0
+  else
+    echo "[WARN] Neither jq nor python3 available — writing minimal receipt" >&2
+    cat > "$RECEIPT" <<JSON
+{
+  "skill": "harness-companion",
+  "version": "$VERSION",
+  "schema_version": "2.0.0",
   "installed_at": "$INSTALLED_AT",
   "installed_to": "$TARGET",
-  "integrity": {
-    "algorithm": "sha256",
-    "files": {}
-  }
+  "integrity": { "algorithm": "sha256", "files": {} },
+  "upgrade_history": []
 }
 JSON
+  fi
+}
+
+if [ ! -f "$RECEIPT" ]; then
+  # ---- Fresh install: write new receipt ---------------------------------------
+  echo "[receipt] Fresh install — writing new receipt"
+  build_fresh_receipt
+else
+  # ---- Existing receipt: upgrade logic ----------------------------------------
+  OLD_VERSION=""
+  if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+    OLD_VERSION="$(jq -r '.version // ""' "$RECEIPT" 2>/dev/null || echo "")"
+  elif command -v python3 >/dev/null 2>&1; then
+    OLD_VERSION="$(python3 -c "import json; d=json.load(open('$RECEIPT')); print(d.get('version',''))" 2>/dev/null || echo "")"
+  fi
+
+  if [ "$OLD_VERSION" = "$VERSION" ]; then
+    # Same-version reinstall: update installed_at, regenerate integrity, NO upgrade_history
+    echo "[receipt] Same-version reinstall ($VERSION) — updating installed_at, regenerating integrity"
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      jq --arg ts "$INSTALLED_AT" '.installed_at = $ts' "$RECEIPT" > "$RECEIPT.tmp" \
+        && mv "$RECEIPT.tmp" "$RECEIPT"
+    fi
+  elif [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$VERSION" ]; then
+    # Cross-version upgrade: update version, source, installed_at; append upgrade_history
+    echo "[receipt] Upgrade: $OLD_VERSION → $VERSION — appending upgrade_history"
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      jq \
+        --arg version "$VERSION" \
+        --arg commit "$SOURCE_COMMIT" \
+        --arg commit_short "$SOURCE_COMMIT_SHORT" \
+        --arg ts "$INSTALLED_AT" \
+        --arg origin "$SOURCE_ORIGIN" \
+        --arg old_ver "$OLD_VERSION" \
+        --arg new_ver "$VERSION" \
+        --arg at "$INSTALLED_AT" \
+        '.version = $version
+         | .source.commit = (if $commit == "null" then null else $commit end)
+         | .source.commit_short = (if $commit_short == "null" then null else $commit_short end)
+         | .source.origin = $origin
+         | .installed_at = $ts
+         | .upgrade_history += [{from: $old_ver, to: $new_ver, at: $at}]' \
+        "$RECEIPT" > "$RECEIPT.tmp" \
+        && mv "$RECEIPT.tmp" "$RECEIPT"
+    elif command -v python3 >/dev/null 2>&1; then
+      OLD_VERSION="$OLD_VERSION" \
+      VERSION="$VERSION" \
+      INSTALLED_AT="$INSTALLED_AT" \
+      SOURCE_COMMIT="$SOURCE_COMMIT" \
+      SOURCE_COMMIT_SHORT="$SOURCE_COMMIT_SHORT" \
+      SOURCE_ORIGIN="$SOURCE_ORIGIN" \
+      RECEIPT="$RECEIPT" \
+      python3 - <<'PYEOF'
+import json, os
+receipt_file = os.environ["RECEIPT"]
+with open(receipt_file) as f:
+    r = json.load(f)
+commit = os.environ["SOURCE_COMMIT"]
+r["version"] = os.environ["VERSION"]
+r["source"]["commit"] = commit if commit != "null" else None
+r["source"]["commit_short"] = os.environ["SOURCE_COMMIT_SHORT"] if os.environ["SOURCE_COMMIT_SHORT"] != "null" else None
+r["source"]["origin"] = os.environ["SOURCE_ORIGIN"]
+r["installed_at"] = os.environ["INSTALLED_AT"]
+r.setdefault("upgrade_history", []).append({
+    "from": os.environ["OLD_VERSION"],
+    "to": os.environ["VERSION"],
+    "at": os.environ["INSTALLED_AT"],
+})
+with open(receipt_file, "w") as f:
+    json.dump(r, f, indent=2)
+    f.write("\n")
+PYEOF
+    fi
+  else
+    # Can't determine old version — update what we can
+    echo "[receipt] Unknown prior version — updating installed_at"
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      jq --arg ts "$INSTALLED_AT" '.installed_at = $ts' "$RECEIPT" > "$RECEIPT.tmp" \
+        && mv "$RECEIPT.tmp" "$RECEIPT"
+    fi
+  fi
 fi
 
-if command -v jq >/dev/null 2>&1; then
-  jq --arg ts "$INSTALLED_AT" '.installed_at = $ts' "$RECEIPT" > "$RECEIPT.tmp" \
-    && mv "$RECEIPT.tmp" "$RECEIPT"
-fi
+# Regenerate integrity.files on every install run
+echo "[integrity] Regenerating integrity manifest..."
+regenerate_integrity "$RECEIPT" "$TARGET"
+echo "  integrity regenerated"
 
-# Generate SHA-256 hashes for the v1 compat scripts (so the receipt documents
-# the wrappers that get invoked).
-if command -v jq >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
-  files_json="$(jq -c '.integrity.files // {}' "$RECEIPT")"
-  for path in \
-    "scripts/harness-verify.sh" \
-    "scripts/harness-feature.sh" \
-    "scripts/harness-status.sh" \
-    "scripts/harness-audit.sh" \
-    "scripts/hooks/session-start.sh" \
-    "scripts/hooks/stop-handoff.sh" \
-    "adapters/claude-code/hooks/session-start.sh" \
-    "adapters/claude-code/hooks/stop-handoff.sh"; do
-    f="$TARGET/$path"
-    [ -f "$f" ] || continue
-    h="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"
-    files_json="$(jq --arg p "$path" --arg h "$h" '.[$p] = $h' <<<"$files_json")"
-  done
-  jq --argjson files "$files_json" '.integrity.files = $files' "$RECEIPT" > "$RECEIPT.tmp" \
-    && mv "$RECEIPT.tmp" "$RECEIPT"
-fi
+# ===============================================================================
+# BUG-3 fix: Hook path normalization + fail-closed
+# ===============================================================================
 
-# ---- Register hooks in settings.json (real mutation; idempotent) ------------
+# ---- Canonical path resolver --------------------------------------------------
+canonical_path() {
+  local p="$1"
+  local resolved=""
+
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if command -v cygpath >/dev/null 2>&1; then
+        # Round-trip: POSIX → Windows → POSIX forces canonical MSYS form
+        resolved="$(cygpath -u "$(cygpath -aw "$p" 2>/dev/null)" 2>/dev/null || echo "")"
+        if [ -n "$resolved" ]; then
+          printf '%s' "$resolved"
+          return 0
+        fi
+      fi
+      # Fallback: basic normalization
+      printf '%s' "$p" | tr '\\' '/'
+      return 0
+      ;;
+    *)
+      if command -v readlink >/dev/null 2>&1; then
+        resolved="$(readlink -f "$p" 2>/dev/null || echo "")"
+        if [ -n "$resolved" ]; then
+          printf '%s' "$resolved"
+          return 0
+        fi
+      fi
+      if command -v realpath >/dev/null 2>&1; then
+        resolved="$(realpath "$p" 2>/dev/null || echo "")"
+        if [ -n "$resolved" ]; then
+          printf '%s' "$resolved"
+          return 0
+        fi
+      fi
+      printf '%s' "$p"
+      return 0
+      ;;
+  esac
+}
+
+# Extract the script path from a hook command string.
+# Expected format: bash "/path/to/script.sh" or bash /path/to/script.sh
+extract_script_path() {
+  local cmd="$1"
+  # Strip leading "bash " (or "bash" alone)
+  local path="$(printf '%s' "$cmd" | sed -E 's/^bash[[:space:]]+//')"
+  # Strip surrounding quotes
+  path="$(printf '%s' "$path" | sed -E 's/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//')"
+  printf '%s' "$path"
+}
+
+# ---- Settings file ------------------------------------------------------------
 if [ "$MODE" = "--project" ]; then
   SETTINGS_FILE="$(pwd)/.claude/settings.json"
   mkdir -p "$(dirname "$SETTINGS_FILE")" 2>/dev/null || true
@@ -183,16 +438,142 @@ fi
 HOOK_SS_CMD="bash $TARGET/scripts/hooks/session-start.sh"
 HOOK_STOP_CMD="bash $TARGET/scripts/hooks/stop-handoff.sh"
 
+# Pre-compute canonical hook script paths
+HOOK_SS_SCRIPT_PATH="$(extract_script_path "$HOOK_SS_CMD")"
+HOOK_STOP_SCRIPT_PATH="$(extract_script_path "$HOOK_STOP_CMD")"
+CANON_SS="$(canonical_path "$HOOK_SS_SCRIPT_PATH")"
+CANON_STOP="$(canonical_path "$HOOK_STOP_SCRIPT_PATH")"
+
+# ---- Hook registration with path-normalized idempotency -----------------------
 register_hooks() {
   local settings="$1"
   local hook_ss_cmd="$2"
   local hook_stop_cmd="$3"
 
-  # Idempotency: if both our commands are already in the file, do nothing.
-  if [ -f "$settings" ] && grep -qF "$hook_ss_cmd" "$settings" 2>/dev/null \
-                          && grep -qF "$hook_stop_cmd" "$settings" 2>/dev/null; then
-    echo "  hooks already registered in $settings (idempotent)"
-    return 0
+  # --- Idempotency check using canonical path comparison -----------------------
+  local has_jq=0
+  if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+    has_jq=1
+  fi
+  local has_python=0
+  if command -v python3 >/dev/null 2>&1; then
+    has_python=1
+  fi
+
+  # BUG-3 fail-closed: if neither jq nor python3, refuse to mutate settings.json
+  if [ "$has_jq" -eq 0 ] && [ "$has_python" -eq 0 ]; then
+    echo "ERROR: Cannot safely check for existing hooks — neither jq nor python3 is available." >&2
+    echo "       Install jq (recommended) or python3 to proceed, or manually verify that" >&2
+    echo "       SessionStart and Stop hooks in $settings do not already reference" >&2
+    echo "       $TARGET/scripts/hooks/ before re-running with HARNESS_SKIP_HOOK_CHECK=1." >&2
+    return 1
+  fi
+
+  # If explicit skip requested, proceed without idempotency check
+  if [ "${HARNESS_SKIP_HOOK_CHECK:-0}" = "1" ]; then
+    echo "  HARNESS_SKIP_HOOK_CHECK=1 — skipping hook idempotency check"
+  elif [ -f "$settings" ]; then
+    # Extract existing SessionStart + Stop hook command paths and canonicalize them
+    local ss_exists=0 stop_exists=0
+
+    if [ "$has_jq" -eq 1 ]; then
+      # Extract all SessionStart hook commands using jq
+      local existing_ss_cmds=""
+      existing_ss_cmds="$(jq -r '.hooks.SessionStart[]?.hooks[]?.command // empty' "$settings" 2>/dev/null || echo "")"
+
+      if [ -n "$existing_ss_cmds" ]; then
+        while IFS= read -r existing_cmd; do
+          [ -z "$existing_cmd" ] && continue
+          local existing_path=""
+          existing_path="$(extract_script_path "$existing_cmd")"
+          local canon_existing=""
+          canon_existing="$(canonical_path "$existing_path")"
+          if [ "$canon_existing" = "$CANON_SS" ]; then
+            ss_exists=1
+            break
+          fi
+        done <<<"$existing_ss_cmds"
+      fi
+
+      # Extract all Stop hook commands using jq
+      local existing_stop_cmds=""
+      existing_stop_cmds="$(jq -r '.hooks.Stop[]?.hooks[]?.command // empty' "$settings" 2>/dev/null || echo "")"
+
+      if [ -n "$existing_stop_cmds" ]; then
+        while IFS= read -r existing_cmd; do
+          [ -z "$existing_cmd" ] && continue
+          local existing_path=""
+          existing_path="$(extract_script_path "$existing_cmd")"
+          local canon_existing=""
+          canon_existing="$(canonical_path "$existing_path")"
+          if [ "$canon_existing" = "$CANON_STOP" ]; then
+            stop_exists=1
+            break
+          fi
+        done <<<"$existing_stop_cmds"
+      fi
+    elif [ "$has_python" -eq 1 ]; then
+      # Use python3 to extract and compare via temp script
+      local _py_script=""
+      _py_script="${settings}.pycheck.$$"
+      cat > "$_py_script" <<'PYEOF'
+import json, os, sys
+canon_ss = os.environ["CANON_SS"]
+canon_stop = os.environ["CANON_STOP"]
+settings_file = os.environ["SETTINGS_FILE"]
+
+def extract_path(cmd):
+    import re
+    p = re.sub(r'^bash\s+', '', cmd)
+    p = p.strip().strip('"').strip("'")
+    return p
+
+def canonical_path(p):
+    try:
+        return os.path.realpath(p)
+    except:
+        return p.replace('\\', '/')
+
+found_ss = False
+found_stop = False
+try:
+    with open(settings_file) as f:
+        data = json.load(f)
+    hooks = data.get("hooks", {})
+    for entry in hooks.get("SessionStart", []):
+        for h in entry.get("hooks", []):
+            cmd = h.get("command", "")
+            if cmd:
+                ep = extract_path(cmd)
+                if canonical_path(ep) == canon_ss:
+                    found_ss = True
+                    break
+    for entry in hooks.get("Stop", []):
+        for h in entry.get("hooks", []):
+            cmd = h.get("command", "")
+            if cmd:
+                ep = extract_path(cmd)
+                if canonical_path(ep) == canon_stop:
+                    found_stop = True
+                    break
+except (json.JSONDecodeError, FileNotFoundError, KeyError):
+    pass
+
+print(f"{1 if found_ss else 0} {1 if found_stop else 0}")
+PYEOF
+      CANON_SS="$CANON_SS" CANON_STOP="$CANON_STOP" SETTINGS_FILE="$settings" \
+        python3 "$_py_script" 2>/dev/null > "${_py_script}.out" || true
+      if [ -s "${_py_script}.out" ]; then
+        ss_exists="$(awk '{print $1}' "${_py_script}.out")"
+        stop_exists="$(awk '{print $2}' "${_py_script}.out")"
+      fi
+      rm -f "$_py_script" "${_py_script}.out"
+    fi
+
+    if [ "$ss_exists" = "1" ] && [ "$stop_exists" = "1" ]; then
+      echo "  hooks already registered in $settings (idempotent — canonical path match)"
+      return 0
+    fi
   fi
 
   # Backup BEFORE mutating (unique timestamped filename).
@@ -205,12 +586,6 @@ register_hooks() {
   fi
 
   # Build the new settings via jq — merge into existing structure if present.
-  # Strategy:
-  #   1. If file missing or invalid JSON, start from {}.
-  #   2. Ensure .hooks exists (object).
-  #   3. Ensure .hooks.SessionStart exists as an array.
-  #   4. Append our SessionStart entry unless a command-matching entry already exists.
-  #   5. Same for .hooks.Stop.
   local tmp="${settings}.tmp.$$"
   if [ -f "$settings" ] && jq -e . "$settings" >/dev/null 2>&1; then
     cp "$settings" "$tmp"
@@ -241,11 +616,14 @@ register_hooks "$SETTINGS_FILE" "$HOOK_SS_CMD" "$HOOK_STOP_CMD"
 echo ""
 echo "=== Install Complete ==="
 echo ""
+echo "Version:   $VERSION"
 echo "Installed:"
+echo "  VERSION                            $(cat "$TARGET/VERSION" 2>/dev/null || echo MISSING)"
 echo "  core/                              $([ -d "$TARGET/core" ] && echo OK || echo MISSING)"
 echo "  templates/                         $([ -d "$TARGET/templates" ] && echo OK || echo MISSING)"
 echo "  adapters/claude-code/hooks/        $(ls "$TARGET/adapters/claude-code/hooks/"*.sh 2>/dev/null | wc -l | tr -d ' ') hooks"
 echo "  scripts/ (v1 wrappers)             $(ls "$TARGET/scripts/"*.sh "$TARGET/scripts/hooks/"*.sh 2>/dev/null | wc -l | tr -d ' ') wrappers"
+echo "  install-receipt.json               $([ -f "$TARGET/install-receipt.json" ] && echo OK || echo MISSING)"
 echo ""
 echo "Next steps:"
 echo "  1. Restart Claude Code to load hooks."

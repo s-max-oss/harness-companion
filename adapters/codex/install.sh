@@ -25,12 +25,31 @@
 # available, install fails with an actionable error.
 #
 # All modes: idempotent, backup before modification, trust review prompt.
+#
+# BUG-1 fix (rc.2): Receipt upgrade contract — same-version reinstall updates
+# installed_at without appending upgrade_history; cross-version upgrade appends.
+#
+# BUG-2 fix (rc.2): Reads version from $REPO_ROOT/VERSION; writes $CODEX_DIR/VERSION.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ADAPTER_DIR="$SCRIPT_DIR"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# ---- Read version (BUG-2: single source of truth) ------------------------------
+if [ -f "$REPO_ROOT/VERSION" ]; then
+  VERSION="$(cat "$REPO_ROOT/VERSION" | head -1 | tr -d '[:space:]')"
+else
+  echo "[WARN] No VERSION file at repo root — using fallback '2.0.0'" >&2
+  VERSION="2.0.0"
+fi
+
+# ---- Detect archive/tarball install (no .git) ----------------------------------
+IS_ARCHIVE=0
+if ! git -C "$REPO_ROOT" rev-parse HEAD >/dev/null 2>&1; then
+  IS_ARCHIVE=1
+fi
 
 echo "=== harness-companion Codex adapter — Phase 5b ==="
 echo "SessionStart: status injection  |  Stop: handoff warnings  |  PreToolUse: permissive"
@@ -113,6 +132,7 @@ if [ "$MODE" = "--repo" ]; then
   WINDOWS_INSTALLED="${INSTALLED_HOOKS_DIR//\//\\}"
 
   echo "Mode:       --repo (repo-local)"
+  echo "Version:    $VERSION"
   echo "Target:     $CODEX_DIR"
   echo "HookPath:   $POSIX_INSTALLED"
   echo ""
@@ -254,67 +274,173 @@ PYEOF
   chmod +x "$INSTALLED_HOOKS_DIR/"*.sh 2>/dev/null || true
   chmod +x "$CODEX_DIR/adapters/codex/install.sh" 2>/dev/null || true
 
-  # ---- Install receipt --------------------------------------------------------
+  # ---- Write VERSION to target (BUG-2) ----------------------------------------
+  printf '%s\n' "$VERSION" > "$CODEX_DIR/VERSION"
+  echo "  VERSION = $VERSION"
+
+  # ---- Install receipt (BUG-1 fix: upgrade-safe) ------------------------------
   INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)"
-  SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
   RECEIPT="$CODEX_DIR/install-receipt.json"
 
-  # Build receipt via jq OR python3 (avoid heredoc backslash issues).
-  # Validate jq actually works, not just exists in PATH (a stub must not
-  # silently produce invalid output).
-  if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
-    SOURCE_COMMIT="$SOURCE_COMMIT" \
-    INSTALLED_AT="$INSTALLED_AT" \
-    CODEX_DIR="$CODEX_DIR" \
-    INSTALLED_HOOKS_DIR="$INSTALLED_HOOKS_DIR" \
-    jq -n \
-      --arg adapter codex \
-      --arg ver "2.0.0" \
-      --arg schema "2.0.0" \
-      --arg mode "repo-local" \
-      --arg commit "$SOURCE_COMMIT" \
-      --arg installed_at "$INSTALLED_AT" \
-      --arg installed_to "$CODEX_DIR" \
-      --arg plugin_root "$INSTALLED_HOOKS_DIR" \
-      --arg status "supported" \
-      '{
-        adapter:$adapter, version:$ver, schema_version:$schema,
-        mode:$mode, status:$status,
-        source:{repository:"harness-engineering", commit:$commit},
-        installed_at:$installed_at, installed_to:$installed_to,
-        plugin_root:$plugin_root
-      }' > "$RECEIPT"
-  elif command -v python3 >/dev/null 2>&1; then
-    SOURCE_COMMIT="$SOURCE_COMMIT" \
-    INSTALLED_AT="$INSTALLED_AT" \
-    CODEX_DIR="$CODEX_DIR" \
-    INSTALLED_HOOKS_DIR="$INSTALLED_HOOKS_DIR" \
-    python3 - <<'PYEOF'
+  # Source metadata — null for archive/tarball installs
+  if [ "$IS_ARCHIVE" -eq 1 ]; then
+    SOURCE_COMMIT="null"
+    SOURCE_ORIGIN="archive"
+  else
+    SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+    SOURCE_ORIGIN="git"
+  fi
+
+  # Helper: build fresh receipt
+  build_fresh_codex_receipt() {
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      SOURCE_COMMIT="$SOURCE_COMMIT" \
+      INSTALLED_AT="$INSTALLED_AT" \
+      CODEX_DIR="$CODEX_DIR" \
+      INSTALLED_HOOKS_DIR="$INSTALLED_HOOKS_DIR" \
+      VERSION="$VERSION" \
+      SOURCE_ORIGIN="$SOURCE_ORIGIN" \
+      jq -n \
+        --arg adapter codex \
+        --arg version "$VERSION" \
+        --arg schema "2.0.0" \
+        --arg mode "repo-local" \
+        --arg commit "$SOURCE_COMMIT" \
+        --arg installed_at "$INSTALLED_AT" \
+        --arg installed_to "$CODEX_DIR" \
+        --arg plugin_root "$INSTALLED_HOOKS_DIR" \
+        --arg origin "$SOURCE_ORIGIN" \
+        --arg status "code-complete-runtime-e2e-pending" \
+        '{
+          adapter:$adapter, version:$version, schema_version:$schema,
+          mode:$mode, status:$status,
+          source:{
+            repository:"harness-engineering",
+            commit:(if $commit == "null" then null else $commit end),
+            origin:$origin
+          },
+          installed_at:$installed_at, installed_to:$installed_to,
+          plugin_root:$plugin_root,
+          upgrade_history:[]
+        }' > "$RECEIPT"
+    elif command -v python3 >/dev/null 2>&1; then
+      SOURCE_COMMIT="$SOURCE_COMMIT" \
+      INSTALLED_AT="$INSTALLED_AT" \
+      CODEX_DIR="$CODEX_DIR" \
+      INSTALLED_HOOKS_DIR="$INSTALLED_HOOKS_DIR" \
+      VERSION="$VERSION" \
+      SOURCE_ORIGIN="$SOURCE_ORIGIN" \
+      python3 - <<'PYEOF'
 import json, os
+commit = os.environ["SOURCE_COMMIT"]
 receipt = {
   "adapter": "codex",
-  "version": "2.0.0",
+  "version": os.environ["VERSION"],
   "schema_version": "2.0.0",
   "mode": "repo-local",
-  "status": "supported",
-  "source": {"repository": "harness-engineering", "commit": os.environ["SOURCE_COMMIT"]},
+  "status": "code-complete-runtime-e2e-pending",
+  "source": {
+    "repository": "harness-engineering",
+    "commit": commit if commit != "null" else None,
+    "origin": os.environ["SOURCE_ORIGIN"],
+  },
   "installed_at": os.environ["INSTALLED_AT"],
   "installed_to": os.environ["CODEX_DIR"],
   "plugin_root": os.environ["INSTALLED_HOOKS_DIR"],
+  "upgrade_history": [],
 }
 with open(os.environ["CODEX_DIR"] + "/install-receipt.json", "w") as f:
     json.dump(receipt, f, indent=2)
     f.write("\n")
 PYEOF
+    fi
+  }
+
+  # Build receipt with upgrade logic
+  if [ ! -f "$RECEIPT" ]; then
+    # Fresh install
+    echo "  [receipt] Fresh install — writing new receipt"
+    build_fresh_codex_receipt
+  else
+    # Existing receipt: check version for upgrade
+    OLD_VERSION=""
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      OLD_VERSION="$(jq -r '.version // ""' "$RECEIPT" 2>/dev/null || echo "")"
+    elif command -v python3 >/dev/null 2>&1; then
+      OLD_VERSION="$(python3 -c "import json; d=json.load(open('$RECEIPT')); print(d.get('version',''))" 2>/dev/null || echo "")"
+    fi
+
+    if [ "$OLD_VERSION" = "$VERSION" ]; then
+      # Same-version reinstall: update installed_at, NO upgrade_history
+      echo "  [receipt] Same-version reinstall ($VERSION) — updating installed_at"
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        jq --arg ts "$INSTALLED_AT" '.installed_at = $ts' "$RECEIPT" > "$RECEIPT.tmp" \
+          && mv "$RECEIPT.tmp" "$RECEIPT"
+      fi
+    elif [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$VERSION" ]; then
+      # Cross-version upgrade: update version, source, installed_at; append upgrade_history
+      echo "  [receipt] Upgrade: $OLD_VERSION → $VERSION — appending upgrade_history"
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        jq \
+          --arg version "$VERSION" \
+          --arg commit "$SOURCE_COMMIT" \
+          --arg ts "$INSTALLED_AT" \
+          --arg origin "$SOURCE_ORIGIN" \
+          --arg old_ver "$OLD_VERSION" \
+          --arg new_ver "$VERSION" \
+          --arg at "$INSTALLED_AT" \
+          '.version = $version
+           | .source.commit = (if $commit == "null" then null else $commit end)
+           | .source.origin = $origin
+           | .installed_at = $ts
+           | .upgrade_history += [{from: $old_ver, to: $new_ver, at: $at}]' \
+          "$RECEIPT" > "$RECEIPT.tmp" \
+          && mv "$RECEIPT.tmp" "$RECEIPT"
+      elif command -v python3 >/dev/null 2>&1; then
+        OLD_VERSION="$OLD_VERSION" \
+        VERSION="$VERSION" \
+        INSTALLED_AT="$INSTALLED_AT" \
+        SOURCE_COMMIT="$SOURCE_COMMIT" \
+        SOURCE_ORIGIN="$SOURCE_ORIGIN" \
+        RECEIPT="$RECEIPT" \
+        python3 - <<'PYEOF'
+import json, os
+receipt_file = os.environ["RECEIPT"]
+with open(receipt_file) as f:
+    r = json.load(f)
+commit = os.environ["SOURCE_COMMIT"]
+r["version"] = os.environ["VERSION"]
+r["source"]["commit"] = commit if commit != "null" else None
+r["source"]["origin"] = os.environ["SOURCE_ORIGIN"]
+r["installed_at"] = os.environ["INSTALLED_AT"]
+r.setdefault("upgrade_history", []).append({
+    "from": os.environ["OLD_VERSION"],
+    "to": os.environ["VERSION"],
+    "at": os.environ["INSTALLED_AT"],
+})
+with open(receipt_file, "w") as f:
+    json.dump(r, f, indent=2)
+    f.write("\n")
+PYEOF
+      fi
+    else
+      # Can't determine old version — update what we can
+      echo "  [receipt] Unknown prior version — updating installed_at"
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        jq --arg ts "$INSTALLED_AT" '.installed_at = $ts' "$RECEIPT" > "$RECEIPT.tmp" \
+          && mv "$RECEIPT.tmp" "$RECEIPT"
+      fi
+    fi
   fi
   echo "  receipt written: $RECEIPT"
 
   echo ""
   echo "=== Repo-local install complete (Phase 5b) ==="
-  echo "  hooks.json:    $HOOKS_JSON"
-  echo "  core/:         $CODEX_DIR/core/"
-  echo "  adapter/:      $CODEX_DIR/adapters/codex/"
-  echo "  installed at:  $INSTALLED_AT"
+  echo "  version:        $VERSION"
+  echo "  hooks.json:     $HOOKS_JSON"
+  echo "  core/:          $CODEX_DIR/core/"
+  echo "  adapter/:       $CODEX_DIR/adapters/codex/"
+  echo "  installed at:   $INSTALLED_AT"
   echo ""
   echo "SessionStart status injection and Stop handoff warnings are active."
   echo "PreToolUse is permissive (policy not enabled)."
@@ -329,6 +455,7 @@ if [ "$MODE" = "--user" ]; then
   SNIPPET="$USER_CODEX/harness-hooks.toml"
 
   echo "Mode:       --user"
+  echo "Version:    $VERSION"
   echo "Snippet:    $SNIPPET"
   echo ""
   echo "NOTE: --user mode points paths at the SOURCE tree (the location you ran"

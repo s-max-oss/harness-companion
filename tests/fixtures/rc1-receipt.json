@@ -1,0 +1,20 @@
+{
+  "skill": "harness-companion",
+  "version": "2.0.0-rc.1",
+  "schema_version": "2.0.0",
+  "source": {
+    "repository": "s-max-oss/harness-companion",
+    "tag": "v2.0.0-rc.1",
+    "tag_commit": "e13d56d49189b0563d4ccd8af638df6e7bc1195b",
+    "commit": "ef30b31f2e2d309b34b14b30052259ae1c1502b",
+    "commit_short": "ef30b31"
+  },
+  "installed_at": "2026-08-04T00:00:00Z",
+  "installed_to": "/tmp/harness-test/.claude/skills/harness-companion",
+  "integrity": {
+    "algorithm": "sha256",
+    "files": {
+      "SKILL.md": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  }
+}

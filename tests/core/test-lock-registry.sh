@@ -39,6 +39,11 @@ assert_fail() {
   FAILED=$((FAILED + 1))
 }
 
+# Force mkdir backend for T1–T12 (the stale-recovery and ownership tests are
+# mkdir-specific; flock backend relies on the kernel for stale detection and
+# would mask the recovery paths under test). T13 overrides this to flock.
+export LOCK_REGISTRY_BACKEND=mkdir
+
 # Source the lock module (skips with FAIL when not yet implemented)
 if ! source "$CORE_LIB/lock-registry.sh" 2>/tmp/src_err; then
   echo "FAIL: lock-registry.sh not present or has syntax error — $(cat /tmp/src_err)"
@@ -448,10 +453,12 @@ else
   cat > "$HOLDER" <<'HOLDER_EOF'
 #!/bin/bash
 set -uo pipefail
+# Backend MUST be set BEFORE sourcing lock-registry.sh — dispatch happens at
+# source time.
+export LOCK_REGISTRY_BACKEND=flock
 LOCK_DIR="$1"
 SENTINEL="$2"
 source "$CORE_LIB/lock-registry.sh"
-export LOCK_REGISTRY_BACKEND=flock
 acquire_lock "$LOCK_DIR" 5 || { echo "HOLDER: acquire failed" >&2; exit 7; }
 date +%s.%N > "$SENTINEL"
 sleep 3
@@ -461,11 +468,13 @@ HOLDER_EOF
   cat > "$WAITER" <<'WAITER_EOF'
 #!/bin/bash
 set -uo pipefail
+# Backend MUST be set BEFORE sourcing lock-registry.sh — dispatch happens at
+# source time.
+export LOCK_REGISTRY_BACKEND=flock
 LOCK_DIR="$1"
 START_SENTINEL="$2"
 T_START=$(date +%s.%N)
 source "$CORE_LIB/lock-registry.sh"
-export LOCK_REGISTRY_BACKEND=flock
 acquire_lock "$LOCK_DIR" 10 || { echo "WAITER: acquire failed" >&2; exit 7; }
 T_END=$(date +%s.%N)
 # Record our waited time in seconds (with one decimal)
@@ -492,24 +501,39 @@ WAITER_EOF
     ( CORE_LIB="$CORE_LIB" bash "$WAITER" "$T13/lock" "$T13/waiter_started" ) &
     WAITER_PID=$!
 
-    # Waiter should NOT acquire before holder finishes (≥3s wait).
-    if [ -f "$T13/waiter_started.waited" ]; then
-      # Both finished — analyze.
-      WAIT_TIME="$(cat "$T13/waiter_started.waited")"
-      # Compare wait time ≥ 2.5s (holder held for 3s, waiter must wait at least
-      # most of that).
-      WAIT_OK=$(awk -v w "$WAIT_TIME" 'BEGIN { print (w >= 2.5) ? "yes" : "no" }')
-      # Both processes should have exited 0.
+    # Wait/poll for BOTH processes to finish BEFORE asserting. Holder holds
+    # the lock for 3s; waiter has a 10s acquire timeout. So both should
+    # complete within ~5s. Use 15s ceiling as a hard guard.
+    WAITED=0
+    while [ "$WAITED" -lt 150 ] && kill -0 "$HOLDER_PID" 2>/dev/null; do
+      sleep 0.1
+      WAITED=$((WAITED + 1))
+    done
+    while [ "$WAITED" -lt 150 ] && kill -0 "$WAITER_PID" 2>/dev/null; do
+      sleep 0.1
+      WAITED=$((WAITED + 1))
+    done
+    if kill -0 "$HOLDER_PID" 2>/dev/null || kill -0 "$WAITER_PID" 2>/dev/null; then
+      assert_fail "T13: holder/waiter did not complete within 15s" "holder_alive=$(kill -0 "$HOLDER_PID" 2>/dev/null && echo yes || echo no) waiter_alive=$(kill -0 "$WAITER_PID" 2>/dev/null && echo yes || echo no)"
+      kill -9 "$HOLDER_PID" "$WAITER_PID" 2>/dev/null || true
+    else
+      # Both processes finished — capture exit codes.
       wait "$HOLDER_PID"; HOLDER_RC=$?
       wait "$WAITER_PID"; WAITER_RC=$?
-      if [ "$WAIT_OK" = "yes" ] && [ "$HOLDER_RC" = "0" ] && [ "$WAITER_RC" = "0" ]; then
-        assert_pass "T13: flock contention — waiter blocked ≥2.5s while holder mutated (waited=${WAIT_TIME}s)"
+      # NOW read the waited file (no race — waiter wrote it before exiting).
+      if [ ! -f "$T13/waiter_started.waited" ]; then
+        assert_fail "T13: waiter finished but did not write waited file" "waiter_rc=$WAITER_RC"
       else
-        assert_fail "T13: flock contention" "waited=${WAIT_TIME}s holder_rc=$HOLDER_RC waiter_rc=$WAITER_RC"
+        WAIT_TIME="$(cat "$T13/waiter_started.waited")"
+        # Compare wait time ≥ 2.5s (holder held for 3s, waiter must wait at
+        # least most of that).
+        WAIT_OK=$(awk -v w "$WAIT_TIME" 'BEGIN { print (w >= 2.5) ? "yes" : "no" }')
+        if [ "$WAIT_OK" = "yes" ] && [ "$HOLDER_RC" = "0" ] && [ "$WAITER_RC" = "0" ]; then
+          assert_pass "T13: flock contention — waiter blocked ≥2.5s while holder mutated (waited=${WAIT_TIME}s)"
+        else
+          assert_fail "T13: flock contention" "waited=${WAIT_TIME}s holder_rc=$HOLDER_RC waiter_rc=$WAITER_RC"
+        fi
       fi
-    else
-      assert_fail "T13: waiter did not complete" "no waited file"
-      kill -9 "$WAITER_PID" "$HOLDER_PID" 2>/dev/null || true
     fi
   fi
   rm -rf "$T13/lock" "$T13/holder_started" "$T13/waiter_started.waited"

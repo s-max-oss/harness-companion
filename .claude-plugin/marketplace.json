@@ -1,0 +1,18 @@
+{
+  "name": "harness-engineering",
+  "owner": {
+    "name": "harness-engineering"
+  },
+  "description": "Harness Engineering tools for reliable AI coding workflows",
+  "plugins": [
+    {
+      "name": "harness-companion",
+      "version": "2.0.0-rc.2",
+      "description": "Evidence-backed feature pipeline with status, audit, and handoff",
+      "source": "./",
+      "author": {
+        "name": "harness-engineering"
+      }
+    }
+  ]
+}

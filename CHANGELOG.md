@@ -68,9 +68,10 @@ on Windows machines.
   `pretooluse_status=policy_not_enabled`). Enforcement is a Phase 6 item.
 - **Windows sandbox is degraded** (`windows_sandbox_degraded=true`). The
   Codex adapter requires Git Bash on PATH for `commandWindows` wrappers.
-- **No CI workflow** for the harness-companion test suites yet (only
-  `deploy-pages.yml` and `release-course-pdfs.yml` exist). Local
-  regression must be run before tagging.
+- **CI workflow** (`.github/workflows/ci.yml`) has 8 phases covering core
+  regression, adapters, migration, validate_plugin.py, release archive gate,
+  and negative gate tests. Still requires local regression before tagging
+  for Windows-specific tests not covered by `ubuntu-latest` CI.
 
 ### Validation
 

@@ -149,12 +149,14 @@ CONFIG_SHA="$(hc_config_sha256 "$PROJECT_DIR")"
 # ---- Build required_command_ids (only required_for_passing commands) ----
 REQUIRED_IDS=()
 while IFS= read -r cid; do
+  cid="${cid%$'\r'}"
   [ -n "$cid" ] && REQUIRED_IDS+=("$cid")
 done <<<"$(hc_required_ids)"
 
 # ---- Build all command IDs (entire verification plan) ----
 ALL_IDS=()
 while IFS= read -r cid; do
+  cid="${cid%$'\r'}"
   [ -n "$cid" ] && ALL_IDS+=("$cid")
 done <<<"$(hc_command_ids)"
 

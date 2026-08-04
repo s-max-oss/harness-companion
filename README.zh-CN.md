@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-**v2.0.0-rc.1** — 一个面向 AI 代理的 Skill + Hooks 工具集，为 Harness Engineering（驾驭工程）自动化代理工作流的全部生命周期。它结合了**自动触发的生命周期钩子**和**交互式斜杠命令**，并原生支持 **Claude Code** 与 **Codex** 两大代理。
+**v2.0.0-rc.2** — 一个面向 AI 代理的 Skill + Hooks 工具集，为 Harness Engineering（驾驭工程）自动化代理工作流的全部生命周期。它结合了**自动触发的生命周期钩子**和**交互式斜杠命令**，并原生支持 **Claude Code** 与 **Codex** 两大代理。
 
 ## 架构（v2 — Core / Adapter 分层）
 
@@ -45,7 +45,28 @@ Harness Engineering 是一套为 AI 代理构建可靠编码环境的实践方�
 
 ## 快速开始
 
-### 安装
+### 两种安装生命周期 — 请勿混用
+
+Harness Companion 支持两种独立的安装方式。**选择其一**并坚持使用——交叉管理会导致冲突。
+
+**方式 A — Claude Code 市场（插件管理）：**
+
+```bash
+# 从本地仓库添加
+claude plugin marketplace add .
+
+# 或从 GitHub 添加
+claude plugin marketplace add s-max-oss/harness-companion
+
+# 安装并查看详情
+claude plugin install harness-companion@harness-engineering
+claude plugin details harness-companion@harness-engineering
+
+# 卸载
+claude plugin uninstall harness-companion@harness-engineering
+```
+
+**方式 B — 手动适配器安装（install.sh + uninstall.sh）：**
 
 ```bash
 # 克隆
@@ -61,6 +82,12 @@ bash harness-companion/install.sh --all                    # 同时安装两者
 bash harness-companion/adapters/claude-code/install.sh
 bash harness-companion/adapters/codex/install.sh --repo ~/my-project
 bash harness-companion/adapters/codex/install.sh --user
+
+# 卸载
+bash harness-companion/uninstall.sh                        # Claude（默认）
+bash harness-companion/uninstall.sh --codex                # Codex
+bash harness-companion/uninstall.sh --all                  # 全部
+bash harness-companion/adapters/claude-code/uninstall.sh   # 直接调用适配器路径
 ```
 
 安装脚本会自动：
@@ -68,6 +95,12 @@ bash harness-companion/adapters/codex/install.sh --user
 - 在 `~/.claude/settings.json` 中注册 SessionStart 和 Stop hooks（自动合并已有条目；幂等；修改前备份）
 - Codex 模式：写入 `.codex/hooks.json`（repo-local）或 `~/.codex/harness-hooks.toml`（user）
 - 写入 `install-receipt.json`（含版本、源 commit、SHA-256 完整性清单）
+
+卸载脚本会：
+- 通过 `install-receipt.json` 验证目标身份（receipt gate — 拒绝非 harness-companion 路径）
+- 拒绝删除空路径/根目录/家目录（target gate）
+- 从 `settings.json` 注销 hooks（fail-closed：JSON 损坏时拒绝修改）
+- 删除目标目录；报告需手动清理的项目
 
 ### 6 个命令
 
@@ -85,7 +118,7 @@ bash harness-companion/adapters/codex/install.sh --user
 | Adapter | Hook 事件 | 输出路径 | 备注 |
 |---------|-----------|----------|------|
 | **Claude Code** | SessionStart, Stop | `~/.claude/skills/harness-companion/` | 默认。`hookSpecificOutput.additionalContext` 注入状态；`systemMessage` 发送 handoff 警告。 |
-| **Codex** | SessionStart, Stop, PreToolUse | `<project>/.codex/` 或 `~/.codex/` | Phase 5b。PreToolUse 当前为 permissive（策略未启用）。`.codex-plugin/plugin.json` 支持 Codex 市场。 |
+| **Codex** | SessionStart, Stop, PreToolUse | `<project>/.codex/` 或 `~/.codex/` | 代码完成，运行时 E2E 待验证。PreToolUse 当前为 permissive（策略未启用）。`.codex-plugin/plugin.json` 支持 Codex 市场。 |
 
 ## 7 个子系统
 
@@ -134,7 +167,7 @@ harness-companion/
 │   └── codex/                     # Codex 协议映射（Phase 5b）
 │       ├── hooks/
 │       ├── adapter.conf
-│       ├── UNSUPPORTED.md
+│       ├── PHASE5B_STATUS.md      # Codex 状态说明（规范措辞）
 │       ├── install.sh             # 3 种模式：plugin / --repo / --user
 │       └── uninstall.sh
 ├── .codex-plugin/

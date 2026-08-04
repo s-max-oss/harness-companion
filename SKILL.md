@@ -51,11 +51,11 @@ harness-companion/
 │       ├── adapter.conf               # protocol_version=1
 │       ├── install.sh                 # 3 modes: plugin / --repo / --user
 │       ├── uninstall.sh
-│       ├── UNSUPPORTED.md
+│       ├── PHASE5B_STATUS.md          # Codex status qualification (canonical wording)
 │       ├── hooks/                     # session-start, stop-handoff, pre-tool-use
 │       └── templates/
 ├── .codex-plugin/
-│   ├── plugin.json                    # Codex plugin manifest (v 2.0.0-rc.1)
+│   ├── plugin.json                    # Codex plugin manifest (v 2.0.0-rc.2)
 │   ├── README.md
 │   └── skills/                        # Codex-discoverable skill bundle
 ├── hooks/

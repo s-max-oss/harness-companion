@@ -154,7 +154,7 @@ if [ "$MODE" = "--repo" ]; then
   cp "$ADAPTER_DIR/hooks/"*.cmd "$INSTALLED_HOOKS_DIR/"
   cp "$ADAPTER_DIR/install.sh" "$CODEX_DIR/adapters/codex/install.sh"
   cp "$ADAPTER_DIR/adapter.conf" "$CODEX_DIR/adapters/codex/adapter.conf"
-  cp "$ADAPTER_DIR/UNSUPPORTED.md" "$CODEX_DIR/adapters/codex/UNSUPPORTED.md"  # renamed to PHASE5B_STATUS.md
+  cp "$ADAPTER_DIR/PHASE5B_STATUS.md" "$CODEX_DIR/adapters/codex/PHASE5B_STATUS.md"
   echo "  copied adapters/codex/ → $CODEX_DIR/adapters/codex/"
 
   # ---- Backup existing hooks.json if present ---------------------------------

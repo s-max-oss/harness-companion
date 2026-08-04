@@ -166,10 +166,10 @@ if [ -f "$TMP_REPO/.codex/adapters/codex/hooks/session-start.cmd" ]; then
 else
   assert_fail "G5.M7 --repo copies adapters/codex/hooks/session-start.cmd"
 fi
-if [ -f "$TMP_REPO/.codex/adapters/codex/UNSUPPORTED.md" ]; then
-  assert_pass "G5.M7 --repo copies adapters/codex/UNSUPPORTED.md (Phase 5b status doc)"
+if [ -f "$TMP_REPO/.codex/adapters/codex/PHASE5B_STATUS.md" ]; then
+  assert_pass "G5.M7 --repo copies adapters/codex/PHASE5B_STATUS.md (canonical wording)"
 else
-  assert_fail "G5.M7 --repo copies adapters/codex/UNSUPPORTED.md"
+  assert_fail "G5.M7 --repo copies adapters/codex/PHASE5B_STATUS.md"
 fi
 
 # G5.M8: install-receipt.json written + status=code-complete-runtime-e2e-pending (AC-9 rc.2)

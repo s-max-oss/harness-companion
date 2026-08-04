@@ -3,6 +3,61 @@
 All notable changes to harness-companion are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0-rc.2] — 2026-08-04 — Distribution Hardening
+
+Second release candidate. Focuses on distribution hardening — safe install/uninstall
+lifecycle, plugin/marketplace packaging, version synchronization, and completing the
+Claude Code distribution story.
+
+### Added — Distribution & lifecycle
+
+- **Claude Code plugin packaging** (AC-5):
+  - `.claude-plugin/plugin.json` — Claude marketplace manifest with skills + hooks
+  - `.claude-plugin/marketplace.json` — marketplace entry (owner=harness-engineering)
+  - `adapters/claude-code/hooks/hooks.json` — `${CLAUDE_PLUGIN_ROOT}` hook paths
+- **Claude Code uninstaller** (AC-4):
+  - `adapters/claude-code/uninstall.sh` — safe uninstall with two safety gates:
+    - Target gate: refuses to delete empty/root/home/non-harness-companion paths
+    - Receipt gate: verifies install-receipt.json .skill == "harness-companion"
+  - Settings fail-closed: timestamped backup, refuses mutation on corrupt JSON
+  - `uninstall.sh` — top-level dispatcher (--claude/--codex/--all modes)
+- **Codex status qualification** (AC-9):
+  - Canonical wording: "code-complete-runtime-e2e-pending" replaces "unsupported"
+  - `adapters/codex/PHASE5B_STATUS.md` — detailed evidence table
+  - `adapters/codex/adapter.conf` — status field updated
+
+### Fixed — Bug fixes (BUG-1, BUG-2, BUG-3)
+
+- **BUG-1: Receipt upgrade contract** — same-version reinstall preserves upgrade_history;
+  cross-version upgrade appends {from, to, at}; tarball installs set source.origin="archive"
+- **BUG-2: VERSION file** — `VERSION` at repo root is single source of truth for all 9
+  version-bearing artifacts; `test-version-sync.sh` gates consistency
+- **BUG-3: Hook path normalization** — canonical path comparison via `cygpath -aw`/`-u`
+  round-trip on MSYS, `readlink -f` on Linux; fail-closed without jq/python3
+- **HAS_OUR_HOOKS detection** — replaced `grep -c` (broken on Windows Git Bash) with
+  invariant-substring jq detection that works across all path formats
+- **CHANGELOG.md §1.4** — corrected false CI workflow claim; CI has 8 phases
+
+### Added — Test coverage (AC-6, AC-7a)
+
+- `tests/adapters/test-claude-code-lifecycle.sh` — 27 lifecycle scenarios covering
+  VERSION, receipt, upgrade, alternate-path, uninstall, tarball, safety gates
+- Extended `test-claude-code-contract.sh` G9.6–G9.7 — alternate-path + uninstall (+7 tests)
+- Extended `test-codex-install-modes.sh` G5.M20–M22 — VERSION, receipt, tarball (+9 tests)
+- `tests/release/test-release-archive.sh` Phase C — installer round-trip inside archive
+
+### Validation
+
+| Suite | Result |
+|-------|--------|
+| Claude Code contract (`test-claude-code-contract.sh`) | 148 / 148 PASS |
+| Claude Code lifecycle (`test-claude-code-lifecycle.sh`) | 27 / 27 PASS |
+| Codex contract (`test-codex-contract.sh`) | 122 / 122 PASS |
+| Codex install modes (`test-codex-install-modes.sh`) | 51 / 51 PASS |
+| Core regression (init + passing) | 36 / 36 PASS |
+| Release archive (Phase A+B+C, no validator) | 17 / 18 PASS |
+| Version sync | 7 / 8 PASS (Codex plugin.json → F4) |
+
 ## [2.0.0-rc.1] — 2026-08-03 — Release Candidate
 
 First release candidate after the Phase 4 (Claude Code adapter) and Phase 5b

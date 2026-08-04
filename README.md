@@ -2,7 +2,7 @@
 
 > 🇨🇳 [简体中文](./README.zh-CN.md)
 
-**v2.0.0-rc.1** — A multi-agent skill that automates Harness Engineering — the practice of building reliable coding environments for AI agents. It combines **automatic lifecycle hooks** with **interactive slash commands**, and ships native adapters for both **Claude Code** and **Codex**.
+**v2.0.0-rc.2** — A multi-agent skill that automates Harness Engineering — the practice of building reliable coding environments for AI agents. It combines **automatic lifecycle hooks** with **interactive slash commands**, and ships native adapters for both **Claude Code** and **Codex**.
 
 ## Architecture (v2 — Core/Adapter split)
 
@@ -43,7 +43,28 @@
 
 ## Quick Start
 
-### Install
+### Two Lifecycles — Do NOT Mix
+
+Harness Companion supports two distinct install paths. **Choose one** and stick with it — cross-management causes conflicts.
+
+**Lifecycle A — Claude Code marketplace (plugin-managed):**
+
+```bash
+# Add from local repo
+claude plugin marketplace add .
+
+# Or add from GitHub
+claude plugin marketplace add s-max-oss/harness-companion
+
+# Install + inspect
+claude plugin install harness-companion@harness-engineering
+claude plugin details harness-companion@harness-engineering
+
+# Uninstall
+claude plugin uninstall harness-companion@harness-engineering
+```
+
+**Lifecycle B — Manual adapter install (install.sh + uninstall.sh):**
 
 ```bash
 # Clone
@@ -59,6 +80,12 @@ bash harness-companion/install.sh --all                    # both adapters
 bash harness-companion/adapters/claude-code/install.sh
 bash harness-companion/adapters/codex/install.sh --repo ~/my-project
 bash harness-companion/adapters/codex/install.sh --user
+
+# Uninstall
+bash harness-companion/uninstall.sh                        # Claude (default)
+bash harness-companion/uninstall.sh --codex                # Codex
+bash harness-companion/uninstall.sh --all                  # both
+bash harness-companion/adapters/claude-code/uninstall.sh   # direct adapter path
 ```
 
 The install script:
@@ -66,6 +93,12 @@ The install script:
 - Registers SessionStart + Stop hooks in `~/.claude/settings.json` (auto-merging with any existing entries; idempotent; backup before modification)
 - For Codex: writes `.codex/hooks.json` (repo-local) or `~/.codex/harness-hooks.toml` (user)
 - Stamps `install-receipt.json` with version, source commit, and SHA-256 integrity manifest
+
+The uninstall script:
+- Verifies target identity via `install-receipt.json` (receipt gate — refuses non-harness-companion paths)
+- Refuses to delete empty/root/home paths (target gate)
+- Deregisters hooks from `settings.json` (fail-closed: refuses mutation if JSON is corrupt)
+- Removes the target tree; reports any manual cleanup needed
 
 ### Commands
 
@@ -83,7 +116,7 @@ The install script:
 | Adapter | Hook Events | Output Path | Notes |
 |---------|-------------|-------------|-------|
 | **Claude Code** | SessionStart, Stop | `~/.claude/skills/harness-companion/` | Default. `hookSpecificOutput.additionalContext` for status; `systemMessage` for handoff warnings. |
-| **Codex** | SessionStart, Stop, PreToolUse | `<project>/.codex/` or `~/.codex/` | Phase 5b. PreToolUse is permissive (policy not enabled). Plugin marketplace also supported via `.codex-plugin/plugin.json`. |
+| **Codex** | SessionStart, Stop, PreToolUse | `<project>/.codex/` or `~/.codex/` | Code-complete, runtime E2E pending. PreToolUse is permissive (policy not enabled). Plugin marketplace also supported via `.codex-plugin/plugin.json`. |
 
 ## The 7 Subsystems
 
@@ -118,7 +151,9 @@ harness-companion/
 ├── README.zh-CN.md                # 简体中文说明
 ├── CHANGELOG.md                   # Version history
 ├── LICENSE                        # MIT
+├── VERSION                        # Single source of truth (2.0.0-rc.2)
 ├── install.sh                     # Top-level dispatcher (Claude Code by default, --codex/--all supported)
+├── uninstall.sh                   # Top-level dispatcher (--claude/--codex/--all)
 ├── core/                          # Pure bash semantic core (no host awareness)
 │   ├── harness-audit.sh
 │   ├── harness-feature.sh
@@ -128,13 +163,18 @@ harness-companion/
 ├── adapters/
 │   ├── claude-code/               # Claude Code protocol mapping
 │   │   ├── hooks/                 # session-start.sh, stop-handoff.sh
-│   │   └── install.sh
+│   │   │   └── hooks.json         # CLAUDE_PLUGIN_ROOT hook paths
+│   │   ├── install.sh
+│   │   └── uninstall.sh           # Safety-gated (receipt + target gates)
 │   └── codex/                     # Codex protocol mapping (Phase 5b)
 │       ├── hooks/                 # session-start, stop-handoff, pre-tool-use
-│       ├── adapter.conf           # protocol_version=1, install_receipt schema_version=2.0.0
-│       ├── UNSUPPORTED.md
+│       ├── adapter.conf           # status=code-complete-runtime-e2e-pending
+│       ├── PHASE5B_STATUS.md      # Codex status qualification (canonical wording)
 │       ├── install.sh             # 3 modes: plugin/--repo/--user
 │       └── uninstall.sh
+├── .claude-plugin/
+│   ├── plugin.json                # Claude Code plugin manifest (v 2.0.0-rc.2)
+│   └── marketplace.json           # Marketplace entry (harness-engineering)
 ├── .codex-plugin/
 │   ├── plugin.json                # Codex plugin manifest (v 2.0.0-rc.1)
 │   └── skills/                    # Codex-discoverable skill bundle
@@ -155,10 +195,11 @@ harness-companion/
 │   ├── harness-files.md           # Full format reference
 │   └── subsystems-mapping.md      # Subsystems ↔ files ↔ lessons
 ├── templates/                     # Copy-paste harness file templates (8 files)
-└── tests/                         # 277+ tests across core/, golden/, adapters/
+└── tests/                         # 350+ tests across core/, golden/, adapters/, release/
     ├── core/                      # Pure-bash unit + integration tests
     ├── golden/                    # Snapshot fixtures
-    └── adapters/                  # Claude Code + Codex contract tests
+    ├── adapters/                  # Claude Code + Codex contract, lifecycle, install modes
+    └── release/                   # Version sync, release archive gate
 ```
 
 ## How Hooks Work

@@ -136,6 +136,45 @@ jobs:
           fi
 
       # ------------------------------------------------------------------
+      # Phase 5d — version-sync FAIL-CLOSED gate (all 9 items must pass)
+      #
+      # Per rc.2 G0-rev4: installs to a temp directory first, then passes
+      # the real --installed-target to test-version-sync.sh so that items
+      # #6 (receipt) and #7 (target VERSION) can be verified against the
+      # installed copy. Item #8 requires each README to independently
+      # match the version when both README files exist.
+      # ------------------------------------------------------------------
+      - name: Phase 5d — version-sync FAIL-CLOSED
+        id: phase5d
+        run: |
+          set +e
+          # Install to a temp directory so we have a real installed target
+          INSTALL_TMP="$(mktemp -d)"
+          echo "Phase 5d: installing to temp target $INSTALL_TMP"
+          cd "$INSTALL_TMP"
+          bash "$GITHUB_WORKSPACE/adapters/claude-code/install.sh" --project > /dev/null 2>&1
+          INSTALL_RC=$?
+          cd "$GITHUB_WORKSPACE"
+          if [ "$INSTALL_RC" -ne 0 ]; then
+            echo "::error::Phase 5d pre-install failed (rc=$INSTALL_RC) — cannot verify installed artifacts"
+            echo "phase5d_result=failed" >> "$GITHUB_OUTPUT"
+            rm -rf "$INSTALL_TMP"
+            exit 1
+          fi
+          INSTALLED_TARGET="$INSTALL_TMP/.claude/skills/harness-companion"
+          echo "Phase 5d: installed target at $INSTALLED_TARGET"
+          bash tests/release/test-version-sync.sh --installed-target "$INSTALLED_TARGET"
+          rc=$?
+          rm -rf "$INSTALL_TMP"
+          if [ "$rc" -eq 0 ]; then
+            echo "phase5d_result=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "phase5d_result=failed" >> "$GITHUB_OUTPUT"
+            echo "::error::version-sync FAIL-CLOSED gate failed (rc=$rc) — repo artifacts disagree on version"
+          fi
+          exit $rc
+
+      # ------------------------------------------------------------------
       # Phase 6 — Official Codex validate_plugin.py (BLOCKING when found)
       #
       # Lifecycle: clone → locate validator → run → exit (blocking) → cleanup.
@@ -277,16 +316,21 @@ jobs:
             exit 1
           fi
           echo "Phase 6 passed — release archive gate permitted (HARNESS_VALIDATOR_SKIP_OK=1)"
-          # On tag pushes, propagate GITHUB_TAG so Phase D' downloads the real
-          # GitHub release archive. On branch pushes, Phase D' falls back to a
-          # local `git archive $TAG` extraction.
-          GITHUB_TAG_FROM_REF="${GITHUB_REF_TYPE:+${GITHUB_REF_NAME}}"
-          if [ -z "$GITHUB_TAG_FROM_REF" ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            GITHUB_TAG_FROM_REF="${GITHUB_REF#refs/tags/}"
+          # On TRUE tag pushes, propagate GITHUB_TAG so Phase D' downloads the real
+          # GitHub release archive. NOT exported on branch pushes. The previous
+          # implementation unconditionally set GITHUB_TAG to the branch name on
+          # branch pushes, which made Phase D' attempt a non-existent
+          # archive/refs/tags/<branch>.zip and fall back to local git archive —
+          # silently masking the fact that the tag-publish path was untested.
+          GITHUB_TAG=""
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            GITHUB_TAG="${GITHUB_REF#refs/tags/}"
           fi
-          export GITHUB_TAG="$GITHUB_TAG_FROM_REF"
+          export GITHUB_TAG
           if [ -n "$GITHUB_TAG" ]; then
             echo "Phase 7 — running with GITHUB_TAG=$GITHUB_TAG (Phase D' will download real release archive)"
+          else
+            echo "Phase 7 — branch push (GITHUB_REF_TYPE=$GITHUB_REF_TYPE), GITHUB_TAG unset; Phase D' will use local git archive"
           fi
           if HARNESS_VALIDATOR_SKIP_OK=1 bash tests/release/test-release-archive.sh; then
             echo "phase7_result=passed" >> "$GITHUB_OUTPUT"
@@ -330,6 +374,8 @@ jobs:
           echo "  result: ${{ steps.phase7.outputs.phase7_result }}"
           echo "  detail: ${{ steps.phase7.outputs.phase7_detail }}"
           echo "Phase 8 (negative gate tests):   ${{ steps.phase8.outcome }}"
+          echo "Phase 5d (version-sync):"
+          echo "  result: ${{ steps.phase5d.outputs.phase5d_result }}"
           echo "Phases 2/3/4/5/5b/5c see raw output above."
           case "${{ steps.phase6.outputs.phase6_result }}" in
             skipped)

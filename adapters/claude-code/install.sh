@@ -616,11 +616,11 @@ register_hooks() {
   fi
 
   # If explicit skip requested, proceed without idempotency check
+  local ss_exists=0 stop_exists=0
   if [ "${HARNESS_SKIP_HOOK_CHECK:-0}" = "1" ]; then
     echo "  HARNESS_SKIP_HOOK_CHECK=1 — skipping hook idempotency check"
   elif [ -f "$settings" ]; then
     # Extract existing SessionStart + Stop hook command paths and canonicalize them
-    local ss_exists=0 stop_exists=0
 
     if [ "$has_jq" -eq 1 ]; then
       # Extract all SessionStart hook commands using jq
@@ -662,10 +662,26 @@ register_hooks() {
       # Use python3 to extract raw existing hook paths from settings.json.
       # Python must NOT canonicalize — only Bash's canonical_path() does that.
       # This keeps the BUG-3 "single normalizer" contract intact.
+      # CRITICAL: on Windows, Python's stdout defaults to CRLF line endings.
+      # CRLF breaks the canonical_path() comparison downstream because the
+      # extracted path carries a trailing \r that makes it unequal to the
+      # LF-terminated CANON_SS/CANON_STOP. We force LF-only output via
+      # sys.stdout.reconfigure and explicit \n separators.
       local _py_script=""
       _py_script="${settings}.pycheck.$$"
       cat > "$_py_script" <<'PYEOF'
-import json, sys, os
+import json, sys, os, io
+# Force LF-only output (Windows default is CRLF, which breaks downstream
+# canonical_path() comparisons because of the trailing \r).
+try:
+    sys.stdout.reconfigure(newline='\n', encoding='utf-8')
+except (AttributeError, io.UnsupportedOperation):
+    pass
+try:
+    sys.stderr.reconfigure(newline='\n', encoding='utf-8')
+except (AttributeError, io.UnsupportedOperation):
+    pass
+
 settings_file = os.environ["SETTINGS_FILE"]
 
 def extract_path(cmd):
@@ -677,7 +693,7 @@ def extract_path(cmd):
 raw_ss = []
 raw_stop = []
 try:
-    with open(settings_file) as f:
+    with open(settings_file, encoding='utf-8') as f:
         data = json.load(f)
     hooks = data.get("hooks", {})
     for entry in hooks.get("SessionStart", []):
@@ -693,11 +709,21 @@ try:
 except (json.JSONDecodeError, FileNotFoundError, KeyError):
     pass
 
-# Print raw paths, one per line, NUL-delimited groups
-sys.stdout.write("\n".join(raw_ss) + "\n---SS/STOP---\n" + "\n".join(raw_stop))
+# Print raw paths, one per line, NUL-delimited groups (LF only).
+# CRITICAL: must end with a trailing newline. bash `while read` drops the
+# final line if EOF arrives without a \n, which would silently miss the
+# Stop hook entry and cause equivalent-path reinstalls to duplicate.
+sys.stdout.write("\n".join(raw_ss))
+sys.stdout.write("\n---SS/STOP---\n")
+sys.stdout.write("\n".join(raw_stop))
+sys.stdout.write("\n")
 PYEOF
       SETTINGS_FILE="$settings" python3 "$_py_script" 2>/dev/null > "${_py_script}.out" || true
-      if [ -s "${_py_script}.out" ]; then
+      # Belt-and-suspenders: also strip any residual \r from output. If the
+      # python reconfigure() above is bypassed (older Python, etc.) this
+      # tr/ deletes CR so canonical_path() doesn't see a \r suffix.
+      tr -d '\r' < "${_py_script}.out" > "${_py_script}.out.lf" 2>/dev/null || cp "${_py_script}.out" "${_py_script}.out.lf"
+      if [ -s "${_py_script}.out.lf" ]; then
         # Canonicalize extracted paths through Bash's canonical_path()
         local in_stop=0
         while IFS= read -r raw_path; do
@@ -713,9 +739,9 @@ PYEOF
           elif [ "$in_stop" -eq 1 ] && [ "$canon_extracted" = "$CANON_STOP" ]; then
             stop_exists=1
           fi
-        done < "${_py_script}.out"
+        done < "${_py_script}.out.lf"
       fi
-      rm -f "$_py_script" "${_py_script}.out"
+      rm -f "$_py_script" "${_py_script}.out" "${_py_script}.out.lf"
     fi
 
     if [ "$ss_exists" = "1" ] && [ "$stop_exists" = "1" ]; then
@@ -762,44 +788,61 @@ PYEOF
       rm -f "$tmp" "${tmp}.out"
     fi
   elif [ "$has_python" -eq 1 ]; then
-    # python3 writer — must NOT silently no-op. Build full settings via python
-    # and write atomically. Fail-closed on any error.
+    # python3 writer — uses bash pre-check ss_exists/stop_exists.
+    # Python MUST NOT canonicalize paths itself. The single normalizer is
+    # bash canonical_path() in the pre-check above. Python only adds the
+    # hook(s) that the pre-check determined are missing.
+    #
+    # JSON parse failure on an EXISTING settings.json: keep the original
+    # file unchanged and exit non-zero (fail-closed contract).
     local _py_writer="${settings}.pywrite.$$"
     cat > "$_py_writer" <<'PYEOF'
 import json, os, sys
+
 settings_file = os.environ["SETTINGS_FILE"]
 ss_cmd = os.environ["HOOK_SS_CMD"]
 stop_cmd = os.environ["HOOK_STOP_CMD"]
+ss_exists = os.environ.get("SS_EXISTS", "0")
+stop_exists = os.environ.get("STOP_EXISTS", "0")
 
+# Determine whether we must read an existing file vs. start fresh.
+# If the file exists but is not valid JSON, refuse to mutate it.
 try:
-    try:
+    if os.path.isfile(settings_file):
         with open(settings_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    else:
         data = {}
-    hooks = data.setdefault("hooks", {})
+except json.JSONDecodeError:
+    # Corrupted JSON in existing settings — MUST NOT mutate.
+    print(f"PYWRITE_FAIL: {settings_file} is not valid JSON — refusing to mutate", file=sys.stderr)
+    sys.exit(1)
+except Exception as exc:
+    print(f"PYWRITE_FAIL: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+hooks = data.setdefault("hooks", {})
+
+# Only add the hook(s) the bash pre-check determined are missing.
+# This avoids the duplicate-canonicalization bug: we trust the bash
+# single normalizer, not os.path.normcase/os.path.normpath.
+if ss_exists != "1":
     ss = hooks.setdefault("SessionStart", [])
-    if not any(
-        h.get("command") == ss_cmd
-        for entry in ss
-        for h in entry.get("hooks", [])
-    ):
-        ss.append({
-            "matcher": "startup|resume",
-            "hooks": [{"type": "command", "command": ss_cmd, "timeout": 5000}],
-        })
+    ss.append({
+        "matcher": "startup|resume",
+        "hooks": [{"type": "command", "command": ss_cmd, "timeout": 5000}],
+    })
+
+if stop_exists != "1":
     stop = hooks.setdefault("Stop", [])
-    if not any(
-        h.get("command") == stop_cmd
-        for entry in stop
-        for h in entry.get("hooks", [])
-    ):
-        stop.append({
-            "matcher": "*",
-            "hooks": [{"type": "command", "command": stop_cmd, "timeout": 5000}],
-        })
-    tmp = settings_file + ".tmp.py"
-    with open(tmp, "w", encoding="utf-8") as f:
+    stop.append({
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": stop_cmd, "timeout": 5000}],
+    })
+
+tmp = settings_file + ".tmp.py"
+try:
+    with open(tmp, "w", encoding="utf-8", newline='\n') as f:
         json.dump(data, f, indent=2)
         f.write("\n")
     os.replace(tmp, settings_file)
@@ -810,6 +853,8 @@ PYEOF
     if SETTINGS_FILE="$settings" \
        HOOK_SS_CMD="$hook_ss_cmd" \
        HOOK_STOP_CMD="$hook_stop_cmd" \
+       SS_EXISTS="$ss_exists" \
+       STOP_EXISTS="$stop_exists" \
        python3 "$_py_writer" 2>/dev/null; then
       writer_rc=0
     fi

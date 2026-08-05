@@ -1,155 +1,167 @@
-# G0 Acceptance Package — Revision
+# G0 Acceptance Package — Revision 4 (G0-rev4)
 
 **Branch:** `distribution/rc2-hardening`
-**Date:** 2026-08-04
-**Basis:** User rejection of initial G0 (commits `65e6431` + `df0f73f`) with 6 implementation blockers and 6 harness-loop blockers.
+**Date:** 2026-08-05
+**Basis:** User rejection of G0-rev3 with 5 implementation blockers:
 
-All 12 blockers are now addressed. Evidence: 15 harness-verify run_ids (all `run_completed:passed`), checklist passes all 4 fail-closed sections.
+1. Python writer still called `os.path.normcase`/`os.path.normpath` — must use bash pre-check exclusively
+2. JSON parse/decode failure on existing settings.json did not exit non-zero or left file mutated
+3. BUG3 matrix missing Python-only SessionStart-only, Stop-only, backslash, C:/, and corrupted JSON edge cases
+4. CI Phase 5d must install to temp dir + pass `--installed-target`; both READMEs independently checked
+5. Contract tests called regen that published back to source fixtures; must copy to temp first
 
----
-
-## Implementation Blockers (6/6 fixed)
-
-### B1: Python-only Claude install still silent success
-**Root cause:** `register_hooks()` had a single code path using `jq`; when jq was absent on PATH, the function silently exited 0 with no hooks registered and empty integrity.
-
-**Fix (F14.1):** `adapters/claude-code/install.sh` now has `has_jq`/`has_python` booleans. The write path selects the first available backend (python3 preferred, jq fallback). The verify path reads back with the same backend. When neither is available, `register_hooks` exits 1 with the message "FATAL: register_hooks cannot proceed".
-
-### B2: Tarball + Python-only crashes on undefined SOURCE_TAG
-**Root cause:** `SOURCE_TAG` was referenced without `${VAR:-}` default in archive mode.
-
-**Fix:** Already fixed before this revision — all `${SOURCE_TAG}` references are guarded with `${SOURCE_TAG:-}`.
-
-### B3: Codex integrity still empty object
-**Root cause:** Codex `install.sh` never regenerated the `integrity.files` map after installation or upgrade.
-
-**Fix (F14.2):** `adapters/codex/install.sh` now includes `regenerate_integrity()` (identical logic to Claude adapter). Called after fresh install (`build_fresh_codex_receipt()`) and after upgrade mutation when `OLD_VERSION != VERSION`. Integrity regenerates correctly: 29 files fresh, 30 after upgrade.
-
-### B4: No real GitHub tag Phase D (only local git archive HEAD)
-**Root cause:** Phase D in `test-release-archive.sh` only tested `git archive` output, not an actual published GitHub release artifact.
-
-**Fix (F14.3):** Phase D' added after Phase D:
-- D'1: Downloads real tag archive via `curl` from GitHub (`$GITHUB_TAG` or latest tag)
-- D'2: Verifies `install.sh` present (full layout check optional for legacy tags)
-- D'3: Verifies receipt `source` signals (accepts `origin=archive`, `commit=null/unknown/empty`)
-- D'4: Cleanup (skip if `uninstall.sh` absent in legacy tags)
-- Falls back to `git archive` when curl download fails.
-
-### B5: CI not modified (only master push/PR, no tag trigger)
-**Root cause:** `ci.yml` only triggered on `push: branches: [master]` and `pull_request: branches: [master]`.
-
-**Fix (F14.4):** `.github/workflows/ci.yml` now includes:
-- `on.push.tags: ['v*']` trigger
-- Phase 5b: `claude-lifecycle` test
-- Phase 5c: `bug3-matrix` (Windows/macOS only)
-- Phase 6b: `claude plugin validate . --strict` with 30s timeout
-- Phase 7: Propagates `GITHUB_TAG` from `$GITHUB_REF` for tag pushes
-- Summary updated to include phase6b
-
-### B6: `claude --plugin-dir` smoke is nominal (only jq reads manifest)
-**Root cause:** Phase G4 only read `plugin.json` with jq instead of actually invoking Claude.
-
-**Fix (F14.5):** Phase G4 now runs real `claude --plugin-dir "$G4_PLUG_DIR" --version` with 30s timeout. Accepts exit 0, 2, or non-zero with plugin-related output. Verifies the plugin directory is loadable by the real Claude CLI.
+This document describes the **fixes** applied for G0-rev4. Full evidence is in **[G0-EVIDENCE.md](G0-EVIDENCE.md)**.
 
 ---
 
-## Harness-Loop Blockers (6/6 fixed)
+## Implementation Blockers (4/4 fixed in code)
 
-### H1: F1-F5 run logs don't exist despite claims
-**Root cause:** Original run_ids referenced `.ndjson` files in `/tmp/harness-f11-23902/` which was deleted.
+### F14.1 / Gate 1: Python writer uses bash pre-check, no self-canonicalization
 
-**Fix (F14.10 + F14.12):** Stale run_ids removed from `feature_list.json` via python3 `os.path.isfile` check. All 15 features re-verified with `harness-verify --write` producing new run_ids with existing `.ndjson` files in `.harness/logs/runs/`.
+**Root cause (G0-rev3):** `register_hooks()` Python writer in `adapters/claude-code/install.sh` still called `os.path.normcase(os.path.normpath(...))` in its `exists_in()` function — a second canonicalizer that could disagree with bash `canonical_path()`. Additionally, JSON decode failure on an existing-but-corrupt `settings.json` would silently overwrite it with `{}` plus the new hooks — violating the fail-closed contract.
 
-### H2: Modified templates/checklist.sh but actual is checklist.sh at repo root
-**Root cause:** The F13 fix updated `templates/checklist.sh` but the active checklist at repo root was unchanged (49 lines, no 3b/3c/3d/3e).
+**Fix applied (G0-rev4):**
+- `register_hooks()` bash pre-check now sets `ss_exists`/`stop_exists` env vars via `canonical_path()` comparison
+- Python writer receives `SS_EXISTS`/`STOP_EXISTS` env vars; it ONLY adds the missing side
+- Python writer NO LONGER calls `os.path.normcase`/`os.path.normpath` — bash `canonical_path()` is the sole normalizer
+- JSON decode failure on existing `settings.json` exits non-zero WITHOUT mutating the file (`sys.exit(1)`)
+- `local ss_exists=0 stop_exists=0` declared BEFORE the if/elif chain (was inside `elif [ -f "$settings" ]` block — caused `unbound variable` on fresh installs with `set -u`)
 
-**Fix (F14.7):** Root `checklist.sh` now contains all 4 fail-closed sections (49→188 lines). Verified: checklist passes with all 4 sections green.
+### F14.4 / Gate 2: CI GITHUB_TAG only on real tag ref
 
-### H3: Fixture pollution ~34 uncommitted
-**Root cause:** Stale run directories without `.ndjson` companions, incomplete run logs from killed harness-verify processes, Windows `\r\n` line endings in jq output confusing the checklist.
+**Root cause:** `.github/workflows/ci.yml` Phase 7 unconditionally set `GITHUB_TAG` from `$GITHUB_REF_NAME`. On branch pushes this was the branch name, not a tag — silently testing against local `git archive` while pretending to be a tag push.
 
-**Fix (F14.10):** Orphan run dirs removed, incomplete ndjsons cleaned up, checklist.sh updated to handle `\r` in jq output, filter `null` run_ids from old-style evidence_associations, and guard `set -o pipefail` against grep pipeline failures on MSYS2 bash.
+**Fix applied:** Phase 7 only sets `GITHUB_TAG` when `GITHUB_REF_TYPE == "tag"` AND `GITHUB_REF` starts with `refs/tags/`. Branch pushes correctly leave GITHUB_TAG unset.
 
-### H4: Progress/handoff severely outdated
-**Root cause:** `claude-progress.md` and `session-handoff.md` reflected only the initial session state (11:32/11:39 timestamps).
+### F14.6 / Gate 3: BUG-3 Python-only/no-parser installer regression (extended to 14 tests)
 
-**Fix (F14.11):** Both files refreshed with complete F14.* feature log, all 15 run_ids table, current checklist results, and Session 002 log entry.
+**Root cause (G0-rev3):** C1–C9 covered canonical-path, jq-path, python-only first/same/equivalent-path, and no-parser fail-closed. But 5 Python-only real-installer edge cases were missing: SessionStart-only pre-existing settings, Stop-only pre-existing settings, Windows backslash paths, C:/ drive-letter paths, and corrupted JSON.
 
-### H5: F6-F13 not in feature registry
-**Root cause:** `feature_list.json` had no entries for F6-F14.
+**Fix applied (G0-rev4):** Added C10–C14 to `tests/adapters/test-bug3-matrix.sh`:
+- **C10** (SessionStart-only): pre-existing settings with only another skill's SessionStart hook → python-only reinstall adds missing Stop, doesn't duplicate SS
+- **C11** (Stop-only): pre-existing settings with only a Stop hook → python-only reinstall adds missing SessionStart, doesn't duplicate Stop
+- **C12** (Backslash): first install, then rewrite hook commands to Windows backslash form via `cygpath -aw` → reinstall must deduplicate
+- **C13** (C:/): first install, then rewrite hook commands to C:/ form via `cygpath -m` → reinstall must deduplicate
+- **C14** (Corrupted JSON): write deliberately broken JSON to settings.json → installer MUST exit non-zero AND settings.json MUST be byte-identical after (sha256sum comparison)
 
-**Fix (F14.8):** All 15 features (`F0`–`F14`) registered in `feature_list.json` with `status: "passing"` and `evidence_associations` containing valid `run_id`s.
+### F14.x / Gate 4: Version-sync all items fail-closed + CI Phase 5d temp-install
 
-### H6: Verification config incomplete
-**Root cause:** `.harness/config.json` only had 6 verification commands; missing the new F14 test suites.
+**Root cause (G0-rev3):** Version-sync items #6/#7 failed-closed when `--installed-target` was not provided (correct). But CI Phase 5d did not perform a real install → it couldn't pass `--installed-target`. Additionally, item #8 combined both READMEs into a single pass/fail — if one matched but the other didn't, it could pass or fail ambiguously.
 
-**Fix (F14.9):** Extended from 6 to 11 commands. Added: `claude-lifecycle`, `bug3-matrix`, `version-sync`, `release-archive`, `claude-plugin-validate` (optional). All required commands pass.
+**Fix applied (G0-rev4):**
+- CI Phase 5d: creates temp dir → runs `install.sh --project` inside temp → passes `--installed-target` pointing at installed copy to `test-version-sync.sh` → cleans up temp
+- Item #8: `README.md` and `README.zh-CN.md` each get their own independent PASS/FAIL line
+- All 10 items pass with `--installed-target` provided
 
 ---
 
-## Feature Run-ID Registry
+## Harness-Loop Blockers (3/3 fixed)
 
-All 15 features have `run_completed:passed` terminals with existing `.ndjson` log files:
+### H1: Fixture regeneration in temp copy + publish feature_list.json
 
-| # | Feature | run_id |
-|---|---------|--------|
-| F0 | spec-calibration | `20260804T140408Z-51503-30681` |
-| F1 | rc2-installer-bugs | `20260804T134707Z-1629-22825` |
-| F2 | claude-distribution | `20260804T134714Z-2240-31506` |
-| F3 | lifecycle-release-tests | `20260804T141112Z-1381-8068` |
-| F4 | rc2-documentation | `20260804T141540Z-447-19071` |
-| F5 | local-readiness | `20260804T142004Z-1660-27455` |
-| F6 | receipt-contract | `20260804T134222Z-953-26082` |
-| F7 | python-fail-closed | `20260804T134643Z-73-8414` |
-| F8 | hook-spaces | `20260804T142448Z-185-18440` |
-| F9 | codex-uninstall-map | `20260804T142910Z-1138-32578` |
-| F10 | release-archive | `20260804T143334Z-53-22838` |
-| F11 | harness-isolated-fixtures | `20260804T143803Z-1914-9182` |
-| F12 | bug3-matrix | `20260804T144303Z-38-20793` |
-| F13 | checklist-fail-closed | `20260804T144827Z-855-19371` |
-| F14 | g0-revision | `20260804T145425Z-864-11340` |
+**Root cause (G0-rev3):** `_regen-fixtures.sh` `publish_from_temp()` only copied `*.ndjson` files — it did NOT copy `feature_list.json` or the per-run directories. When `harness-verify` generated a new run_id, the temp work dir's `feature_list.json` was updated with the new run_id, but the source fixture's `feature_list.json` retained the old run_id. After `clear_source_runs` deleted the old NDJSON, the status renderer looked for the old-run-id NDJSON (via `feature_list.json` → `evidence_associations[].run_id`) and reported `run_log_missing` — even though a valid new NDJSON existed under a different name.
 
-## Checklist Results
+**Fix applied (G0-rev4):** `publish_from_temp()` now publishes:
+1. `*.ndjson` files (as before)
+2. Run directories (`<run_id>/` containing `typecheck.log`)
+3. `feature_list.json` from the temp work dir (so run_ids stay in sync with NDJSONs)
 
+This ensures `evidence_associations[].run_id` always matches an NDJSON filename on disk.
+
+### H2: Protected files removed from rc.2 submission
+
+**Root cause:** The previous `bd64b1e` commit had committed Tier-1/2 protected files.
+
+**Fix applied (G0-rev3, preserved):** `git reset --hard e354706` reverted that commit. Current working tree contains only:
 ```
-startup ... PASS
-shell syntax ... PASS
-diff whitespace ... PASS
-WIP=1 ... PASS (none)
-Working tree ... WARNING (uncommitted harness/development changes)
-
-[3b] Run-ID + Run-Log Integrity → OK
-[3c] Fixture Contamination → OK
-[3d] Orphan Harness Processes → OK
-[3e] Session Handoff Freshness → OK (8h old)
-
-Handoff checks passed.
+ M .github/workflows/ci.yml
+ M G0-ACCEPTANCE.md
+ M adapters/claude-code/install.sh
+ M tests/adapters/_regen-fixtures.sh
+ M tests/adapters/test-bug3-matrix.sh
+ M tests/adapters/test-claude-code-contract.sh
+ M tests/core/test-audit-score-axis.sh
+ M tests/release/test-version-sync.sh
+?? G0-EVIDENCE.md
+?? run-all-features.sh
 ```
+No protected files are tracked, modified, or staged.
 
-## Changed Files (uncommitted)
+### H3: Contract test fixture isolation (temp copy, no source mutation)
 
-```
-.github/workflows/ci.yml               — F14.4: tag trigger, Phase 5b/5c/6b/7
-adapters/claude-code/install.sh        — F14.1: python3 fail-closed register_hooks
-adapters/codex/install.sh              — F14.2: integrity regeneration
-checklist.sh                           — F14.7: 3b/3c/3d/3e fail-closed sections
-claude-progress.md                     — F14.11: refreshed
-session-handoff.md                     — F14.11: refreshed
-G0-ACCEPTANCE.md                       — F14.13: this document
-tests/adapters/test-bug3-matrix.sh     — F14.6: C1-C5 assertions (30/30 PASS)
-tests/release/test-release-archive.sh  — F14.3: Phase D', F14.5: Phase G4
-.harness/config.json                   — F14.9: 5 new required commands
-feature_list.json                      — F14.8: F6-F14 entries + run_ids
-```
+**Root cause (G0-rev3):** `test-claude-code-contract.sh` and `test-audit-score-axis.sh` called `_regen-fixtures.sh` directly, which published regenerated NDJSONs and `feature_list.json` back into the source `tests/adapters/fixtures/` tree. This violated the principle that contract tests must not mutate source fixtures.
+
+**Fix applied (G0-rev4):**
+- Both contract tests now copy the entire fixture root to a temp directory first
+- Set `FIXTURES_DIR` env var to point at the temp copy
+- Run `_regen-fixtures.sh` inside the temp copy only
+- Combined EXIT trap cleans up both TMPROOT and temp fixtures
+- Source fixture tree is NEVER mutated by contract test regeneration
+
+---
+
+## Regression Evidence — COMPLETED 2026-08-05
+
+Both required regression runs have been executed. Full results are in **[G0-EVIDENCE.md](G0-EVIDENCE.md)**.
+
+### Targeted regression (2026-08-05)
+| Test | Result |
+|------|--------|
+| `test-bug3-matrix.sh` (Gate 3) | 67 passed, 0 failed, 1 skip |
+| `test-claude-code-lifecycle.sh` (Gate 1) | 27 passed, 0 failed |
+| `test-version-sync.sh --installed-target` (Gate 4) | 10 passed, 0 failed |
+| `test-claude-code-contract.sh` (H-G3) | 148 passed, 0 failed |
+| `test-audit-score-axis.sh` (H-G3) | 15 passed, 0 failed |
+| CI workflow GITHUB_TAG + Phase 5d (Gate 2) | Static review passed |
+
+### Full release regression (2026-08-05, isolated clone)
+| Phase | Result |
+|-------|--------|
+| A (archive extraction) | 4/4 PASS |
+| B1 (core smoke) | 3/3 PASS |
+| B2 (adapter contracts) | Claude 148/0, Codex 122/0, Install modes 51/0 |
+| B3 (migration compat) | 106/0 (2 archive-mode skips) |
+| B4 (validate_plugin.py) | PASS |
+| C (installer round-trip) | 6/6 PASS |
+| D (integrity) | 4/4 PASS |
+| D' (tag archive) | 4/4 PASS |
+| E (marketplace) | 1 PASS, 1 SKIP |
+| F (claude validate) | PASS |
+| G (plugin-dir smoke) | 4/4 PASS |
+| **Total** | **32 passed, 0 failed, 1 skipped** |
+
+### Overall
+All 4 implementation gates and all 3 harness gates verified. Full release archive gate: 32/0/1. **No exit 1 recorded as gate passed.** See [G0-EVIDENCE.md](G0-EVIDENCE.md) for complete per-gate detail and Stop hook error report.
+
+---
+
+## Changes from G0-rev3
+
+| Area | G0-rev3 | G0-rev4 |
+|------|---------|---------|
+| Python writer canonicalization | Self-canonicalized via `normcase`/`normpath` | Uses bash pre-check `ss_exists`/`stop_exists` exclusively |
+| JSON fail-closed | Not enforced | Exits non-zero, byte-identical `settings.json` verified |
+| BUG3 matrix tests | C1–C9 (9 tests) | C1–C14 (14 tests) — +5 Python-only edge cases |
+| Version-sync | 7 pass + 2 expected fail | 10/10 pass with `--installed-target` |
+| README check | Combined pass/fail | Each README independently checked |
+| CI Phase 5d | None (no `--installed-target`) | Temp install + `--installed-target` |
+| Regen publish | Only `*.ndjson` files | NDJSONs + run dirs + `feature_list.json` |
+| Contract test regen | Mutated source fixtures | Temp copy, no source mutation |
+| `ss_exists` unbound | Bug: `local` inside `elif` block | Fixed: `local` before if/elif chain |
+| Release archive | Run in main working tree | Isolated clone + temp commit → `git archive HEAD` |
+| Evidence | Combined document | Separated G0-EVIDENCE.md with strict pass/fail |
+
+---
 
 ## Constraints Preserved
 
-- Work only in current dev repo and `distribution/rc2-hardening` branch
-- No modification to locally installed skill
-- No push/merge/tag/release
-- Complete autonomous loop before G0 acceptance submission
-- One-shot submission (this document)
+- No push, no merge, no tag, no release, no install.
+- No update of locally installed skill.
+- No new commits yet (all changes are uncommitted working-tree modifications).
+- Single commit for all G0-rev4 changes (per user directive: "完成后一次性提交复验").
+- Protected baseline files never modified.
+- Isolated clone used for release archive verification (temp commit, not in main working tree).
 
 ---
 
-End of G0 revision acceptance package.
+End of G0-rev4 acceptance package. Evidence in G0-EVIDENCE.md.

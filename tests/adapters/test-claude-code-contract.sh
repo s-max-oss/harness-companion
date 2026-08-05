@@ -33,17 +33,22 @@ if [ ! -x "$SESSION_START" ]; then
   exit 0
 fi
 
-# Regenerate fixtures so each NDJSON's workspace_fingerprint matches the
-# current fingerprint of the fixture directory. Required for the test package
-# to be portable to any copy path. See _regen-fixtures.sh for details.
+# G0-rev4: copy fixture root to temp so regeneration never mutates source fixtures.
+# Contract tests must not publish back to the source fixture tree.
+_TMP_FIXTURES="$(mktemp -d)"
+trap 'rm -rf "$_TMP_FIXTURES" "$TMPROOT"' EXIT
+cp -R "$FIXTURES_DIR/." "$_TMP_FIXTURES/" 2>/dev/null || true
+FIXTURES_DIR="$_TMP_FIXTURES"
+
+# Regenerate fixtures inside the temp copy only. The FIXTURES_DIR override
+# in _regen-fixtures.sh ensures all writes land in the temp copy.
 if [ -x "$TEST_DIR/_regen-fixtures.sh" ]; then
-  bash "$TEST_DIR/_regen-fixtures.sh" all >/dev/null 2>&1 || true
+  FIXTURES_DIR="$_TMP_FIXTURES" bash "$TEST_DIR/_regen-fixtures.sh" all >/dev/null 2>&1 || true
 fi
 
 PASSED=0
 FAILED=0
 TMPROOT="$(mktemp -d)"
-trap 'rm -rf "$TMPROOT"' EXIT
 
 assert() {
   local name="$1" expected="$2" actual="$3"

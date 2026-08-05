@@ -575,7 +575,519 @@ if [ "$IS_WINDOWS" -eq 1 ] && command -v cygpath >/dev/null 2>&1; then
 else
   echo "  [SKIP] C6.7-C6.9 — equivalent-path test requires MSYS+cygpath"
 fi
+echo ""
 
+# ---- F14.x/G0-rev3 C7: Python-only equivalent-path reinstall -------------
+# Forces the installer to use only the python3 writer/reader path by
+# shadowing `jq` with a wrapper that exits non-zero. This makes the
+# installer's `command -v jq >/dev/null 2>&1` check return false, so
+# the installer MUST use the python-only path. This is the real
+# regression for the Python-only hook-dedup bug: on Windows MSYS2 without
+# jq, the python writer must still dedupe hooks by canonical path (not
+# raw command string) so MSYS/Win32 equivalent-path reinstalls do not
+# create duplicate entries.
+echo "--- C7: Real installer in python-only (no-jq) mode ---"
+
+C7_SANDBOX="$(safe_mktemp)/harness C7 sandbox"
+mkdir -p "$C7_SANDBOX"
+mkdir -p "$C7_SANDBOX/.claude"
+echo '{}' > "$C7_SANDBOX/.claude/settings.json"
+
+# Build a PATH-shadow directory with a `jq` wrapper that fails (exit 127),
+# forcing the installer to fall back to python3. The wrapper is a
+# shell script — it shadows `jq` for `command -v` (which checks
+# executability, not semantics) and exits non-zero when actually invoked.
+C7_BIN="$(safe_mktemp)/c7bin"
+mkdir -p "$C7_BIN"
+cat > "$C7_BIN/jq" <<'JQEOF'
+#!/bin/bash
+# Shadow wrapper: makes `command -v jq` succeed (file is executable) but
+# any actual invocation exits 127 — so the installer's jq-dependent code
+# paths are bypassed and the python-only path is taken.
+exit 127
+JQEOF
+chmod +x "$C7_BIN/jq"
+
+# Capture the original PATH so we can restore it
+ORIG_PATH="$PATH"
+# Prepend our shadow bin to PATH
+export PATH="$C7_BIN:$PATH"
+
+# Verify the shadow works: command -v jq finds our wrapper, but invocation fails
+if command -v jq >/dev/null 2>&1; then
+  C7_JQ_SHADOW_OK=1
+else
+  C7_JQ_SHADOW_OK=0
+fi
+
+if [ "$C7_JQ_SHADOW_OK" -eq 1 ]; then
+  # Run installer with shadow active. python3 (real, on system PATH) is still
+  # resolvable because we PREPENDED our shadow rather than replacing PATH.
+  cd "$C7_SANDBOX"
+  bash "$C6_INSTALLER" --project > /dev/null 2>&1
+  C7_RC1=$?
+  cd "$(pwd)"  # back to original PWD (whatever it is)
+
+  # Read settings.json counts. We use python3 directly here (NOT jq) because
+  # the shadow bin shadows jq with a failing wrapper. Using `command -v jq`
+  # would find the shadow, invoking it would fail, and the `|| echo 0`
+  # pattern would treat that failure as "count is 0" — a false negative.
+  # The shadow bin does NOT contain python3, so `python3` resolves to the
+  # real system binary.
+  # The settings.json path may contain spaces, so we pass it via env var
+  # (path-as-arg with literal substitution breaks on space-containing paths).
+  C7_SS_COUNT_1=0
+  C7_STOP_COUNT_1=0
+  if [ -f "$C7_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+    C7_SS_COUNT_1="$(C7_SETTINGS="$C7_SANDBOX/.claude/settings.json" python3 -c 'import json, os; h=json.load(open(os.environ["C7_SETTINGS"])); print(len(h.get("hooks",{}).get("SessionStart",[])))' 2>/dev/null || echo 0)"
+    C7_STOP_COUNT_1="$(C7_SETTINGS="$C7_SANDBOX/.claude/settings.json" python3 -c 'import json, os; h=json.load(open(os.environ["C7_SETTINGS"])); print(len(h.get("hooks",{}).get("Stop",[])))' 2>/dev/null || echo 0)"
+  fi
+
+  # Same-path reinstall
+  cd "$C7_SANDBOX"
+  bash "$C6_INSTALLER" --project > /dev/null 2>&1
+  C7_RC2=$?
+  cd "$(pwd)"
+
+  C7_SS_COUNT_2=0
+  C7_STOP_COUNT_2=0
+  if [ -f "$C7_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+    C7_SS_COUNT_2="$(C7_SETTINGS="$C7_SANDBOX/.claude/settings.json" python3 -c 'import json, os; h=json.load(open(os.environ["C7_SETTINGS"])); print(len(h.get("hooks",{}).get("SessionStart",[])))' 2>/dev/null || echo 0)"
+    C7_STOP_COUNT_2="$(C7_SETTINGS="$C7_SANDBOX/.claude/settings.json" python3 -c 'import json, os; h=json.load(open(os.environ["C7_SETTINGS"])); print(len(h.get("hooks",{}).get("Stop",[])))' 2>/dev/null || echo 0)"
+  fi
+
+  assert "C7.1 installer exit 0 (first install, python-only path)" "0" "$C7_RC1"
+  assert "C7.2 first install: exactly 1 SessionStart hook" "1" "$C7_SS_COUNT_1"
+  assert "C7.3 first install: exactly 1 Stop hook" "1" "$C7_STOP_COUNT_1"
+  assert "C7.4 reinstall exit 0 (same path, python-only path)" "0" "$C7_RC2"
+  assert "C7.5 same-path reinstall: still 1 SessionStart" "1" "$C7_SS_COUNT_2"
+  assert "C7.6 same-path reinstall: still 1 Stop" "1" "$C7_STOP_COUNT_2"
+
+  # C7 equivalent-path reinstall (MSYS↔Win32 form swap) under python-only
+  if [ "$IS_WINDOWS" -eq 1 ] && command -v cygpath >/dev/null 2>&1; then
+    C7_WIN_FORM="$(cygpath -aw "$C7_SANDBOX" 2>/dev/null || echo "")"
+    if [ -n "$C7_WIN_FORM" ] && [ "$C7_WIN_FORM" != "$C7_SANDBOX" ]; then
+      C7_ALT_PATH="$(echo "$C7_WIN_FORM" | tr '\\' '/' | sed 's|^C:|/c|')"
+      if [ -d "$C7_ALT_PATH" ] && [ "$C7_ALT_PATH" != "$C7_SANDBOX" ]; then
+        cd "$C7_ALT_PATH"
+        bash "$C6_INSTALLER" --project > /dev/null 2>&1
+        C7_RC3=$?
+        cd "$(pwd)"
+
+        C7_SS_COUNT_3=0
+        C7_STOP_COUNT_3=0
+        if [ -f "$C7_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+          C7_SS_COUNT_3="$(C7_SETTINGS="$C7_SANDBOX/.claude/settings.json" python3 -c 'import json, os; h=json.load(open(os.environ["C7_SETTINGS"])); print(len(h.get("hooks",{}).get("SessionStart",[])))' 2>/dev/null || echo 0)"
+          C7_STOP_COUNT_3="$(C7_SETTINGS="$C7_SANDBOX/.claude/settings.json" python3 -c 'import json, os; h=json.load(open(os.environ["C7_SETTINGS"])); print(len(h.get("hooks",{}).get("Stop",[])))' 2>/dev/null || echo 0)"
+        fi
+
+        assert "C7.7 equiv-path reinstall exit 0 (python-only)" "0" "$C7_RC3"
+        assert "C7.8 equiv-path reinstall: still 1 SessionStart" "1" "$C7_SS_COUNT_3"
+        assert "C7.9 equiv-path reinstall: still 1 Stop" "1" "$C7_STOP_COUNT_3"
+      else
+        echo "  [SKIP] C7.7-C7.9 — alt path not reachable"
+      fi
+    else
+      echo "  [SKIP] C7.7-C7.9 — cygpath round-trip returned same form"
+    fi
+  else
+    echo "  [SKIP] C7.7-C7.9 — equivalent-path test requires MSYS+cygpath"
+  fi
+else
+  echo "  [SKIP] C7.1-C7.9 — could not install jq shadow wrapper"
+fi
+
+# Restore original PATH
+export PATH="$ORIG_PATH"
+
+# ---- F14.x/G0-rev3 C8: No-parser installer (must fail-closed) -------------
+# With BOTH jq and python3 unavailable, the installer MUST refuse to mutate
+# settings.json (return non-zero). This is the fail-closed contract.
+echo "--- C8: No-parser installer must fail-closed ---"
+
+C8_SANDBOX="$(safe_mktemp)/harness C8 sandbox"
+mkdir -p "$C8_SANDBOX"
+mkdir -p "$C8_SANDBOX/.claude"
+echo '{}' > "$C8_SANDBOX/.claude/settings.json"
+
+# Build a PATH-shadow directory with both `jq` and `python3` as failing
+# wrappers. Any system-installed jq/python3 is overridden by the
+# prepended bin.
+C8_BIN="$(safe_mktemp)/c8bin"
+mkdir -p "$C8_BIN"
+cat > "$C8_BIN/jq" <<'JQEOF'
+#!/bin/bash
+exit 127
+JQEOF
+chmod +x "$C8_BIN/jq"
+cat > "$C8_BIN/python3" <<'PYEOF'
+#!/bin/bash
+exit 127
+PYEOF
+chmod +x "$C8_BIN/python3"
+
+ORIG_PATH="$PATH"
+export PATH="$C8_BIN:$PATH"
+
+# Verify shadow wrappers are in effect
+C8_HAS_JQ=0
+C8_HAS_PY=0
+# A real `jq`/`python3` invocation must fail; `command -v` finds the wrapper
+if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  if jq --version >/dev/null 2>&1; then C8_HAS_JQ=1; fi
+  if python3 --version >/dev/null 2>&1; then C8_HAS_PY=1; fi
+fi
+
+if [ "$C8_HAS_JQ" -eq 0 ] && [ "$C8_HAS_PY" -eq 0 ]; then
+  set +e
+  cd "$C8_SANDBOX"
+  bash "$C6_INSTALLER" --project > /dev/null 2>&1
+  C8_RC=$?
+  cd "$(pwd)"
+  set -e
+  # settings.json must NOT contain new hooks (no mutation)
+  C8_HOOK_PRESENT=0
+  if [ -f "$C8_SANDBOX/.claude/settings.json" ]; then
+    if grep -q '"hooks"' "$C8_SANDBOX/.claude/settings.json" 2>/dev/null; then
+      C8_HOOK_PRESENT=1
+    fi
+  fi
+  assert "C8.1 no-parser installer exits non-zero" "1" "$([ "$C8_RC" -ne 0 ] && echo 1 || echo 0)"
+  assert "C8.2 no-parser installer did NOT mutate settings.json hooks" "0" "$C8_HOOK_PRESENT"
+else
+  echo "  [SKIP] C8.1-C8.2 — could not fully shadow jq+python3 (a real one is still reachable)"
+fi
+
+# Restore PATH
+export PATH="$ORIG_PATH"
+
+# ---- G0-rev4 C9: Python writer uses bash pre-check ss_exists/stop_exists ---
+# G0-rev4 contract: Python writer must NOT canonicalize. It must receive
+# SS_EXISTS / STOP_EXISTS from the bash pre-check and only add the
+# missing hook. Verify this contract in the installer source.
+echo "--- C9: Python writer receives SS_EXISTS/STOP_EXISTS from bash pre-check ---"
+
+C9_SS_EXISTS=0
+C9_STOP_EXISTS=0
+if grep -q 'SS_EXISTS' "$C6_INSTALLER" 2>/dev/null; then
+  C9_SS_EXISTS=1
+fi
+if grep -q 'STOP_EXISTS' "$C6_INSTALLER" 2>/dev/null; then
+  C9_STOP_EXISTS=1
+fi
+assert "C9.1 install.sh Python writer receives SS_EXISTS env var" "1" "$C9_SS_EXISTS"
+assert "C9.2 install.sh Python writer receives STOP_EXISTS env var" "1" "$C9_STOP_EXISTS"
+
+# Verify Python writer does NOT use os.path.normcase (no self-canonicalization)
+# Exclude comment lines (the comment itself warns against normcase/normpath).
+C9_NO_NORMCASE=0
+if ! grep -v '^[[:space:]]*#' <(sed -n '/elif \[ "\$has_python" -eq 1 \]/,/rm -f "\$_py_writer"/p' "$C6_INSTALLER" 2>/dev/null) | grep -q 'normcase\|normpath' 2>/dev/null; then
+  C9_NO_NORMCASE=1
+fi
+assert "C9.3 Python writer does NOT self-canonicalize (no normcase/normpath)" "1" "$C9_NO_NORMCASE"
+
+echo ""
+
+# ---- G0-rev4 C10: SessionStart-only (no Stop) reinstall ---------------
+# Pre-populate settings.json with ONLY a SessionStart hook (no Stop).
+# The installer must add the missing Stop hook but NOT duplicate SessionStart.
+echo "--- C10: SessionStart-only (no Stop) — python-only reinstall ---"
+
+C10_SANDBOX="$(safe_mktemp)/harness C10 sandbox"
+mkdir -p "$C10_SANDBOX/.claude"
+# Pre-populate: SessionStart with a DIFFERENT command (simulates another skill)
+cat > "$C10_SANDBOX/.claude/settings.json" <<SETEOF
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [{"type": "command", "command": "bash /other/skill/session-start.sh", "timeout": 5000}]
+      }
+    ]
+  }
+}
+SETEOF
+
+C10_BIN="$(safe_mktemp)/c10bin"
+mkdir -p "$C10_BIN"
+cat > "$C10_BIN/jq" <<'JQEOF'
+#!/bin/bash
+exit 127
+JQEOF
+chmod +x "$C10_BIN/jq"
+
+ORIG_PATH="$PATH"
+export PATH="$C10_BIN:$PATH"
+
+cd "$C10_SANDBOX"
+set +e
+bash "$C6_INSTALLER" --project > /dev/null 2>&1
+C10_RC=$?
+set -e
+cd "$(pwd)"
+
+export PATH="$ORIG_PATH"
+
+C10_SS_COUNT=0
+C10_STOP_COUNT=0
+if [ -f "$C10_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+  C10_SS_COUNT="$(C10S="$C10_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C10S"])); print(len(h.get("hooks",{}).get("SessionStart",[])))' 2>/dev/null || echo 0)"
+  C10_STOP_COUNT="$(C10S="$C10_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C10S"])); print(len(h.get("hooks",{}).get("Stop",[])))' 2>/dev/null || echo 0)"
+fi
+
+assert "C10.1 installer exit 0 (python-only, SS-only pre-existing)" "0" "$C10_RC"
+assert "C10.2 SessionStart entries: 2 (existing other + ours)" "2" "$C10_SS_COUNT"
+assert "C10.3 Stop entries: 1 (added missing Stop)" "1" "$C10_STOP_COUNT"
+echo ""
+
+# ---- G0-rev4 C11: Stop-only (no SessionStart) reinstall --------------
+# Pre-populate settings.json with ONLY a Stop hook (no SessionStart).
+# The installer must add the missing SessionStart but NOT duplicate Stop.
+echo "--- C11: Stop-only (no SessionStart) — python-only reinstall ---"
+
+C11_SANDBOX="$(safe_mktemp)/harness C11 sandbox"
+mkdir -p "$C11_SANDBOX/.claude"
+cat > "$C11_SANDBOX/.claude/settings.json" <<SETEOF
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": "bash /other/skill/stop-handoff.sh", "timeout": 5000}]
+      }
+    ]
+  }
+}
+SETEOF
+
+C11_BIN="$(safe_mktemp)/c11bin"
+mkdir -p "$C11_BIN"
+cat > "$C11_BIN/jq" <<'JQEOF'
+#!/bin/bash
+exit 127
+JQEOF
+chmod +x "$C11_BIN/jq"
+
+ORIG_PATH="$PATH"
+export PATH="$C11_BIN:$PATH"
+
+cd "$C11_SANDBOX"
+set +e
+bash "$C6_INSTALLER" --project > /dev/null 2>&1
+C11_RC=$?
+set -e
+cd "$(pwd)"
+
+export PATH="$ORIG_PATH"
+
+C11_SS_COUNT=0
+C11_STOP_COUNT=0
+if [ -f "$C11_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+  C11_SS_COUNT="$(C11S="$C11_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C11S"])); print(len(h.get("hooks",{}).get("SessionStart",[])))' 2>/dev/null || echo 0)"
+  C11_STOP_COUNT="$(C11S="$C11_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C11S"])); print(len(h.get("hooks",{}).get("Stop",[])))' 2>/dev/null || echo 0)"
+fi
+
+assert "C11.1 installer exit 0 (python-only, Stop-only pre-existing)" "0" "$C11_RC"
+assert "C11.2 SessionStart entries: 1 (added missing SessionStart)" "1" "$C11_SS_COUNT"
+assert "C11.3 Stop entries: 2 (existing other + ours)" "2" "$C11_STOP_COUNT"
+echo ""
+
+# ---- G0-rev4 C12: Backslash paths in settings.json --------------------
+# Pre-populate settings.json with a hook whose command uses backslash paths.
+# The bash pre-check must extract + canonicalize the path and recognize it
+# as equivalent to our forward-slash target path. Must NOT duplicate.
+echo "--- C12: Backslash paths in existing settings — python-only reinstall ---"
+
+C12_SANDBOX="$(safe_mktemp)/harness C12 sandbox"
+mkdir -p "$C12_SANDBOX/.claude"
+
+C12_BIN="$(safe_mktemp)/c12bin"
+mkdir -p "$C12_BIN"
+cat > "$C12_BIN/jq" <<'JQEOF'
+#!/bin/bash
+exit 127
+JQEOF
+chmod +x "$C12_BIN/jq"
+
+ORIG_PATH="$PATH"
+export PATH="$C12_BIN:$PATH"
+
+# First install to get our hooks
+C12_PWD="$(pwd)"
+cd "$C12_SANDBOX"
+bash "$C6_INSTALLER" --project > /dev/null 2>&1
+cd "$C12_PWD"
+
+# Now rewrite the command paths using Windows backslash form.
+# On MSYS, use cygpath to get the correct Windows path; on other platforms
+# backslash conversion is not meaningful (skip).
+C12_SKIP=0
+if [ -f "$C12_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+  if [ "$IS_WINDOWS" -eq 1 ] && command -v cygpath >/dev/null 2>&1; then
+    # Extract the target dir path from the hook command, convert to Windows form
+    C12_TARGET="$C12_SANDBOX/.claude/skills/harness-companion"
+    C12_TARGET_WIN="$(cygpath -aw "$C12_TARGET" 2>/dev/null | tr '/' '\\\\' || echo "")"
+    if [ -n "$C12_TARGET_WIN" ]; then
+      C12S="$C12_SANDBOX/.claude/settings.json" C12W="$C12_TARGET_WIN" python3 -c "
+import json, os
+target_win = os.environ['C12W']
+with open(os.environ['C12S']) as f:
+    d = json.load(f)
+for entry in d.get('hooks',{}).get('SessionStart',[]):
+    for h in entry.get('hooks',[]):
+        h['command'] = 'bash \"' + target_win + '\\\\scripts\\\\hooks\\\\session-start.sh\"'
+for entry in d.get('hooks',{}).get('Stop',[]):
+    for h in entry.get('hooks',[]):
+        h['command'] = 'bash \"' + target_win + '\\\\scripts\\\\hooks\\\\stop-handoff.sh\"'
+with open(os.environ['C12S'], 'w') as f:
+    json.dump(d, f, indent=2)
+    f.write('\n')
+" 2>/dev/null || true
+    else
+      C12_SKIP=1
+    fi
+  else
+    C12_SKIP=1
+  fi
+fi
+
+if [ "$C12_SKIP" -eq 0 ]; then
+  # Reinstall — should deduplicate and NOT add extra entries
+  cd "$C12_SANDBOX"
+  set +e
+  bash "$C6_INSTALLER" --project > /dev/null 2>&1
+  C12_RC=$?
+  set -e
+  cd "$C12_PWD"
+
+  C12_SS_COUNT=0
+  C12_STOP_COUNT=0
+  if [ -f "$C12_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+    C12_SS_COUNT="$(C12S="$C12_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C12S"])); print(len(h.get("hooks",{}).get("SessionStart",[])))' 2>/dev/null || echo 0)"
+    C12_STOP_COUNT="$(C12S="$C12_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C12S"])); print(len(h.get("hooks",{}).get("Stop",[])))' 2>/dev/null || echo 0)"
+  fi
+
+  assert "C12.1 reinstall exit 0 (backslash paths in existing settings)" "0" "$C12_RC"
+  assert "C12.2 SessionStart still 1 (backslash dedup worked)" "1" "$C12_SS_COUNT"
+  assert "C12.3 Stop still 1 (backslash dedup worked)" "1" "$C12_STOP_COUNT"
+else
+  echo "  [SKIP] C12 — backslash conversion requires Windows+cygpath"
+fi
+
+export PATH="$ORIG_PATH"
+echo ""
+
+# ---- G0-rev4 C13: C:/ drive-letter paths in settings.json ------------
+# On Windows MSYS, C:/Users/... and /c/Users/... refer to the same file.
+# Pre-populate with C:/ form and verify the installer deduplicates.
+echo "--- C13: C:/ drive-letter paths — python-only reinstall ---"
+
+C13_SANDBOX="$(safe_mktemp)/harness C13 sandbox"
+mkdir -p "$C13_SANDBOX/.claude"
+
+C13_BIN="$(safe_mktemp)/c13bin"
+mkdir -p "$C13_BIN"
+cat > "$C13_BIN/jq" <<'JQEOF'
+#!/bin/bash
+exit 127
+JQEOF
+chmod +x "$C13_BIN/jq"
+
+ORIG_PATH="$PATH"
+export PATH="$C13_BIN:$PATH"
+
+# First install to get our hooks
+cd "$C13_SANDBOX"
+bash "$C6_INSTALLER" --project > /dev/null 2>&1
+cd "$(pwd)"
+
+# On Windows, rewrite paths to C:/ form (cygpath -aw then forward-slash)
+if [ "$IS_WINDOWS" -eq 1 ] && command -v cygpath >/dev/null 2>&1 && [ -f "$C13_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+  C13_TARGET_WIN="$(cygpath -aw "$C13_SANDBOX/.claude/skills/harness-companion" 2>/dev/null | tr '\\\\' '/' || echo "")"
+  if [ -n "$C13_TARGET_WIN" ]; then
+    C13S="$C13_SANDBOX/.claude/settings.json" C13W="$C13_TARGET_WIN" python3 -c "
+import json, os
+with open(os.environ['C13S']) as f:
+    d = json.load(f)
+for entry in d.get('hooks',{}).get('SessionStart',[]):
+    for h in entry.get('hooks',[]):
+        h['command'] = 'bash \"' + os.environ['C13W'] + '/scripts/hooks/session-start.sh\"'
+for entry in d.get('hooks',{}).get('Stop',[]):
+    for h in entry.get('hooks',[]):
+        h['command'] = 'bash \"' + os.environ['C13W'] + '/scripts/hooks/stop-handoff.sh\"'
+with open(os.environ['C13S'], 'w') as f:
+    json.dump(d, f, indent=2)
+    f.write('\n')
+" 2>/dev/null || true
+  fi
+
+  # Reinstall — should deduplicate
+  cd "$C13_SANDBOX"
+  set +e
+  bash "$C6_INSTALLER" --project > /dev/null 2>&1
+  C13_RC=$?
+  set -e
+  cd "$(pwd)"
+
+  C13_SS_COUNT=0
+  C13_STOP_COUNT=0
+  if [ -f "$C13_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+    C13_SS_COUNT="$(C13S="$C13_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C13S"])); print(len(h.get("hooks",{}).get("SessionStart",[])))' 2>/dev/null || echo 0)"
+    C13_STOP_COUNT="$(C13S="$C13_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C13S"])); print(len(h.get("hooks",{}).get("Stop",[])))' 2>/dev/null || echo 0)"
+  fi
+
+  assert "C13.1 reinstall exit 0 (C:/ paths in existing settings)" "0" "$C13_RC"
+  assert "C13.2 SessionStart still 1 (C:/ dedup worked)" "1" "$C13_SS_COUNT"
+  assert "C13.3 Stop still 1 (C:/ dedup worked)" "1" "$C13_STOP_COUNT"
+else
+  echo "  [SKIP] C13 — C:/ path test requires Windows+cygpath"
+fi
+
+export PATH="$ORIG_PATH"
+echo ""
+
+# ---- G0-rev4 C14: Corrupted JSON — must fail-closed, no mutation -----
+# If settings.json exists but is not valid JSON, the installer MUST:
+#   1. Exit non-zero
+#   2. NOT mutate settings.json (preserve original corrupted content)
+echo "--- C14: Corrupted JSON — python-only fail-closed, no mutation ---"
+
+C14_SANDBOX="$(safe_mktemp)/harness C14 sandbox"
+mkdir -p "$C14_SANDBOX/.claude"
+# Write deliberately corrupted JSON
+printf '{"hooks": {"SessionStart": [\nCORRUPTED_NOT_JSON' > "$C14_SANDBOX/.claude/settings.json"
+C14_ORIG_SHA="$(sha256sum "$C14_SANDBOX/.claude/settings.json" 2>/dev/null | awk '{print $1}' || echo "")"
+
+C14_BIN="$(safe_mktemp)/c14bin"
+mkdir -p "$C14_BIN"
+cat > "$C14_BIN/jq" <<'JQEOF'
+#!/bin/bash
+exit 127
+JQEOF
+chmod +x "$C14_BIN/jq"
+
+ORIG_PATH="$PATH"
+export PATH="$C14_BIN:$PATH"
+
+cd "$C14_SANDBOX"
+set +e
+bash "$C6_INSTALLER" --project > /dev/null 2>&1
+C14_RC=$?
+set -e
+cd "$(pwd)"
+
+export PATH="$ORIG_PATH"
+
+# settings.json must be byte-identical to original (no mutation)
+C14_POST_SHA="$(sha256sum "$C14_SANDBOX/.claude/settings.json" 2>/dev/null | awk '{print $1}' || echo "")"
+C14_UNCHANGED=0
+if [ "$C14_ORIG_SHA" = "$C14_POST_SHA" ]; then
+  C14_UNCHANGED=1
+fi
+
+assert "C14.1 corrupted JSON: installer exits non-zero" "1" "$([ "$C14_RC" -ne 0 ] && echo 1 || echo 0)"
+assert "C14.2 corrupted JSON: settings.json unchanged (no mutation)" "1" "$C14_UNCHANGED"
 echo ""
 
 echo "=== F12 BUG-3 Matrix Summary ==="

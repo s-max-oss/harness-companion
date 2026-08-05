@@ -183,6 +183,59 @@ run_isolated_test() {
   return "$rc"
 }
 
+# ---- e2_archive_gate — single source of truth for archive E2 --------------
+# Usage: e2_archive_gate <archive_dir>
+#
+# Validates that the archive candidate contains a release tag trigger in its
+# GitHub workflow(s). ALL code (workflows, e2_aggregate.sh, e2_check.py) is
+# resolved from <archive_dir> — there is NO external fallback.
+#
+# Exit codes (shell, not stdout):
+#   0 — PASS: release tag trigger found
+#   1 — FAIL: aggregation returned NOT_FOUND / PARSE_ERR / DEP_MISSING
+#   2 — FAIL: e2_aggregate.sh missing or unreadable in archive
+#   3 — FAIL: e2_check.py missing or unreadable in archive
+#
+# Output on stdout: human-readable verdict (line 1 = "PASS" or "FAIL").
+e2_archive_gate() {
+  local archive_dir="$1"
+  local aggregator="$archive_dir/tests/release/e2_aggregate.sh"
+  local checker="$archive_dir/tests/release/e2_check.py"
+  local workflows="$archive_dir/.github/workflows"
+
+  # Gate 1: aggregator must exist in the archive candidate.
+  if [ ! -f "$aggregator" ] || [ ! -r "$aggregator" ]; then
+    echo "FAIL"
+    echo "E2_AGGREGATOR_MISSING: $aggregator"
+    return 2
+  fi
+
+  # shellcheck disable=SC1090
+  . "$aggregator"
+
+  # Gate 2: checker must exist in the archive candidate.
+  if [ ! -f "$checker" ] || [ ! -r "$checker" ]; then
+    echo "FAIL"
+    echo "E2_CHECKER_MISSING: $checker"
+    return 3
+  fi
+
+  # Gate 3: aggregate across all workflow files.
+  local verdict first_line
+  verdict="$(e2_aggregate "$workflows" "$checker")"
+  first_line="$(printf '%s' "$verdict" | head -1)"
+
+  if [ "$first_line" = "PASS" ]; then
+    echo "PASS"
+    echo "E2: release tag trigger found in GitHub workflow(s)"
+    return 0
+  else
+    echo "FAIL"
+    printf '%s\n' "$verdict" | tail -n +2
+    return 1
+  fi
+}
+
 # Run representative core smoke tests from the extracted archive. The full
 # core regression already runs in CI Phase 1; repeating all 11 suites here
 # pushed the release job beyond its 30-minute timeout without adding archive-
@@ -688,26 +741,137 @@ else
   FAILED=$((FAILED + 1))
 fi
 
-# E2: Verify .github/workflows/ tag trigger exists (if applicable)
-if [ -d "$SOURCE_REPO/.github/workflows" ]; then
-  TAG_TRIGGER_FOUND=0
-  for wf in "$SOURCE_REPO/.github/workflows/"*.yml "$SOURCE_REPO/.github/workflows/"*.yaml; do
-    [ -f "$wf" ] || continue
-    if grep -qE 'tags:.*v?[0-9]+\.[0-9]+\.[0-9]+|tags:\s*["'\'']?v\*' "$wf" 2>/dev/null; then
-      TAG_TRIGGER_FOUND=1
-      break
-    fi
-  done
-  if [ "$TAG_TRIGGER_FOUND" -eq 1 ]; then
-    echo "PASS: E2 — tag trigger found in GitHub workflow"
+# E2 (production): call the single e2_archive_gate on the REAL archive candidate.
+# e2_archive_gate is the single source of truth — both the production Phase E2
+# and the E3/E4 negative tests below call the SAME function. Exit codes:
+#   0 = PASS, 1 = aggregation FAIL, 2 = aggregator missing, 3 = checker missing.
+
+E2_OUT="$(e2_archive_gate "$FULL_ARCHIVE_DIR")"
+E2_RC=$?
+E2_FIRST="$(printf '%s' "$E2_OUT" | head -1)"
+if [ "$E2_RC" -eq 0 ]; then
+  echo "PASS: E2 — release tag trigger found in GitHub workflow(s) (archive)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: E2 — release tag trigger NOT verified in archive (gate rc=$E2_RC)"
+  printf '%s\n' "$E2_OUT" | tail -n +2 | sed 's/^/  /'
+  FAILED=$((FAILED + 1))
+fi
+
+# ---- Phase E3: Negative — archive missing e2_check.py -------------------
+# Full archive copy, remove ONLY e2_check.py, call the REAL e2_archive_gate.
+# Gate must return rc=3 with E2_CHECKER_MISSING.
+# Fail-open hardening: copy failure is fatal; pre-delete and post-delete
+# assertions prove the fixture is exactly what we claim.
+echo ""
+echo "=== Phase E3: Negative — archive missing e2_check.py ==="
+E3_ARCHIVE_DIR=""
+safe_mktemp E3_ARCHIVE_DIR "phase-e3-neg-e2-check" || exit 1
+cp -r "$FULL_ARCHIVE_DIR/." "$E3_ARCHIVE_DIR/" 2>/dev/null
+E3_COPY_RC=$?
+E3_OK=1
+if [ "$E3_COPY_RC" -ne 0 ]; then
+  echo "FAIL: E3 — archive copy failed (rc=$E3_COPY_RC)"
+  E3_OK=0
+fi
+if [ "$E3_OK" -ne 0 ] && [ ! -d "$E3_ARCHIVE_DIR/.github/workflows" ]; then
+  echo "FAIL: E3 — pre-delete: .github/workflows missing from temp copy"
+  E3_OK=0
+fi
+if [ "$E3_OK" -ne 0 ] && [ ! -f "$E3_ARCHIVE_DIR/tests/release/e2_check.py" ]; then
+  echo "FAIL: E3 — pre-delete: e2_check.py missing from temp copy"
+  E3_OK=0
+fi
+if [ "$E3_OK" -ne 0 ] && [ ! -f "$E3_ARCHIVE_DIR/tests/release/e2_aggregate.sh" ]; then
+  echo "FAIL: E3 — pre-delete: e2_aggregate.sh missing from temp copy"
+  E3_OK=0
+fi
+if [ "$E3_OK" -ne 0 ]; then
+  rm -f "$E3_ARCHIVE_DIR/tests/release/e2_check.py"
+fi
+if [ "$E3_OK" -ne 0 ] && [ -f "$E3_ARCHIVE_DIR/tests/release/e2_check.py" ]; then
+  echo "FAIL: E3 — post-delete: e2_check.py still present (deletion failed)"
+  E3_OK=0
+fi
+if [ "$E3_OK" -ne 0 ] && [ ! -f "$E3_ARCHIVE_DIR/tests/release/e2_aggregate.sh" ]; then
+  echo "FAIL: E3 — post-delete: e2_aggregate.sh missing (should still exist)"
+  E3_OK=0
+fi
+if [ "$E3_OK" -ne 0 ] && [ ! -d "$E3_ARCHIVE_DIR/.github/workflows" ]; then
+  echo "FAIL: E3 — post-delete: .github/workflows missing (should still exist)"
+  E3_OK=0
+fi
+if [ "$E3_OK" -eq 0 ]; then
+  FAILED=$((FAILED + 1))
+else
+  E3_OUT="$(e2_archive_gate "$E3_ARCHIVE_DIR")"
+  E3_RC=$?
+  if [ "$E3_RC" -eq 3 ] && printf '%s' "$E3_OUT" | grep -q 'E2_CHECKER_MISSING'; then
+    echo "PASS: E3 — archive missing e2_check.py correctly FAIL (gate rc=$E3_RC, checker missing)"
     PASSED=$((PASSED + 1))
   else
-    echo "SKIP: E2 — no vX.Y.Z tag trigger pattern matched (may use different format)"
-    SKIPPED=$((SKIPPED + 1))
+    echo "FAIL: E3 — archive missing e2_check.py but gate rc=$E3_RC (expected rc=3 with E2_CHECKER_MISSING)"
+    printf '%s\n' "$E3_OUT" | sed 's/^/  /'
+    FAILED=$((FAILED + 1))
   fi
+fi
+
+# ---- Phase E4: Negative — archive missing e2_aggregate.sh ---------------
+# Full archive copy, remove ONLY e2_aggregate.sh, call the REAL e2_archive_gate.
+# Gate must return rc=2 with E2_AGGREGATOR_MISSING.
+# Fail-open hardening: copy failure is fatal; pre-delete and post-delete
+# assertions prove the fixture is exactly what we claim.
+echo ""
+echo "=== Phase E4: Negative — archive missing e2_aggregate.sh ==="
+E4_ARCHIVE_DIR=""
+safe_mktemp E4_ARCHIVE_DIR "phase-e4-neg-e2-aggregate" || exit 1
+cp -r "$FULL_ARCHIVE_DIR/." "$E4_ARCHIVE_DIR/" 2>/dev/null
+E4_COPY_RC=$?
+E4_OK=1
+if [ "$E4_COPY_RC" -ne 0 ]; then
+  echo "FAIL: E4 — archive copy failed (rc=$E4_COPY_RC)"
+  E4_OK=0
+fi
+if [ "$E4_OK" -ne 0 ] && [ ! -d "$E4_ARCHIVE_DIR/.github/workflows" ]; then
+  echo "FAIL: E4 — pre-delete: .github/workflows missing from temp copy"
+  E4_OK=0
+fi
+if [ "$E4_OK" -ne 0 ] && [ ! -f "$E4_ARCHIVE_DIR/tests/release/e2_check.py" ]; then
+  echo "FAIL: E4 — pre-delete: e2_check.py missing from temp copy"
+  E4_OK=0
+fi
+if [ "$E4_OK" -ne 0 ] && [ ! -f "$E4_ARCHIVE_DIR/tests/release/e2_aggregate.sh" ]; then
+  echo "FAIL: E4 — pre-delete: e2_aggregate.sh missing from temp copy"
+  E4_OK=0
+fi
+if [ "$E4_OK" -ne 0 ]; then
+  rm -f "$E4_ARCHIVE_DIR/tests/release/e2_aggregate.sh"
+fi
+if [ "$E4_OK" -ne 0 ] && [ -f "$E4_ARCHIVE_DIR/tests/release/e2_aggregate.sh" ]; then
+  echo "FAIL: E4 — post-delete: e2_aggregate.sh still present (deletion failed)"
+  E4_OK=0
+fi
+if [ "$E4_OK" -ne 0 ] && [ ! -f "$E4_ARCHIVE_DIR/tests/release/e2_check.py" ]; then
+  echo "FAIL: E4 — post-delete: e2_check.py missing (should still exist)"
+  E4_OK=0
+fi
+if [ "$E4_OK" -ne 0 ] && [ ! -d "$E4_ARCHIVE_DIR/.github/workflows" ]; then
+  echo "FAIL: E4 — post-delete: .github/workflows missing (should still exist)"
+  E4_OK=0
+fi
+if [ "$E4_OK" -eq 0 ]; then
+  FAILED=$((FAILED + 1))
 else
-  echo "SKIP: E2 — no .github/workflows/ in repo"
-  SKIPPED=$((SKIPPED + 1))
+  E4_OUT="$(e2_archive_gate "$E4_ARCHIVE_DIR")"
+  E4_RC=$?
+  if [ "$E4_RC" -eq 2 ] && printf '%s' "$E4_OUT" | grep -q 'E2_AGGREGATOR_MISSING'; then
+    echo "PASS: E4 — archive missing e2_aggregate.sh correctly FAIL (gate rc=$E4_RC, aggregator missing)"
+    PASSED=$((PASSED + 1))
+  else
+    echo "FAIL: E4 — archive missing e2_aggregate.sh but gate rc=$E4_RC (expected rc=2 with E2_AGGREGATOR_MISSING)"
+    printf '%s\n' "$E4_OUT" | sed 's/^/  /'
+    FAILED=$((FAILED + 1))
+  fi
 fi
 
 # ---- Phase F: Claude plugin validate phase (F10) ---------------------------

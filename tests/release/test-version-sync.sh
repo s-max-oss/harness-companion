@@ -245,7 +245,9 @@ if [ -f "$SOURCE_REPO/README.zh-CN.md" ]; then
     README_ALL_OK=0
   fi
 else
-  echo "  INFO: #8 README.zh-CN.md not present (English README is the canonical)"
+  echo "  FAIL: #8 README.zh-CN.md not present (release artifact, must exist)"
+  FAILED=$((FAILED + 1))
+  README_ALL_OK=0
 fi
 
 # 9. CHANGELOG — REQUIRED must mention version

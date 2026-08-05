@@ -1,167 +1,117 @@
-# G0 Acceptance Package — Revision 4 (G0-rev4)
+# G0 Acceptance Package — Revision 5 收尾 v3 (G0-rev5-v3-final)
 
 **Branch:** `distribution/rc2-hardening`
-**Date:** 2026-08-05
-**Basis:** User rejection of G0-rev3 with 5 implementation blockers:
+**Commit:** current HEAD (this commit, not yet pushed)
+**Parent commit:** `6784d70` (G0-rev4)
+**History:** The current commit is the result of a sequence of in-place amendments (no new commits). To identify the exact SHA at any time, use `git rev-parse HEAD` — this document deliberately does not hardcode an SHA.
 
-1. Python writer still called `os.path.normcase`/`os.path.normpath` — must use bash pre-check exclusively
-2. JSON parse/decode failure on existing settings.json did not exit non-zero or left file mutated
-3. BUG3 matrix missing Python-only SessionStart-only, Stop-only, backslash, C:/, and corrupted JSON edge cases
-4. CI Phase 5d must install to temp dir + pass `--installed-target`; both READMEs independently checked
-5. Contract tests called regen that published back to source fixtures; must copy to temp first
-
-This document describes the **fixes** applied for G0-rev4. Full evidence is in **[G0-EVIDENCE.md](G0-EVIDENCE.md)**.
+G0-rev5 core implementation was accepted at the v2 closure pass on top of `6784d70`. The current commit (`current HEAD`) is a v3 closure pass that fixes jq writer defects discovered during rc.2 review and tightens the E2 contract.
 
 ---
 
-## Implementation Blockers (4/4 fixed in code)
+## 收尾 v3 变更（与 v2 的差异）
 
-### F14.1 / Gate 1: Python writer uses bash pre-check, no self-canonicalization
+### V1: Unified writer contract — jq and Python both consume pre-check
 
-**Root cause (G0-rev3):** `register_hooks()` Python writer in `adapters/claude-code/install.sh` still called `os.path.normcase(os.path.normpath(...))` in its `exists_in()` function — a second canonicalizer that could disagree with bash `canonical_path()`. Additionally, JSON decode failure on an existing-but-corrupt `settings.json` would silently overwrite it with `{}` plus the new hooks — violating the fail-closed contract.
+**文件:** `adapters/claude-code/install.sh`
 
-**Fix applied (G0-rev4):**
-- `register_hooks()` bash pre-check now sets `ss_exists`/`stop_exists` env vars via `canonical_path()` comparison
-- Python writer receives `SS_EXISTS`/`STOP_EXISTS` env vars; it ONLY adds the missing side
-- Python writer NO LONGER calls `os.path.normcase`/`os.path.normpath` — bash `canonical_path()` is the sole normalizer
-- JSON decode failure on existing `settings.json` exits non-zero WITHOUT mutating the file (`sys.exit(1)`)
-- `local ss_exists=0 stop_exists=0` declared BEFORE the if/elif chain (was inside `elif [ -f "$settings" ]` block — caused `unbound variable` on fresh installs with `set -u`)
+The v2 commit tightened the Python writer and the verifier, but the **jq writer path** was not exercised by C15/C16 (which shadowed jq) and contained two real defects:
 
-### F14.4 / Gate 2: CI GITHUB_TAG only on real tag ref
+1. **Bug 1 (line 767 in v2):** jq writer used `any(.[]?.hooks[]?; .command == $ss_cmd)` — exact-string comparison that did NOT consume the bash pre-check `ss_exists`/`stop_exists` result. When bash canonicalized equivalent paths (backslash form, C:/ form), the writer still added a duplicate hook because the raw command strings differed.
 
-**Root cause:** `.github/workflows/ci.yml` Phase 7 unconditionally set `GITHUB_TAG` from `$GITHUB_REF_NAME`. On branch pushes this was the branch name, not a tag — silently testing against local `git archive` while pretending to be a tag push.
+2. **Bug 2 (line 769 in v2):** jq writer checked `if [ -f "$settings" ] && jq -e . "$settings" ...` and on failure fell through to `printf '{}\n' > "$tmp"` — **overwriting the corrupted file** with `{}` and proceeding to write. This violated fail-closed / no-mutation.
 
-**Fix applied:** Phase 7 only sets `GITHUB_TAG` when `GITHUB_REF_TYPE == "tag"` AND `GITHUB_REF` starts with `refs/tags/`. Branch pushes correctly leave GITHUB_TAG unset.
+**Fix:**
 
-### F14.6 / Gate 3: BUG-3 Python-only/no-parser installer regression (extended to 14 tests)
+- **Unified JSON-validity gate BEFORE writer selection** (single place, both backends share it). If `settings.json` exists but is not valid JSON, the installer exits non-zero and leaves the file byte-identical.
+- **Both writers consume `SS_EXISTS`/`STOP_EXISTS` env vars** exported from the bash pre-check. Only the missing side is added. The brittle exact-string `any()` comparison is gone.
+- The Python writer was already correct (env-var-driven, JSON fail-closed); it is unchanged.
 
-**Root cause (G0-rev3):** C1–C9 covered canonical-path, jq-path, python-only first/same/equivalent-path, and no-parser fail-closed. But 5 Python-only real-installer edge cases were missing: SessionStart-only pre-existing settings, Stop-only pre-existing settings, Windows backslash paths, C:/ drive-letter paths, and corrupted JSON.
+### V2: C14/C15/C16 parameterized for both jq and Python backends
 
-**Fix applied (G0-rev4):** Added C10–C14 to `tests/adapters/test-bug3-matrix.sh`:
-- **C10** (SessionStart-only): pre-existing settings with only another skill's SessionStart hook → python-only reinstall adds missing Stop, doesn't duplicate SS
-- **C11** (Stop-only): pre-existing settings with only a Stop hook → python-only reinstall adds missing SessionStart, doesn't duplicate Stop
-- **C12** (Backslash): first install, then rewrite hook commands to Windows backslash form via `cygpath -aw` → reinstall must deduplicate
-- **C13** (C:/): first install, then rewrite hook commands to C:/ form via `cygpath -m` → reinstall must deduplicate
-- **C14** (Corrupted JSON): write deliberately broken JSON to settings.json → installer MUST exit non-zero AND settings.json MUST be byte-identical after (sha256sum comparison)
+**文件:** `tests/adapters/test-bug3-matrix.sh`
 
-### F14.x / Gate 4: Version-sync all items fail-closed + CI Phase 5d temp-install
+C14, C15, C16 in v2 only exercised the python backend (via jq-shadowing). After the jq writer fix, the matrix now runs each scenario **twice**: once with REAL jq in PATH, once with jq shadowed (python-only). Both backends must satisfy the same contract:
 
-**Root cause (G0-rev3):** Version-sync items #6/#7 failed-closed when `--installed-target` was not provided (correct). But CI Phase 5d did not perform a real install → it couldn't pass `--installed-target`. Additionally, item #8 combined both READMEs into a single pass/fail — if one matched but the other didn't, it could pass or fail ambiguously.
+- **C14-jq and C14-py:** corrupted JSON → exit non-zero, SHA-256 of settings.json unchanged.
+- **C15-jq and C15-py:** SS-only backslash form → bash pre-check trusts equivalence, Stop added → rc=0, SS=1 (trusted), Stop=1 (added).
+- **C16-jq and C16-py:** Stop-only C:/ form → bash pre-check trusts equivalence, SessionStart added → rc=0, SS=1 (added), Stop=1 (trusted).
 
-**Fix applied (G0-rev4):**
-- CI Phase 5d: creates temp dir → runs `install.sh --project` inside temp → passes `--installed-target` pointing at installed copy to `test-version-sync.sh` → cleans up temp
-- Item #8: `README.md` and `README.zh-CN.md` each get their own independent PASS/FAIL line
-- All 10 items pass with `--installed-target` provided
+### V3: E2 tightened — strict release-tag allowlist + string-key YAML loader + repo-level aggregation
 
----
+**文件:** `tests/release/test-release-archive.sh`, `tests/release/test-e2-tag-trigger.sh`, `tests/release/e2_check.py`
 
-## Harness-Loop Blockers (3/3 fixed)
+The v2 E2 had three gaps:
 
-### H1: Fixture regeneration in temp copy + publish feature_list.json
+1. `vbogus*` and `v[` were accepted because the v2 `is_release_tag` was too permissive (any v-prefixed pattern with `*` or `[` and length ≤64).
+2. A fake top-level `true:` (or `yes:`) coerced by PyYAML 1.1 to boolean True was indistinguishable from a legitimate `on:` trigger (also True under YAML 1.1). The v2 line-by-line raw-text pre-check could be defeated by clever formatting.
+3. A workflow file with broken YAML was silently masked by a later valid workflow in the same directory (early `break` on first PASS).
 
-**Root cause (G0-rev3):** `_regen-fixtures.sh` `publish_from_temp()` only copied `*.ndjson` files — it did NOT copy `feature_list.json` or the per-run directories. When `harness-verify` generated a new run_id, the temp work dir's `feature_list.json` was updated with the new run_id, but the source fixture's `feature_list.json` retained the old run_id. After `clear_source_runs` deleted the old NDJSON, the status renderer looked for the old-run-id NDJSON (via `feature_list.json` → `evidence_associations[].run_id`) and reported `run_log_missing` — even though a valid new NDJSON existed under a different name.
+**Fix:**
 
-**Fix applied (G0-rev4):** `publish_from_temp()` now publishes:
-1. `*.ndjson` files (as before)
-2. Run directories (`<run_id>/` containing `typecheck.log`)
-3. `feature_list.json` from the temp work dir (so run_ids stay in sync with NDJSONs)
+- **Strict allowlist:** `v*`, `v<X>.<Y>.<Z>`, `v<X>.<Y>.<Z>.<W>`, `v<X>.<Y>.*`, `v[N](...)?` only. `vbogus*` and `v[` are rejected.
+- **String-key YAML loader (root-cause fix):** `e2_check.py` builds a `SafeLoader` subclass that overrides the bool/str constructors to keep the bare scalars `on`/`off`/`yes`/`no` as Python strings — only the unambiguous literals `true`/`false`/`null` still coerce. Under this loader, `on:` parses to the string key `"on"` while `true:` parses to the boolean True, so the top-level trigger check `if "on" not in data` is unambiguous at the loader level. The previous line-by-line raw-text pre-check is gone — the loader itself removes the entire class of ambiguity. Nested `on:` under another key is still ignored because E2 only inspects the top-level mapping.
+- **Hermetic E2 (archive-candidate-only, no source-repo fallback):** `test-release-archive.sh` sources `e2_aggregate.sh` AND resolves `e2_check.py` exclusively from `FULL_ARCHIVE_DIR` (the extracted `git archive HEAD` candidate). There is NO `SOURCE_REPO` fallback. The archive gate executes ONLY the code that ships in the artifact. Two negative tests (E3/E4) prove hermetic isolation by deliberately removing each helper from a temp archive copy — both correctly fail even though SOURCE_REPO still contains the files.
+- **Repo-level aggregation with structured exit codes:** the E2 loop iterates EVERY workflow in `.github/workflows/` (no early `break`). Per-file outcomes are reported as structured exits:
+  - `0` = FOUND (release tag trigger detected)
+  - `10` = NOT_FOUND (valid YAML, no release trigger)
+  - `11` = PARSE_ERR (YAML parse error)
+  - `2` = DEP_MISSING (PyYAML missing — fail-closed)
+  Aggregation priority: `DEP_MISSING > PARSE_ERR > FOUND > NOT_FOUND`. A parse error in any workflow, or a dep-missing condition in any workflow, fails the entire E2 regardless of how many other workflows PASS. E2 PASSES only if at least one workflow has FOUND and no workflow has PARSE_ERR/DEP_MISSING.
+- **Aggregation tests:** A1a/A1b (legal+corrupted in both orders → FAIL with PARSE_ERR), A2 (legal release + ordinary non-release → PASS), A3 (top-level `true:` + nested `on:` → FAIL — only the top-level `on` key counts), A4 (top-level `true:` + a real quoted `"on":` → PASS — only `"on"` counts, the boolean True block is ignored).
+- **Behavior tests:** P5 (real-world workflow shape: `name:` first, `on:` later) + N11 vbogus*, N12 v[, N13 fake `true:`, N14 fake `yes:`, N15 multi-pattern positive, N16 PyYAML-missing (always-on fail-closed exit 2).
 
-This ensures `evidence_associations[].run_id` always matches an NDJSON filename on disk.
+### V4: E2 behavior tests wired into CI
 
-### H2: Protected files removed from rc.2 submission
+**文件:** `.github/workflows/ci.yml`
 
-**Root cause:** The previous `bd64b1e` commit had committed Tier-1/2 protected files.
-
-**Fix applied (G0-rev3, preserved):** `git reset --hard e354706` reverted that commit. Current working tree contains only:
-```
- M .github/workflows/ci.yml
- M G0-ACCEPTANCE.md
- M adapters/claude-code/install.sh
- M tests/adapters/_regen-fixtures.sh
- M tests/adapters/test-bug3-matrix.sh
- M tests/adapters/test-claude-code-contract.sh
- M tests/core/test-audit-score-axis.sh
- M tests/release/test-version-sync.sh
-?? G0-EVIDENCE.md
-?? run-all-features.sh
-```
-No protected files are tracked, modified, or staged.
-
-### H3: Contract test fixture isolation (temp copy, no source mutation)
-
-**Root cause (G0-rev3):** `test-claude-code-contract.sh` and `test-audit-score-axis.sh` called `_regen-fixtures.sh` directly, which published regenerated NDJSONs and `feature_list.json` back into the source `tests/adapters/fixtures/` tree. This violated the principle that contract tests must not mutate source fixtures.
-
-**Fix applied (G0-rev4):**
-- Both contract tests now copy the entire fixture root to a temp directory first
-- Set `FIXTURES_DIR` env var to point at the temp copy
-- Run `_regen-fixtures.sh` inside the temp copy only
-- Combined EXIT trap cleans up both TMPROOT and temp fixtures
-- Source fixture tree is NEVER mutated by contract test regeneration
+New Phase 5e runs `tests/release/test-e2-tag-trigger.sh` independently of `test-release-archive.sh`. Failure is a release blocker. The single-file tests (P1–P5, N1–N16) AND the aggregation tests (A1a, A1b, A2, A3, A4) both run.
 
 ---
 
-## Regression Evidence — COMPLETED 2026-08-05
+## 变更文件清单（本次 v3-final 收尾，amend 到 current HEAD）
 
-Both required regression runs have been executed. Full results are in **[G0-EVIDENCE.md](G0-EVIDENCE.md)**.
+| 文件 | 状态 | 变更 |
+|------|------|------|
+| `adapters/claude-code/install.sh` | M | (frozen at v2 acceptance) JSON gate + jq writer uses SS_EXISTS/STOP_EXISTS env vars |
+| `tests/adapters/test-bug3-matrix.sh` | M | (frozen at v2 acceptance) C14/C15/C16 parameterized for jq + python backends |
+| `tests/release/test-release-archive.sh` | M | Phase E2 hermetic: all E2 code sourced from `FULL_ARCHIVE_DIR` only; no SOURCE_REPO fallback; E3/E4 negative tests prove hermetic isolation |
+| `tests/release/e2_aggregate.sh` | M (new) | Single shared aggregation function — production gate and behavior tests call the SAME function. No duplicated logic in tests. |
+| `tests/release/test-e2-tag-trigger.sh` | M | Sources shared `e2_aggregate.sh`; A1a–A4 call the production aggregator. Adds N17 (`v[0-9]bogus*`) and N18 (`v[---]whatever`) for tightened bracket-class validation. |
+| `tests/release/e2_check.py` | M | String-key SafeLoader subclass (on/off/yes/no stay strings); structured exits 0/10/11/2; tightened bracket-class regex requiring `\+` continuation (`v[N]+...`) |
+| `.github/workflows/ci.yml` | M | Phase 5d now `exit "$rc"` (fail-closed); PyYAML install moved to before Phase 5e |
+| `G0-EVIDENCE.md` | M | v3-final rewrite, SHA references removed |
+| `G0-ACCEPTANCE.md` | M | This file |
 
-### Targeted regression (2026-08-05)
-| Test | Result |
-|------|--------|
-| `test-bug3-matrix.sh` (Gate 3) | 67 passed, 0 failed, 1 skip |
-| `test-claude-code-lifecycle.sh` (Gate 1) | 27 passed, 0 failed |
-| `test-version-sync.sh --installed-target` (Gate 4) | 10 passed, 0 failed |
-| `test-claude-code-contract.sh` (H-G3) | 148 passed, 0 failed |
-| `test-audit-score-axis.sh` (H-G3) | 15 passed, 0 failed |
-| CI workflow GITHUB_TAG + Phase 5d (Gate 2) | Static review passed |
-
-### Full release regression (2026-08-05, isolated clone)
-| Phase | Result |
-|-------|--------|
-| A (archive extraction) | 4/4 PASS |
-| B1 (core smoke) | 3/3 PASS |
-| B2 (adapter contracts) | Claude 148/0, Codex 122/0, Install modes 51/0 |
-| B3 (migration compat) | 106/0 (2 archive-mode skips) |
-| B4 (validate_plugin.py) | PASS |
-| C (installer round-trip) | 6/6 PASS |
-| D (integrity) | 4/4 PASS |
-| D' (tag archive) | 4/4 PASS |
-| E (marketplace) | 1 PASS, 1 SKIP |
-| F (claude validate) | PASS |
-| G (plugin-dir smoke) | 4/4 PASS |
-| **Total** | **32 passed, 0 failed, 1 skipped** |
-
-### Overall
-All 4 implementation gates and all 3 harness gates verified. Full release archive gate: 32/0/1. **No exit 1 recorded as gate passed.** See [G0-EVIDENCE.md](G0-EVIDENCE.md) for complete per-gate detail and Stop hook error report.
+G0-rev5 prior amendments all preserved on the same commit via `git commit --amend`; each pass adds v3 closure refinements.
 
 ---
 
-## Changes from G0-rev3
+## 回归证据（v3 收尾后的实际运行结果）
 
-| Area | G0-rev3 | G0-rev4 |
-|------|---------|---------|
-| Python writer canonicalization | Self-canonicalized via `normcase`/`normpath` | Uses bash pre-check `ss_exists`/`stop_exists` exclusively |
-| JSON fail-closed | Not enforced | Exits non-zero, byte-identical `settings.json` verified |
-| BUG3 matrix tests | C1–C9 (9 tests) | C1–C14 (14 tests) — +5 Python-only edge cases |
-| Version-sync | 7 pass + 2 expected fail | 10/10 pass with `--installed-target` |
-| README check | Combined pass/fail | Each README independently checked |
-| CI Phase 5d | None (no `--installed-target`) | Temp install + `--installed-target` |
-| Regen publish | Only `*.ndjson` files | NDJSONs + run dirs + `feature_list.json` |
-| Contract test regen | Mutated source fixtures | Temp copy, no source mutation |
-| `ss_exists` unbound | Bug: `local` inside `elif` block | Fixed: `local` before if/elif chain |
-| Release archive | Run in main working tree | Isolated clone + temp commit → `git archive HEAD` |
-| Evidence | Combined document | Separated G0-EVIDENCE.md with strict pass/fail |
+Recorded in `G0-EVIDENCE.md`. Headline:
 
----
-
-## Constraints Preserved
-
-- No push, no merge, no tag, no release, no install.
-- No update of locally installed skill.
-- No new commits yet (all changes are uncommitted working-tree modifications).
-- Single commit for all G0-rev4 changes (per user directive: "完成后一次性提交复验").
-- Protected baseline files never modified.
-- Isolated clone used for release archive verification (temp commit, not in main working tree).
+| 测试 | 结果 |
+|------|------|
+| BUG3 matrix（含 C14-jq/py、C15-jq/py、C16-jq/py） | **PASS** |
+| Lifecycle | **PASS** |
+| Version-sync (positive, real install target) | **PASS** |
+| Version-sync (single fault README.zh-CN) | **9/1 exit 1** |
+| E2 behavior tests (P1–P5, N1–N18, A1a–A4 via shared aggregator) | **28/0 PASS** |
+| Archive regression (hermetic E2 + E3/E4 negative tests, FULL_ARCHIVE_DIR only) | **35/0/0 PASS** |
+| Phase 5d fail-closed path (CI YAML) | **manually verified** — version-sync non-zero rc exits the CI step |
+| E2 single + real aggregation tests | **28/0 PASS** |
 
 ---
 
-End of G0-rev4 acceptance package. Evidence in G0-EVIDENCE.md.
+## 约束保持
+
+- 不 push、不 merge、不 tag、不 release、不更新本机安装
+- 原始 v2 commit 已通过 amend 修改（不产生新 commit）
+- 受保护基线文件未修改
+- 文档不硬编码 commit SHA（commit 内容不能可靠硬编码自身 SHA）；使用 "current HEAD / this commit" 语言
+- run-all-features.sh 不在文件清单中（parent 和 HEAD 都不存在，未列入删除项）
+
+---
+
+End of G0-rev5 收尾 v3 acceptance package. Evidence in G0-EVIDENCE.md.

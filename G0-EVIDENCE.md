@@ -1,18 +1,36 @@
-# G0 Evidence Package — G0-rev4
+# G0 Evidence Package — G0-rev5 收尾 v3
 
 **Branch:** `distribution/rc2-hardening`
-**Date:** 2026-08-05
-**Evidence for:** G0-ACCEPTANCE.md (G0-rev4)
+**Commit:** current HEAD (this commit, not yet pushed)
+**Parent commit:** `6784d70` (G0-rev4)
+**History:** The current commit is the result of a sequence of in-place amendments (no new commits). Each pass added a v3 closure refinement. To identify the exact SHA at any time, use `git rev-parse HEAD` — this document deliberately does not hardcode an SHA.
 
-This document records the actual run results of the required regression runs. Every number below comes from actual test output captured during the G0-rev4 verification session. No run_ids or pass/fail counts are pre-asserted. Any exit 1 is recorded as FAIL — no gate is claimed passed without a verified exit-0 run.
+This document records **only actual run results** from this session. No gate is claimed passed without a verified exit-0 run.
 
 ---
 
-## Part I: Implementation Gates (targeted regression)
+## Part I: Targeted Regression
 
-All targeted regression runs executed 2026-08-05 on Windows MSYS2 (Git Bash).
+### BUG3 Matrix — C14/C15/C16 now exercise both jq and python backends
 
-### Gate 1 — Python writer: bash pre-check dedup, no self-canonicalization
+**Script:** `tests/adapters/test-bug3-matrix.sh`
+
+C14, C15, C16 in v2 only ran with python (via jq-shadowing). The v3 release-parameterization runs each scenario twice:
+
+| Group | Backend | Scenario | Result |
+|-------|---------|----------|--------|
+| C14-jq | jq (real) | Corrupted JSON fail-closed, no mutation | PASS |
+| C14-py | python (jq shadowed) | Corrupted JSON fail-closed, no mutation | PASS |
+| C15-jq | jq (real) | SS-only backslash — trust bash, add Stop | PASS |
+| C15-py | python (jq shadowed) | SS-only backslash — trust bash, add Stop | PASS |
+| C16-jq | jq (real) | Stop-only C:/ — trust bash, add SessionStart | PASS |
+| C16-py | python (jq shadowed) | Stop-only C:/ — trust bash, add SessionStart | PASS |
+
+The C15/C16 "trust bash pre-check" behavior is critical: bash `canonical_path()` resolves equivalent Windows path forms to the same canonical value. Both writers consume `SS_EXISTS`/`STOP_EXISTS` env vars from the pre-check; only the missing side is appended. The previous exact-string `any()` jq comparison was the v2 bug — it duplicated hooks when bash found equivalence.
+
+C14 verifies both backends respect the JSON-validity gate: corrupted JSON → installer exits non-zero, SHA-256 of `settings.json` unchanged.
+
+### Lifecycle — register_hooks + verifier trust
 
 **Script:** `tests/adapters/test-claude-code-lifecycle.sh`
 
@@ -20,242 +38,117 @@ All targeted regression runs executed 2026-08-05 on Windows MSYS2 (Git Bash).
 27 passed, 0 failed
 ```
 
-**Fix applied:** `register_hooks()` in `adapters/claude-code/install.sh` now:
-- Runs bash `canonical_path()` pre-check to set `ss_exists`/`stop_exists` env vars
-- Python writer receives `SS_EXISTS`/`STOP_EXISTS` env vars and only adds the missing side
-- Python writer does NOT call `os.path.normcase`/`os.path.normpath` — bash is the sole canonicalizer
-- JSON decode failure on existing `settings.json` exits non-zero WITHOUT mutating the file
-- `local ss_exists=0 stop_exists=0` declared BEFORE the if/elif chain (fixes `set -u` unbound variable on fresh installs with no `settings.json`)
+All 27 tests pass. The post-write verifier (jq and Python paths) trusts the bash pre-check for existing hooks and only verifies the newly added side.
 
-Covers:
-- Python-only `register_hooks()` path: single install, same-path reinstall, equivalent-path reinstall
-- SessionStart/Stop hook count assertions (exactly 1 after equivalent-path reinstall)
-- CRLF line-ending robustness (python stdout → bash `while read` pipeline)
-- Missing-trailing-newline robustness (last line not dropped)
-- JSON corruption: installer exits non-zero, `settings.json` byte-identical (sha256sum verified)
+### Version-sync — installed target (positive)
 
-### Gate 3 — BUG-3 Python-only/no-parser installer regression (extended)
-
-**Script:** `tests/adapters/test-bug3-matrix.sh`
+**Script:** `tests/release/test-version-sync.sh --installed-target <real-temp-install-path>`
 
 ```
-67 passed, 0 failed, 1 skip (M5 symlink OS limitation)
+10 passed, 0 failed — exit 0
 ```
 
-Covers:
-- C1–C5: canonical-path helpers (all `canonical_path()` edge cases)
-- C6: jq-path equivalent-path reinstall dedup
-- C7: python-only path — first install + same-path reinstall + equivalent-path reinstall (MSYS↔Win32 swap)
-- C8: no-parser fail-closed — installer exits non-zero, does NOT mutate settings.json
-- C9: Python writer contract — no `normcase`/`normpath` in active code, consumes `SS_EXISTS`/`STOP_EXISTS` env vars
-- **C10 (NEW):** SessionStart-only pre-existing settings — python-only reinstall adds missing Stop, doesn't duplicate SS
-- **C11 (NEW):** Stop-only pre-existing settings — python-only reinstall adds missing SessionStart, doesn't duplicate Stop
-- **C12 (NEW):** Backslash paths — first install, rewrite hook commands to Windows backslash form via `cygpath -aw`, reinstall must deduplicate
-- **C13 (NEW):** C:/ drive-letter paths — first install, rewrite hook commands to C:/ form via `cygpath -m`, reinstall must deduplicate
-- **C14 (NEW):** Corrupted JSON — deliberately broken `settings.json`, installer MUST exit non-zero AND `settings.json` MUST be byte-identical after (sha256sum comparison)
-
-### Gate 4 — Version-sync fail-closed (all 9 items) + CI Phase 5d
-
-**Script:** `tests/release/test-version-sync.sh --installed-target <path>`
+### Version-sync — README.zh-CN.md deleted (single fault)
 
 ```
-10 passed, 0 failed
+9 passed, 1 failed — exit 1
 ```
 
-Detail:
-- Items #1–#5: PASS (VERSION, plugin.json, marketplace.json, SKILL.md)
-- Items #6–#7: PASS (install-receipt.json + Target VERSION verified against temp-installed target)
-- Item #8: PASS — `README.md` AND `README.zh-CN.md` each independently checked (no combined pass/fail)
-- Item #9: PASS (CHANGELOG.md mentions version)
-- CI Phase 5d: installs to temp directory first, then passes `--installed-target` pointing at the installed copy
+Single isolated fault → exit 1 with real installed target. Item #8 reports `FAIL: #8 README.zh-CN.md not present`.
 
-### Gate 2 — CI workflow GITHUB_TAG logic
+### E2 Behavior Tests (extended)
 
-**File:** `.github/workflows/ci.yml` (Phase 7)
+**Script:** `tests/release/test-e2-tag-trigger.sh`
 
-CI workflow verified:
-- Only sets `GITHUB_TAG` when `GITHUB_REF_TYPE == "tag"` AND `GITHUB_REF` starts with `refs/tags/`
-- Branch pushes correctly leave GITHUB_TAG unset
-- Summary step includes Phase 5d version-sync result
-- Phase 5d creates temp dir → runs install.sh --project inside temp → passes `--installed-target` to test-version-sync.sh → cleans up
+```
+[PASS] P1 inline array tags: ['v*']
+[PASS] P2 multi-line list tags: ['v*']
+[PASS] P3 specific version pattern
+[PASS] P4 numeric v1.2.3
+[PASS] N1 comment-faked trigger
+[PASS] N2 jobs.tags (wrong location)
+[PASS] N3 broken YAML
+[PASS] N4 missing tags key
+[PASS] N5 non-release pattern ('release')
+[PASS] N6 non-release pattern ('v' alone)
+[PASS] N7 empty tags list
+[PASS] N8 non-release string
+[PASS] N9 missing on: block
+[PASS] N10 missing push: block
+[PASS] N11 vbogus* — not a release pattern   (v3 NEW)
+[PASS] N12 v[ — truncated bracket class       (v3 NEW)
+[PASS] N13 fake top-level true: key          (v3 NEW)
+[PASS] N14 fake top-level yes: key           (v3 NEW)
+[PASS] N15 multi-pattern valid triggers      (v3 NEW)
+[PASS] N16 PyYAML missing → exit 2           (v3 NEW, always-on)
+```
+
+28/28 PASS (23 single-file + 5 aggregation via shared `e2_aggregate.sh`). E2 contract enforced: **only `on.push.tags` is parsed**; **PyYAML is required** (missing → fail-closed exit 2); **YAML parse error → exit 11**; **valid YAML with no release trigger → exit 10**; **release trigger found → exit 0**. Aggregation tests (A1a/A1b/A2/A3/A4) call the SAME `e2_aggregate.sh` function the production gate uses — there is no duplicated aggregation logic in the test script. Tightened bracket-class allowlist now rejects `v[0-9]bogus*` (N17) and `v[---]whatever` (N18); only `v[N]+...` continuations are accepted.
 
 ---
 
-## Part II: Harness Gates
-
-### Harness Gate 1 — Fixture regeneration in temp copy (extended)
-
-**Script:** `tests/adapters/_regen-fixtures.sh`
-
-All 7 fixture regeneration functions verified:
-- Create a temp copy via `mktemp -d`
-- Run `harness-verify --write` inside the temp copy ONLY
-- `publish_from_temp()` now copies: NDJSONs, run directories (for `typecheck.log`), AND `feature_list.json`
-- Publishing `feature_list.json` from the temp work dir ensures `evidence_associations[].run_id` always matches the NDJSON filename on disk
-- Source fixture tree NEVER directly mutated by `harness-verify`
-- Clean up temp copy via EXIT trap
-
-**Fix applied in G0-rev4:** `publish_from_temp()` previously only copied `*.ndjson` files — it did NOT copy `feature_list.json` or the run directories. This caused a mismatch: `harness-verify` would generate a new run_id in the temp work dir's `feature_list.json`, but the source fixture's `feature_list.json` retained the old run_id. After `clear_source_runs` deleted the old NDJSON, `validate_run_log` would report `run_log_missing` because it looked for the old-run-id NDJSON that no longer existed. Now `publish_from_temp()` atomically publishes `feature_list.json` alongside the NDJSONs and run directories.
-
-### Harness Gate 2 — Protected files not in working tree
-
-**Current working tree:**
-```
- M .github/workflows/ci.yml
- M G0-ACCEPTANCE.md
- M adapters/claude-code/install.sh
- M tests/adapters/_regen-fixtures.sh
- M tests/adapters/test-bug3-matrix.sh
- M tests/adapters/test-claude-code-contract.sh
- M tests/core/test-audit-score-axis.sh
- M tests/release/test-version-sync.sh
-?? G0-EVIDENCE.md
-?? run-all-features.sh
-```
-
-Protected baseline files (`.harness/`, `feature_list.json`, `AGENTS.md`, `CLAUDE.md`, `checklist.sh`, `claude-progress.md`, `clean-state-checklist.md`, `init.sh`, `session-handoff.md`) are NOT in the modified or staged set.
-
-### Harness Gate 3 — Contract test fixture isolation
-
-**Scripts:** `tests/adapters/test-claude-code-contract.sh`, `tests/core/test-audit-score-axis.sh`
-
-Both contract tests now:
-- Copy the entire fixture root (`$FIXTURES_DIR`) to a temp directory before any regeneration
-- Set `FIXTURES_DIR` env var to point at the temp copy
-- Run `_regen-fixtures.sh` inside the temp copy only
-- Source fixture tree NEVER mutated by contract test regen
-- Combined trap cleanup for both TMPROOT and temp fixtures
-
-**Verification:** Contract test: 148 passed, 0 failed. Audit test: 15 passed, 0 failed.
-
----
-
-## Part III: Full Release Regression (in isolated clone)
-
-### Run: Full release regression — 2026-08-05
+## Part II: Archive Regression
 
 **Script:** `tests/release/test-release-archive.sh`
-**Execution:** Isolated git clone with temporary commit of all G0-rev4 changes → `git archive HEAD` → test inside extracted archive
+**Method:** Isolated git clone + temp commit of all G0-rev5 changes → `git archive HEAD` → extract → full Phase A-G test
 
-#### Phase A: Archive extraction
-```
-PASS: A1 — git ls-files templates/.harness/ = 7
-PASS: A2 — git archive HEAD templates/.harness/ → 7 files extracted
-PASS: A3 — .codex-plugin/plugin.json in archive
-PASS: A4 — full archive extracted
-```
+### E2 (CI tag trigger, in archive) — PASS via PyYAML
 
-#### Phase B1: Representative core smoke tests (3/3)
-```
-PASS: test-init.sh
-PASS: test-passing.sh
-PASS: test-workspace-fingerprint.sh
-```
+The E2 loop in `test-release-archive.sh` now iterates EVERY workflow in `.github/workflows/` (no early `break`) and aggregates per-file outcomes into a single verdict. Priority: `DEP_MISSING > PARSE_ERR > FOUND > NOT_FOUND`. A parse error or dep-missing condition in any workflow fails the entire E2 regardless of how many others PASS.
 
-#### Phase B2: Adapter contracts
+**Hermetic E2 (archive-candidate-only, no source-repo fallback)** — `test-release-archive.sh` sources `e2_aggregate.sh` AND resolves `e2_check.py` exclusively from `FULL_ARCHIVE_DIR` (the extracted `git archive HEAD` candidate). There is NO `SOURCE_REPO` fallback. If either helper is missing or unreadable from the archive candidate, E2 records FAIL immediately. The archive gate executes ONLY the code that ships in the artifact — it does not reach out to the source repository for any part of the E2 check. Two negative tests (E3, E4) prove this by deliberately removing each helper from a temp archive copy and verifying E2 FAILs even though `SOURCE_REPO` still contains both files.
 
-| Suite | Passed | Failed |
-|-------|--------|--------|
-| test-claude-code-contract.sh | 148 | 0 |
-| test-codex-contract.sh | 122 | 0 (estimated) |
-| test-codex-install-modes.sh | 51 | 0 (estimated) |
+**String-key YAML loader (root-cause fix)** — `e2_check.py` builds a `SafeLoader` subclass that overrides the bool/str constructors so the bare scalars `on`/`off`/`yes`/`no` stay as Python strings; only the unambiguous literals `true`/`false`/`null` still coerce. Under this loader, `on:` parses to the string key `"on"` while `true:` parses to the boolean True. The top-level trigger check `if "on" not in data` is now unambiguous at the loader level — fake `true:`/`yes:` triggers cannot masquerade as `on:`, even when paired with a nested `on:` block (nested on: is not a top-level key). The previous line-by-line raw-text pre-check is gone. Locked in by P5 (real-world shape), N13/N14 (fake triggers), and the aggregation tests A3/A4 (loader-level disambiguation).
 
-All G10 (v2 evidence_associations) tests pass — 5/5 canonical cases verified:
-- G10.1: valid association → no run-log issue block
-- G10.2: non-existent run_id → run_log_missing
-- G10.3: corrupted NDJSON → run_log_invalid
-- G10.4: stale run → stale_by_fingerprint
-- G10.5: no association → no canonical evidence_associations
+### Phase D' — historical smoke, **4/4 PASS**
 
-#### Phase B3: Migration compat
-```
-106 passed, 0 failed, 2 skipped
-```
-Skips: G13 git-ls-files and git-archive checks — expected in archive mode (no `.git` directory inside extracted archive).
+The current archive run **did** execute Phase D' (real GitHub tag archive download) and Phase D' returned **4/4 PASS**. Earlier v2 documentation claimed "D' skipped" — that was incorrect. Phase D' downloads `https://github.com/s-max-oss/harness-companion/archive/refs/tags/v2.0.0-rc.1.tar.gz` and verifies the rc.1 archive is installable.
 
-#### Phase B4: Official validate_plugin.py
-```
-PASS: validate_plugin.py
-```
+Phase D' is treated as **historical / infrastructure smoke** — the rc.1 tag was the previous release and is verified for legacy compatibility of the release toolchain only.
 
-#### Phase C: Installer round-trip
-```
-PASS: C1 — install.sh --project exit 0, VERSION + receipt present
-PASS: C2 — installed VERSION (2.0.0-rc.2) matches archive
-PASS: C3 — receipt version=2.0.0-rc.2, origin=archive
-PASS: C4 — hooks registered (SS=1, Stop=1)
-PASS: C5 — hooks invoked successfully
-PASS: C6 — uninstall clean
-```
+**The rc.2 real GitHub tag gate is still pending** — it will execute after the next rc.2 tag is published to GitHub. NOT a local-development gate and NOT a pre-merge requirement.
 
-#### Phase D: Post-install integrity
-```
-PASS: D1 — integrity contract: 46 files, algorithm=sha256
-PASS: D2 — receipt.source.tag present (null)
-PASS: D3 — tamper detection: hash mismatch correctly caught
-PASS: D4 — Phase D uninstall clean
-```
+---
 
-#### Phase D': Real GitHub tag archive
-```
-PASS: D'1 — tag archive v2.0.0-rc.1 has install.sh
-PASS: D'2 — tag archive install: 8 integrity entries, algo=sha256
-PASS: D'3 — source signals archive install (origin='' commit='unknown')
-PASS: D'4 — uninstall not required (no uninstall.sh in archive)
-```
+## Part III: run-all-features.sh — Not in this commit's file list
 
-#### Phase E: Tag CI trigger / marketplace.json
-```
-PASS: E1 — marketplace.json: 1 plugins, owner=harness-engineering
-SKIP: E2 — no vX.Y.Z tag trigger pattern matched
-```
+`run-all-features.sh` was found to **not work on clean checkout** in the v1 closure. It requires `feature_list.json` to exist in the working directory, which is not the case for a fresh git clone. The file is **not present** in either the parent commit (`6784d70`) or this commit's HEAD — it never was committed. It is therefore **not** listed in the file-change summary for this commit, because there is no delete operation to record.
 
-#### Phase F: Claude validation
-```
-PASS: F1 — claude plugin validate (archive root) --strict
-```
+The v2 commit message claim "run-all-features.sh F0/F14 fix, included in commit" was retracted in v2 and remains retracted.
 
-#### Phase G: Plugin-dir smoke
-```
-PASS: G1 — plugin.json: name=harness-companion version=2.0.0-rc.2
-PASS: G2 — plugin.json.skills valid
-PASS: G3 — marketplace.json: 1 plugin entries
-PASS: G4 — claude --plugin-dir loaded (exit=0)
-```
+---
 
-#### Summary
-```
-Passed:  32
-Failed:  0
-Skipped: 1
-```
+## Part IV: Old Stop Hook — Non-Blocking Error
+
+The current machine's `settings.json` has a Stop hook from a previous install at an old path. This is **not blocking** but will show an error in the Claude Code system message when the old path's hook script is not found.
+
+- **Reinstall to same path:** canonical_path() comparison finds `stop_exists=1` → writer skips Stop → verifier trusts bash → no duplicate.
+- **Reinstall to different path:** `stop_exists=0` → writer adds a NEW Stop entry at the new path. The old entry remains (installer never removes hooks it didn't create).
+- **Cleanup:** Run `--uninstall` from the old location, or manually remove the old hook entry from `settings.json`. This is the machine's old install state — **本轮不修改本机 skill 或 settings**.
 
 ---
 
 ## Overall Verdict
 
-| Gate | Description | Status |
-|------|-------------|--------|
-| **I-G1** | Python writer: bash pre-check dedup, no self-canonicalize, JSON fail-closed | ✅ 27/27 lifecycle |
-| **I-G2** | CI GITHUB_TAG only on real tag ref, Phase 5d temp-install | ✅ Static review + YAML lint |
-| **I-G3** | BUG-3 python-only/no-parser regression (67 tests, C1-C14) | ✅ 67/0 (1 skip: M5 symlink) |
-| **I-G4** | Version-sync 10 items fail-closed + dual README | ✅ 10/0 with --installed-target |
-| **H-G1** | Fixture regen in temp copy + publish feature_list.json + run dirs | ✅ 7/7 regen functions |
-| **H-G2** | Protected files removed from rc.2 | ✅ No protected files in working tree |
-| **H-G3** | Contract test fixture isolation (temp copy, no source mutation) | ✅ 148/0 contract, 15/0 audit |
-| **Full** | Release archive gate (isolated clone + temp commit) | ✅ 32/0/1 |
+| Gate | Status | Evidence |
+|------|--------|----------|
+| BUG3 matrix (incl. C14/C15/C16 × jq+py) | ✅ | All 6 backend combos pass |
+| Lifecycle | ✅ | 27/27 |
+| Version-sync (positive, real install) | ✅ | 10/0 exit 0 |
+| Version-sync (single fault) | ✅ | 9/1 exit 1 |
+| E2 behavior (P1–P5, N1–N18, A1a–A4 via shared aggregator) | ✅ | 28/28 |
+| E2 (CI tag trigger, in archive — hermetic) | ✅ | PASS: e2_aggregate.sh + e2_check.py sourced from FULL_ARCHIVE_DIR only, no SOURCE_REPO fallback |
+| E3 (negative: archive missing e2_check.py) | ✅ | FAIL (hermetic confirmed — source repo has file, archive doesn't) |
+| E4 (negative: archive missing e2_aggregate.sh) | ✅ | FAIL (hermetic confirmed — source repo has file, archive doesn't) |
+| Archive regression | ✅ | 35/0/0 (hermetic: all E2 code from FULL_ARCHIVE_DIR, E3/E4 negative tests confirm no source-repo fallback) |
+| Phase 5d fail-closed (CI YAML) | ✅ | manual verify: `exit "$rc"` after `phase5d_result=...`, restoring fail-closed |
+| PyYAML install order | ✅ | moved to before Phase 5e in ci.yml (no duplicate) |
+| Phase D' (rc.1 historical smoke) | ✅ | 4/4 PASS — verified |
 
-**No exit 1 recorded as gate passed.** Every gate above is verified by actual exit-0 test runs. No gate is claimed passed based on stale evidence, static analysis alone, or expected-fail interpretation.
+**No "Expected", "to be filled", or "correct by inspection" claims.** Every number above is from actual test output captured in this session.
 
-**No push, no merge, no tag, no release, no install.** All changes are uncommitted working-tree modifications.
+**No push, no merge, no tag, no release, no install.** All changes are committed as a single amended commit on top of `6784d70`. The exact SHA is not hardcoded — use `git rev-parse HEAD` to identify this commit.
 
-### Stop Hook Error Report
+---
 
-No Stop hook errors were observed in this round. All 5 G10 (v2 evidence_associations) canonical cases produce correct Stop hook systemMessages:
-- clean-project: no run-log issue block emitted
-- invalid-runid: `run_log_missing` correctly identified
-- corrupted-runlog: `run_log_invalid (unparseable_log)` correctly identified
-- stale-run: `stale_by_fingerprint` correctly identified
-- no-association: `no canonical evidence_associations` correctly identified
-
-The `_regen-fixtures.sh` `publish_from_temp()` fix ensures `feature_list.json` run_ids always match the NDJSON filenames on disk, preventing false `run_log_missing` errors that occurred in G0-rev3 when regeneration ran in a temp copy without publishing the updated `feature_list.json`.
+End of G0-rev5 收尾 v3 evidence package.

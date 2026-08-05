@@ -172,6 +172,45 @@ jobs:
             echo "phase5d_result=failed" >> "$GITHUB_OUTPUT"
             echo "::error::version-sync FAIL-CLOSED gate failed (rc=$rc) — repo artifacts disagree on version"
           fi
+          # CRITICAL: exit with the test-version-sync rc, NOT with the rm rc
+          # that just ran. Earlier versions of this step ended with `exit $?`
+          # which leaked the success code of `rm -rf` back to GitHub Actions —
+          # making a failing version-sync gate look green in the workflow UI.
+          # The step output (phase5d_result) still records pass/fail for the
+          # summary step; the step's own exit code is what blocks the pipeline.
+          exit "$rc"
+
+      # ------------------------------------------------------------------
+      # Install PyYAML (deterministic, pinned) — MUST run before Phase 5e
+      # because the E2 behavior tests import yaml. Earlier ordering put this
+      # step before Phase 6 (validate_plugin.py) and Phase 5e silently
+      # received whichever PyYAML happened to be on the runner (which can
+      # be none or a version outside the pin). Pinning 6.x here guarantees
+      # Phase 5e runs against the same interpreter version as Phase 6.
+      # ------------------------------------------------------------------
+      - name: Install PyYAML (deterministic, pinned)
+        run: python3 -m pip install --quiet "PyYAML>=6.0,<7.0"
+
+      # ------------------------------------------------------------------
+      # Phase 5e — E2 tag-trigger behavior tests (G0-rev5 v3)
+      #
+      # Covers E2_parse_tag_trigger against positive patterns (v*, vX.Y.Z,
+      # v[N]+Y.Z glob), new negatives (vbogus*, v[, fake true:, fake yes:),
+      # and PyYAML-missing fail-closed. Independent of test-release-archive.sh.
+      # ------------------------------------------------------------------
+      - name: Phase 5e — E2 tag-trigger behavior tests
+        id: phase5e
+        run: |
+          set +e
+          bash tests/release/test-e2-tag-trigger.sh
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "phase5e_result=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "phase5e_result=failed" >> "$GITHUB_OUTPUT"
+            echo "::error::E2 tag-trigger behavior tests FAILED (rc=$rc) — E2 contract regression"
+            exit "$rc"
+          fi
           exit $rc
 
       # ------------------------------------------------------------------
@@ -190,9 +229,6 @@ jobs:
       #   skipped — validator not located (summary step reads this value,
       #             NOT step outcome, to distinguish skipped from passed)
       # ------------------------------------------------------------------
-      - name: Install PyYAML (deterministic, pinned)
-        run: python3 -m pip install --quiet "PyYAML>=6.0,<7.0"
-
       - name: Phase 6 — Codex validate_plugin.py
         id: phase6
         run: |
@@ -376,6 +412,8 @@ jobs:
           echo "Phase 8 (negative gate tests):   ${{ steps.phase8.outcome }}"
           echo "Phase 5d (version-sync):"
           echo "  result: ${{ steps.phase5d.outputs.phase5d_result }}"
+          echo "Phase 5e (E2 tag-trigger behavior):"
+          echo "  result: ${{ steps.phase5e.outputs.phase5e_result }}"
           echo "Phases 2/3/4/5/5b/5c see raw output above."
           case "${{ steps.phase6.outputs.phase6_result }}" in
             skipped)

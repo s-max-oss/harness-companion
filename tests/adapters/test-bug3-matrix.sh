@@ -1047,48 +1047,307 @@ fi
 export PATH="$ORIG_PATH"
 echo ""
 
-# ---- G0-rev4 C14: Corrupted JSON — must fail-closed, no mutation -----
+# ---- G0-rev4 / G0-rev5 v3 C14: Corrupted JSON — must fail-closed, no mutation -----
 # If settings.json exists but is not valid JSON, the installer MUST:
 #   1. Exit non-zero
 #   2. NOT mutate settings.json (preserve original corrupted content)
-echo "--- C14: Corrupted JSON — python-only fail-closed, no mutation ---"
+#
+# G0-rev5 v3: parameterized for both jq and python backends. Both must:
+#   - exit non-zero
+#   - leave settings.json byte-identical (SHA-256 unchanged)
+# We invoke the C14 scenario twice — once with real jq (C14-jq), once with
+# python-only via jq-shadowing (C14-py) — and assert both backends satisfy
+# the contract.
 
-C14_SANDBOX="$(safe_mktemp)/harness C14 sandbox"
-mkdir -p "$C14_SANDBOX/.claude"
-# Write deliberately corrupted JSON
-printf '{"hooks": {"SessionStart": [\nCORRUPTED_NOT_JSON' > "$C14_SANDBOX/.claude/settings.json"
-C14_ORIG_SHA="$(sha256sum "$C14_SANDBOX/.claude/settings.json" 2>/dev/null | awk '{print $1}' || echo "")"
+_run_c14() {
+  local backend_label="$1"   # "jq" or "py"
+  local jq_shadow_dir="$2"   # dir containing a fake jq; "" = use real jq
 
-C14_BIN="$(safe_mktemp)/c14bin"
-mkdir -p "$C14_BIN"
-cat > "$C14_BIN/jq" <<'JQEOF'
+  echo "--- C14 ($backend_label): Corrupted JSON — fail-closed, no mutation ---"
+
+  C14_SANDBOX="$(safe_mktemp)/harness C14 sandbox ($backend_label)"
+  mkdir -p "$C14_SANDBOX/.claude"
+  # Write deliberately corrupted JSON
+  printf '{"hooks": {"SessionStart": [\nCORRUPTED_NOT_JSON' > "$C14_SANDBOX/.claude/settings.json"
+  C14_ORIG_SHA="$(sha256sum "$C14_SANDBOX/.claude/settings.json" 2>/dev/null | awk '{print $1}' || echo "")"
+
+  ORIG_PATH="$PATH"
+  if [ -n "$jq_shadow_dir" ]; then
+    cat > "$jq_shadow_dir/jq" <<'JQEOF'
 #!/bin/bash
 exit 127
 JQEOF
-chmod +x "$C14_BIN/jq"
+    chmod +x "$jq_shadow_dir/jq"
+    export PATH="$jq_shadow_dir:$PATH"
+  fi
 
-ORIG_PATH="$PATH"
-export PATH="$C14_BIN:$PATH"
+  cd "$C14_SANDBOX"
+  set +e
+  bash "$C6_INSTALLER" --project > /dev/null 2>&1
+  C14_RC=$?
+  set -e
+  cd "$(pwd)"
 
-cd "$C14_SANDBOX"
-set +e
-bash "$C6_INSTALLER" --project > /dev/null 2>&1
-C14_RC=$?
-set -e
-cd "$(pwd)"
+  export PATH="$ORIG_PATH"
 
-export PATH="$ORIG_PATH"
+  # settings.json must be byte-identical to original (no mutation)
+  C14_POST_SHA="$(sha256sum "$C14_SANDBOX/.claude/settings.json" 2>/dev/null | awk '{print $1}' || echo "")"
+  C14_UNCHANGED=0
+  if [ "$C14_ORIG_SHA" = "$C14_POST_SHA" ]; then
+    C14_UNCHANGED=1
+  fi
 
-# settings.json must be byte-identical to original (no mutation)
-C14_POST_SHA="$(sha256sum "$C14_SANDBOX/.claude/settings.json" 2>/dev/null | awk '{print $1}' || echo "")"
-C14_UNCHANGED=0
-if [ "$C14_ORIG_SHA" = "$C14_POST_SHA" ]; then
-  C14_UNCHANGED=1
+  assert "C14.${backend_label}.1 corrupted JSON: installer exits non-zero" "1" "$([ "$C14_RC" -ne 0 ] && echo 1 || echo 0)"
+  assert "C14.${backend_label}.2 corrupted JSON: settings.json unchanged (SHA-256 identical)" "1" "$C14_UNCHANGED"
+  echo ""
+}
+
+# C14-jq: run with REAL jq in PATH (the buggy v2 path)
+if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+  _run_c14 "jq" ""
+else
+  echo "  [SKIP] C14-jq — requires real jq in PATH"
 fi
 
-assert "C14.1 corrupted JSON: installer exits non-zero" "1" "$([ "$C14_RC" -ne 0 ] && echo 1 || echo 0)"
-assert "C14.2 corrupted JSON: settings.json unchanged (no mutation)" "1" "$C14_UNCHANGED"
-echo ""
+# C14-py: shadow jq so the installer falls back to python
+C14_PY_BIN="$(safe_mktemp)/c14pybin"
+mkdir -p "$C14_PY_BIN"
+_run_c14 "py" "$C14_PY_BIN"
+
+# ---- G0-rev5 C15: SessionStart-only backslash — trust bash, add Stop ----
+# ---- G0-rev5 / G0-rev5 v3 C15: SessionStart-only backslash — trust bash, add Stop ----
+# First install both hooks (with the chosen backend), then rewrite only SS to
+# backslash form and remove Stop entirely. Reinstall must:
+#   - trust bash pre-check for the existing backslash-form SS (ss_exists=1)
+#   - add missing Stop
+#   - rc=0, final 1/1
+#
+# G0-rev5 v3: parameterized for both jq and python backends. Both must
+# satisfy rc=0 + SessionStart=1 (trusted) + Stop=1 (added).
+_run_c15() {
+  local backend_label="$1"
+  local jq_shadow_dir="$2"
+
+  if [ "$IS_WINDOWS" -ne 1 ] || ! command -v cygpath >/dev/null 2>&1; then
+    echo "  [SKIP] C15 ($backend_label) — backslash path test requires Windows+cygpath"
+    return
+  fi
+
+  echo "--- C15 ($backend_label): SessionStart-only backslash — trust bash, add Stop ---"
+
+  C15_SANDBOX="$(safe_mktemp)/harness C15 sandbox ($backend_label)"
+  mkdir -p "$C15_SANDBOX/.claude"
+
+  ORIG_PATH="$PATH"
+  if [ -n "$jq_shadow_dir" ]; then
+    cat > "$jq_shadow_dir/jq" <<'JQEOF'
+#!/bin/bash
+exit 127
+JQEOF
+    chmod +x "$jq_shadow_dir/jq"
+    export PATH="$jq_shadow_dir:$PATH"
+  fi
+
+  # First install to get both hooks
+  cd "$C15_SANDBOX"
+  bash "$C6_INSTALLER" --project > /dev/null 2>&1
+  cd "$(pwd)"
+
+  # On Windows: rewrite SS to backslash form, then DELETE Stop entry
+  if [ -f "$C15_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+    C15_TARGET_BS="$(cygpath -aw "$C15_SANDBOX/.claude/skills/harness-companion" 2>/dev/null || echo "")"
+    if [ -n "$C15_TARGET_BS" ]; then
+      C15S="$C15_SANDBOX/.claude/settings.json" C15W="$C15_TARGET_BS" python3 -c "
+import json, os
+with open(os.environ['C15S']) as f:
+    d = json.load(f)
+# Rewrite SS hook command to backslash form
+for entry in d.get('hooks',{}).get('SessionStart',[]):
+    for h in entry.get('hooks',[]):
+        h['command'] = 'bash \"' + os.environ['C15W'] + '\\\\scripts\\\\hooks\\\\session-start.sh\"'
+# DELETE Stop entirely (simulating a state where only SS with backslash exists)
+if 'Stop' in d.get('hooks',{}):
+    del d['hooks']['Stop']
+with open(os.environ['C15S'], 'w') as f:
+    json.dump(d, f, indent=2)
+    f.write('\n')
+" 2>/dev/null
+    fi
+
+    # Pre-reinstall assertions: verify fixture state before trusting the installer
+    C15_PRE_SS_CMD="" C15_PRE_SS_COUNT=0 C15_PRE_STOP_COUNT=0
+    if [ -f "$C15_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+      C15_PRE_SS_CMD="$(C15S="$C15_SANDBOX/.claude/settings.json" python3 -c "
+import json, os
+h = json.load(open(os.environ['C15S']))
+ss = h.get('hooks', {}).get('SessionStart', [])
+if ss and ss[0].get('hooks'):
+    print(ss[0]['hooks'][0].get('command', ''))
+" 2>/dev/null)"
+      C15_PRE_SS_COUNT="$(C15S="$C15_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C15S"])); print(len(h.get("hooks",{}).get("SessionStart",[])))' 2>/dev/null)"
+      C15_PRE_STOP_COUNT="$(C15S="$C15_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C15S"])); print(len(h.get("hooks",{}).get("Stop",[])))' 2>/dev/null)"
+    fi
+    # SessionStart command must contain backslashes (Windows path form)
+    C15_HAS_BS=0
+    case "$C15_PRE_SS_CMD" in
+      *\\*) C15_HAS_BS=1 ;;
+    esac
+    assert "C15.${backend_label}.0a SS command uses backslash form" "1" "$C15_HAS_BS"
+    assert "C15.${backend_label}.0b SessionStart count = 1 before reinstall" "1" "$C15_PRE_SS_COUNT"
+    assert "C15.${backend_label}.0c Stop count = 0 before reinstall (deleted)" "0" "$C15_PRE_STOP_COUNT"
+  fi
+
+  # Reinstall — should trust bash for backslash SS, add missing Stop
+  cd "$C15_SANDBOX"
+  set +e
+  bash "$C6_INSTALLER" --project > /dev/null 2>&1
+  C15_RC=$?
+  set -e
+  cd "$(pwd)"
+
+  export PATH="$ORIG_PATH"
+
+  C15_SS_COUNT=0
+  C15_STOP_COUNT=0
+  if [ -f "$C15_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+    C15_SS_COUNT="$(C15S="$C15_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C15S"])); print(len(h.get("hooks",{}).get("SessionStart",[])))' 2>/dev/null)"
+    C15_STOP_COUNT="$(C15S="$C15_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C15S"])); print(len(h.get("hooks",{}).get("Stop",[])))' 2>/dev/null)"
+  fi
+
+  assert "C15.${backend_label}.1 reinstall exit 0 (SS backslash existed, Stop missing)" "0" "$C15_RC"
+  assert "C15.${backend_label}.2 SessionStart still 1 (trusted bash for backslash SS)" "1" "$C15_SS_COUNT"
+  assert "C15.${backend_label}.3 Stop added 1 (missing side filled in)" "1" "$C15_STOP_COUNT"
+  echo ""
+}
+
+# C15-jq: with REAL jq in PATH
+if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+  _run_c15 "jq" ""
+else
+  echo "  [SKIP] C15-jq — requires real jq in PATH"
+fi
+
+# C15-py: shadow jq so the installer falls back to python
+C15_PY_BIN="$(safe_mktemp)/c15pybin"
+mkdir -p "$C15_PY_BIN"
+_run_c15 "py" "$C15_PY_BIN"
+
+# ---- G0-rev5 / G0-rev5 v3 C16: Stop-only C:/ — trust bash, add SessionStart ----
+# First install both hooks (with chosen backend), then rewrite only Stop to
+# C:/ form and remove SessionStart entirely. Reinstall must:
+#   - trust bash pre-check for the existing C:/-form Stop (stop_exists=1)
+#   - add missing SS
+#   - rc=0, final 1/1
+#
+# G0-rev5 v3: parameterized for both jq and python backends. Both must
+# satisfy rc=0 + SessionStart=1 (added) + Stop=1 (trusted).
+_run_c16() {
+  local backend_label="$1"
+  local jq_shadow_dir="$2"
+
+  if [ "$IS_WINDOWS" -ne 1 ] || ! command -v cygpath >/dev/null 2>&1; then
+    echo "  [SKIP] C16 ($backend_label) — C:/ path test requires Windows+cygpath"
+    return
+  fi
+
+  echo "--- C16 ($backend_label): Stop-only C:/ — trust bash, add SessionStart ---"
+
+  C16_SANDBOX="$(safe_mktemp)/harness C16 sandbox ($backend_label)"
+  mkdir -p "$C16_SANDBOX/.claude"
+
+  ORIG_PATH="$PATH"
+  if [ -n "$jq_shadow_dir" ]; then
+    cat > "$jq_shadow_dir/jq" <<'JQEOF'
+#!/bin/bash
+exit 127
+JQEOF
+    chmod +x "$jq_shadow_dir/jq"
+    export PATH="$jq_shadow_dir:$PATH"
+  fi
+
+  # First install to get both hooks
+  cd "$C16_SANDBOX"
+  bash "$C6_INSTALLER" --project > /dev/null 2>&1
+  cd "$(pwd)"
+
+  # On Windows: rewrite Stop to C:/ form, then DELETE SessionStart entry
+  if [ -f "$C16_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+    C16_TARGET_CM="$(cygpath -m "$C16_SANDBOX/.claude/skills/harness-companion" 2>/dev/null || echo "")"
+    if [ -n "$C16_TARGET_CM" ]; then
+      C16S="$C16_SANDBOX/.claude/settings.json" C16W="$C16_TARGET_CM" python3 -c "
+import json, os
+with open(os.environ['C16S']) as f:
+    d = json.load(f)
+# Rewrite Stop hook command to C:/ form
+for entry in d.get('hooks',{}).get('Stop',[]):
+    for h in entry.get('hooks',[]):
+        h['command'] = 'bash \"' + os.environ['C16W'] + '/scripts/hooks/stop-handoff.sh\"'
+# DELETE SessionStart entirely (simulating a state where only Stop with C:/ exists)
+if 'SessionStart' in d.get('hooks',{}):
+    del d['hooks']['SessionStart']
+with open(os.environ['C16S'], 'w') as f:
+    json.dump(d, f, indent=2)
+    f.write('\n')
+" 2>/dev/null
+    fi
+
+    # Pre-reinstall assertions: verify fixture state before trusting the installer.
+    # Use a single Python invocation to extract all values and check command form.
+    C16_PRE_JSON="$(C16S="$C16_SANDBOX/.claude/settings.json" python3 -c '
+import json, os, re
+h = json.load(open(os.environ["C16S"]))
+ss_count = len(h.get("hooks",{}).get("SessionStart",[]))
+stop_entries = h.get("hooks",{}).get("Stop",[])
+stop_count = len(stop_entries)
+stop_cmd = ""
+if stop_entries and stop_entries[0].get("hooks"):
+    stop_cmd = stop_entries[0]["hooks"][0].get("command","")
+# Check drive-letter path form (X:/...)
+has_drive = 1 if re.match(r"^bash \"[A-Za-z]:/", stop_cmd) else 0
+print(json.dumps({"ss":ss_count,"stop":stop_count,"has_drive":has_drive}))
+' 2>/dev/null)"
+    C16_PRE_SS_COUNT="$(echo "$C16_PRE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["ss"])' 2>/dev/null || echo 0)"
+    C16_PRE_STOP_COUNT="$(echo "$C16_PRE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["stop"])' 2>/dev/null || echo 0)"
+    C16_HAS_CM="$(echo "$C16_PRE_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["has_drive"])' 2>/dev/null || echo 0)"
+    assert "C16.${backend_label}.0a Stop command uses drive-letter form" "1" "$C16_HAS_CM"
+    assert "C16.${backend_label}.0b SessionStart count = 0 before reinstall (deleted)" "0" "$C16_PRE_SS_COUNT"
+    assert "C16.${backend_label}.0c Stop count = 1 before reinstall" "1" "$C16_PRE_STOP_COUNT"
+  fi
+
+  # Reinstall — should trust bash for C:/ Stop, add missing SessionStart
+  cd "$C16_SANDBOX"
+  set +e
+  bash "$C6_INSTALLER" --project > /dev/null 2>&1
+  C16_RC=$?
+  set -e
+  cd "$(pwd)"
+
+  export PATH="$ORIG_PATH"
+
+  C16_SS_COUNT=0
+  C16_STOP_COUNT=0
+  if [ -f "$C16_SANDBOX/.claude/settings.json" ] && command -v python3 >/dev/null 2>&1; then
+    C16_SS_COUNT="$(C16S="$C16_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C16S"])); print(len(h.get("hooks",{}).get("SessionStart",[])))' 2>/dev/null)"
+    C16_STOP_COUNT="$(C16S="$C16_SANDBOX/.claude/settings.json" python3 -c 'import json,os; h=json.load(open(os.environ["C16S"])); print(len(h.get("hooks",{}).get("Stop",[])))' 2>/dev/null)"
+  fi
+
+  assert "C16.${backend_label}.1 reinstall exit 0 (Stop C:/ existed, SS missing)" "0" "$C16_RC"
+  assert "C16.${backend_label}.2 SessionStart added 1 (missing side filled in)" "1" "$C16_SS_COUNT"
+  assert "C16.${backend_label}.3 Stop still 1 (trusted bash for C:/ Stop)" "1" "$C16_STOP_COUNT"
+  echo ""
+}
+
+# C16-jq: with REAL jq in PATH
+if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+  _run_c16 "jq" ""
+else
+  echo "  [SKIP] C16-jq — requires real jq in PATH"
+fi
+
+# C16-py: shadow jq so the installer falls back to python
+C16_PY_BIN="$(safe_mktemp)/c16pybin"
+mkdir -p "$C16_PY_BIN"
+_run_c16 "py" "$C16_PY_BIN"
 
 echo "=== F12 BUG-3 Matrix Summary ==="
 echo "Passed: $PASSED"

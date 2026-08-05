@@ -759,28 +759,67 @@ PYEOF
     echo "  backup written: $backup"
   fi
 
+  # G0-rev5 v3: JSON-validity gate BEFORE writer selection.
+  # If settings.json exists but is not valid JSON, refuse to mutate.
+  # Both jq and Python backends share this gate — the original failure mode
+  # was that the jq path fell through to printf '{}\n' and OVERWROTE the
+  # corrupted file, violating the fail-closed no-mutation contract.
+  if [ -f "$settings" ]; then
+    local settings_valid=0
+    if [ "$has_jq" -eq 1 ]; then
+      if jq -e . "$settings" >/dev/null 2>&1; then
+        settings_valid=1
+      fi
+    elif [ "$has_python" -eq 1 ]; then
+      if python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$settings" >/dev/null 2>&1; then
+        settings_valid=1
+      fi
+    else
+      echo "ERROR: neither jq nor python3 available — cannot validate settings.json" >&2
+      return 1
+    fi
+    if [ "$settings_valid" -eq 0 ]; then
+      echo "ERROR: $settings exists but is not valid JSON — refusing to mutate (fail-closed)" >&2
+      echo "       The file is byte-for-byte unchanged. Fix or remove it manually." >&2
+      return 1
+    fi
+  fi
+
   # F14.1: choose writer backend UP FRONT, no unconditional jq fallback.
   # If neither jq nor python3 is available, refuse to mutate settings.json.
+  # G0-rev5 v3: both backends consume SS_EXISTS/STOP_EXISTS from the bash
+  # pre-check. They only add the side that is actually missing — no raw
+  # command-string comparison that could miss equivalent path forms.
   local writer_rc=1
   local tmp="${settings}.tmp.$$"
 
   if [ "$has_jq" -eq 1 ]; then
-    # jq writer
-    if [ -f "$settings" ] && jq -e . "$settings" >/dev/null 2>&1; then
+    # jq writer — uses bash pre-check ss_exists/stop_exists (no string compare).
+    if [ -f "$settings" ]; then
       cp "$settings" "$tmp"
     else
       printf '{}\n' > "$tmp"
     fi
-    if jq --arg ss_cmd "$hook_ss_cmd" --arg stop_cmd "$hook_stop_cmd" '
-      .hooks //= {} |
-      .hooks.SessionStart //= [] |
-      .hooks.Stop         //= [] |
-      ( .hooks.SessionStart |= (if any(.[]?.hooks[]?; .command == $ss_cmd)
-                                then . else . + [{"matcher":"startup|resume","hooks":[{"type":"command","command":$ss_cmd,"timeout":5000}]}] end)
-      ) |
-      ( .hooks.Stop         |= (if any(.[]?.hooks[]?; .command == $stop_cmd)
-                                then . else . + [{"matcher":"*","hooks":[{"type":"command","command":$stop_cmd,"timeout":5000}]}] end)
-      )
+    # Build the SessionStart/Stop entries as JSON strings in bash. The command
+    # values are substituted at build time (so $ss_cmd in the filter is a jq
+    # variable, not a literal). Pass them to jq via --argjson so jq parses
+    # them as JSON literals — and only the SIDE that is missing is appended.
+    local jq_ss_entry="null"
+    local jq_stop_entry="null"
+    if [ "$ss_exists" -ne 1 ]; then
+      jq_ss_entry="$(jq -n --arg c "$hook_ss_cmd" \
+        '[{"matcher":"startup|resume","hooks":[{"type":"command","command":$c,"timeout":5000}]}]')"
+    fi
+    if [ "$stop_exists" -ne 1 ]; then
+      jq_stop_entry="$(jq -n --arg c "$hook_stop_cmd" \
+        '[{"matcher":"*","hooks":[{"type":"command","command":$c,"timeout":5000}]}]')"
+    fi
+    if jq --argjson add_ss "$jq_ss_entry" --argjson add_stop "$jq_stop_entry" '
+       .hooks //= {} |
+       .hooks.SessionStart //= [] |
+       .hooks.Stop         //= [] |
+       (if $add_ss    == null then . else .hooks.SessionStart += $add_ss    end) |
+       (if $add_stop  == null then . else .hooks.Stop         += $add_stop  end)
     ' "$tmp" > "${tmp}.out" 2>/dev/null; then
       mv "${tmp}.out" "$settings"
       writer_rc=0
@@ -876,14 +915,23 @@ PYEOF
   # not whatever command -v resolves first. A shadowed/fake jq would write
   # nothing real but still be found by command -v.
   local verify_rc=1
+  # G0-rev5: trust bash pre-check for existing hooks — do not re-raw-compare.
+  # The verifier must NOT second-guess canonical_path() equivalence. Only the
+  # side that was actually added by the writer needs its exact command verified.
   if [ "$has_jq" -eq 1 ]; then
     local has_ss has_stop
-    has_ss="$(jq --arg c "$hook_ss_cmd" \
-      '[.hooks.SessionStart[]?.hooks[]?.command // empty] | any(. == $c)' \
-      "$settings" 2>/dev/null || echo false)"
-    has_stop="$(jq --arg c "$hook_stop_cmd" \
-      '[.hooks.Stop[]?.hooks[]?.command // empty] | any(. == $c)' \
-      "$settings" 2>/dev/null || echo false)"
+    has_ss="true"   # default: trust bash — hook already existed
+    has_stop="true"
+    if [ "$ss_exists" -ne 1 ]; then
+      has_ss="$(jq --arg c "$hook_ss_cmd" \
+        '[.hooks.SessionStart[]?.hooks[]?.command // empty] | any(. == $c)' \
+        "$settings" 2>/dev/null || echo false)"
+    fi
+    if [ "$stop_exists" -ne 1 ]; then
+      has_stop="$(jq --arg c "$hook_stop_cmd" \
+        '[.hooks.Stop[]?.hooks[]?.command // empty] | any(. == $c)' \
+        "$settings" 2>/dev/null || echo false)"
+    fi
     if [ "$has_ss" = "true" ] && [ "$has_stop" = "true" ]; then
       verify_rc=0
     fi
@@ -893,19 +941,28 @@ PYEOF
 import json, os, sys
 data = json.load(open(os.environ["SETTINGS_FILE"]))
 hooks = data.get("hooks", {})
+ss_exists = os.environ.get("SS_EXISTS", "0")
+stop_exists = os.environ.get("STOP_EXISTS", "0")
 def has(entries, target):
     for e in entries:
         for h in e.get("hooks", []):
             if h.get("command") == target:
                 return True
     return False
-sys.exit(0 if (has(hooks.get("SessionStart", []), os.environ["HOOK_SS_CMD"])
-               and has(hooks.get("Stop", []), os.environ["HOOK_STOP_CMD"]))
-         else 1)
+# G0-rev5: trust bash pre-check — only verify the side(s) we actually added.
+ss_ok = True
+if ss_exists != "1":
+    ss_ok = has(hooks.get("SessionStart", []), os.environ["HOOK_SS_CMD"])
+stop_ok = True
+if stop_exists != "1":
+    stop_ok = has(hooks.get("Stop", []), os.environ["HOOK_STOP_CMD"])
+sys.exit(0 if (ss_ok and stop_ok) else 1)
 PYEOF
     if SETTINGS_FILE="$settings" \
        HOOK_SS_CMD="$hook_ss_cmd" \
        HOOK_STOP_CMD="$hook_stop_cmd" \
+       SS_EXISTS="$ss_exists" \
+       STOP_EXISTS="$stop_exists" \
        python3 "$_py_verify" 2>/dev/null; then
       verify_rc=0
     fi

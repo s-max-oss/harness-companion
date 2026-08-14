@@ -96,7 +96,7 @@ cp "$docs_cfg" "$DOCS_PROJ/.harness/config.json"
 cp "$TEMPLATES_DIR/feature_list.json" "$DOCS_PROJ/feature_list.json"
 
 cd "$DOCS_PROJ"
-bash "$ROOT_DIR/core/harness-verify.sh" "feature-001" "$DOCS_PROJ" 2>&1 | tail -3
+bash "$ROOT_DIR/core/harness-verify.sh" "F-001" "$DOCS_PROJ" 2>&1 | tail -3
 RC=$?
 
 LOG_FILE="$(ls "$DOCS_PROJ/.harness/logs/runs/"*.ndjson 2>/dev/null | head -1)"

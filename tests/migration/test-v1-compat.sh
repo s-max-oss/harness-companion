@@ -488,7 +488,7 @@ init_e2e() {
   fi
   # harness-verify.sh may legitimately exit non-zero on empty project (commands fail)
   # — we only assert it READ the scaffold successfully (got past config parse)
-  bash "$ROOT_DIR/scripts/harness-verify.sh" feature-001 "$tmp" >/dev/null 2>&1
+  bash "$ROOT_DIR/scripts/harness-verify.sh" F-001 "$tmp" >/dev/null 2>&1
   verify_rc=$?
   if [ "$verify_rc" -ne 0 ]; then
     # Non-zero is OK here (commands fail on empty project), but the script must

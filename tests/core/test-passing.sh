@@ -504,6 +504,70 @@ assert_passing_not_eligible "workspace modified → not eligible (step 6)" \
 rm -rf "$T14"
 
 # ============================================================================
+# Test 15: passed terminal but 0 effective required steps → not eligible (step 4)
+#          (P0-3) Adversarial run: overall_result="passed" yet every required
+#          command is in not_applicable_command_ids. Step 4 must judge on the
+#          EFFECTIVE required set (required − not_applicable), so this run is
+#          NOT eligible — same decision harness-verify makes (no_checks, exit 1).
+# ============================================================================
+echo ""
+echo "=== Test 15: passed but 0 effective required → not eligible ==="
+T15="$(mktemp -d)"
+make_config "$T15"
+printf '{"version":1}\n' > "$T15/.harness/config.json"
+T15_CONFIG_SHA="sha256:$(sha256sum "$T15/.harness/config.json" | awk '{print $1}')"
+T15_VERIFIED_FP="$(compute_workspace_fingerprint "$T15")"
+# Hand-crafted log: required=["c1","c2"], terminal not_applicable=["c1","c2"].
+# validate_run_log step 13 effective required = [] → structurally valid; but
+# passing.sh step 4 must still refuse eligibility.
+LOG="$T15/.harness/logs/runs/20260731T-zeroeff.ndjson"
+jq -nc --arg rid "20260731T-zeroeff" --arg csha "$T15_CONFIG_SHA" --arg vfp "$T15_VERIFIED_FP" \
+  --argjson req '["c1","c2"]' \
+  '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:$req,capability_level:1,feature_id:"feat-zeroeff"}' \
+  > "$LOG"
+jq -nc --arg rid "20260731T-zeroeff" --arg cid "c1" \
+  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:$cid,command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:"c1.log",log_sha256:"sha256:c1"}' \
+  >> "$LOG"
+jq -nc --arg rid "20260731T-zeroeff" --arg cid "c2" \
+  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:$cid,command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:01Z",duration_ms:50,log_artifact:"c2.log",log_sha256:"sha256:c2"}' \
+  >> "$LOG"
+jq -nc --arg rid "20260731T-zeroeff" --arg vfp "$T15_VERIFIED_FP" \
+  --argjson na '["c1","c2"]' \
+  '{event:"run_completed",schema_version:2,run_id:$rid,completed_at:"2026-07-31T15:13:12Z",overall_result:"passed",workspace_fingerprint_verified:$vfp,planned_commands:2,executed_commands:2,passed_commands:2,failed_commands:0,skipped_commands:0,not_applicable_command_ids:$na}' \
+  >> "$LOG"
+make_feature_list "$T15" "feat-zeroeff" "20260731T-zeroeff" '[]'
+assert_passing_not_eligible "passed terminal + 0 effective required → not eligible (step 4)" \
+  "feat-zeroeff" "$T15/feature_list.json" "$T15" "no_required_steps"
+rm -rf "$T15"
+
+# ============================================================================
+# Test 16: Git project + PASS run MISSING vcs_revision → not eligible (step 8)
+#          (P0-14) A PASS run inside a git project MUST record its vcs_revision.
+#          Empty/null revision = unverifiable → fail-closed. Non-git projects
+#          (Test 13) are unaffected and stay eligible.
+# ============================================================================
+echo ""
+echo "=== Test 16: git project + missing vcs_revision → not eligible ==="
+T16="$(mktemp -d)"
+make_config "$T16"
+printf '{"version":1}\n' > "$T16/.harness/config.json"
+T16_CONFIG_SHA="sha256:$(sha256sum "$T16/.harness/config.json" | awk '{print $1}')"
+git -C "$T16" init -q 2>/dev/null
+git -C "$T16" config user.email "test@test"
+git -C "$T16" config user.name  "test"
+git -C "$T16" config commit.gpgsign false
+git -C "$T16" add -A 2>/dev/null
+git -C "$T16" commit -q -m "init" 2>/dev/null
+T16_VERIFIED_FP="$(compute_workspace_fingerprint "$T16")"
+# vcs_revision=null inside a git project → missing revision, fail-closed
+make_run_log "$T16" "20260809T-norev" '["typecheck"]' "null" "$T16_CONFIG_SHA" \
+  "$T16_VERIFIED_FP" "passed" 1 1 0 0 '[]'
+make_feature_list "$T16" "feat-norev" "20260809T-norev" '[]'
+assert_passing_not_eligible "git project + run missing vcs_revision → not eligible (step 8)" \
+  "feat-norev" "$T16/feature_list.json" "$T16" "vcs_revision_missing"
+rm -rf "$T16"
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo ""

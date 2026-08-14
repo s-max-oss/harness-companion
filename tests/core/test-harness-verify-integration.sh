@@ -866,6 +866,181 @@ if [ -n "$T14D" ]; then
 fi
 
 # ============================================================================
+# Test 15: ALL required commands not_applicable → no_checks + non-passing exit
+#          (P0-3 effective required) — the regression the fix targets
+# ============================================================================
+# Before the fix, an all-not-applicable config fell through to the coverage-gate
+# else-branch: effective required was empty, MISSING_REQUIRED was empty, and the
+# run wrote overall_result="passed" exit 0. After the fix, the terminal is
+# overall_result="no_checks" and the exit is 1 (non-passing). passing.sh must
+# also refuse eligibility.
+echo ""
+echo "========== Test 15: All-Not-Applicable → no_checks, non-passing exit =========="
+
+T15="$TMPROOT/test15"
+mkdir -p "$T15"
+git -C "$T15" init --quiet .
+git -C "$T15" config user.email "test@example.com"
+git -C "$T15" config user.name "Tester"
+create_knowledge_entry "$T15"
+create_feature_list "$T15" "feat-all-na"
+create_config "$T15" '[
+  {"id":"req-a","command":["bash","-c","echo a && exit 0"],"required_for_passing":true,"applies_when":{"has_files":["nonexistent-a.xyz"]}},
+  {"id":"req-b","command":["bash","-c","echo b && exit 0"],"required_for_passing":true,"applies_when":{"has_files":["nonexistent-b.xyz"]}}
+]'
+
+run_verify "feat-all-na" "$T15"
+OUT15="$VERIFY_OUT"
+RC15="$VERIFY_RC"
+RUN_ID15="$(echo "$OUT15" | grep -oE '[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+' | head -1)"
+
+assert_exit_code "all-not-applicable exits 1 (non-passing)" "1" "$RC15"
+assert_contains "all-not-applicable says no_checks" "$OUT15" "no_checks"
+assert_contains "all-not-applicable says 0 effective required" "$OUT15" "0 effective required steps"
+assert_contains "all-not-applicable says NOT passing" "$OUT15" "NOT passing"
+
+LOG15="$T15/.harness/logs/runs/${RUN_ID15}.ndjson"
+assert_file_nonempty "all-not-applicable creates NDJSON log" "$LOG15"
+
+# Terminal must be run_completed/no_checks with both ids in not_applicable
+TERM15="$(tail -1 "$LOG15" | jq -c '{event, overall_result, not_applicable_command_ids}')"
+if [ "$(printf '%s' "$TERM15" | jq -r '.event')" = "run_completed" ] \
+   && [ "$(printf '%s' "$TERM15" | jq -r '.overall_result')" = "no_checks" ] \
+   && [ "$(printf '%s' "$TERM15" | jq -r '.not_applicable_command_ids | sort | join(",")')" = "req-a,req-b" ]; then
+  echo "PASS: all-not-applicable terminal = no_checks with not_applicable=[req-a,req-b]"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: all-not-applicable terminal wrong: $TERM15"
+  FAILED=$((FAILED + 1))
+fi
+
+# Log is structurally valid: validate_run_log step 13 computes effective
+# required = required − not_applicable = [] → no missing commands.
+assert_validate_run_log_passes "all-not-applicable validates canonical (eff required = 0)" "$RUN_ID15" "$T15"
+
+# passing.sh must refuse eligibility: inject an association so Step 1 resolves,
+# then Step 3 must reject overall_result="no_checks".
+jq --arg rid "$RUN_ID15" \
+  '.features[0].evidence_associations = [{"run_id": $rid, "associated_at": "2026-08-09T00:00:00Z", "associated_by": "user"}]' \
+  "$T15/feature_list.json" > "$T15/feature_list.json.tmp" \
+  && mv "$T15/feature_list.json.tmp" "$T15/feature_list.json"
+ELIG15="$(is_eligible_for_passing "feat-all-na" "$T15/feature_list.json" "$T15" 2>&1)"
+ELIG15_RC=$?
+if [ "$ELIG15_RC" != "0" ] && printf '%s' "$ELIG15" | grep -q "overall_result_not_passed"; then
+  echo "PASS: all-not-applicable NOT eligible for passing (overall_result_not_passed)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: all-not-applicable — expected not eligible (overall_result_not_passed), got rc=$ELIG15_RC: $ELIG15"
+  FAILED=$((FAILED + 1))
+fi
+
+# ============================================================================
+# Test 16: Mixed — required+applicable passes, required+not_applicable excluded
+#          (P0-3 effective required subtraction must NOT over-block)
+# ============================================================================
+# required_command_ids = [required-ok, required-na]; effective required must be
+# [required-ok] only. The run passes (exit 0), and is_eligible_for_passing must
+# still be eligible — proving the not_applicable subtraction removes exactly the
+# NA id and nothing more.
+echo ""
+echo "========== Test 16: Mixed — applicable required passes, NA required excluded =========="
+
+T16="$TMPROOT/test16"
+mkdir -p "$T16"
+git -C "$T16" init --quiet .
+git -C "$T16" config user.email "test@example.com"
+git -C "$T16" config user.name  "Tester"
+git -C "$T16" config commit.gpgsign false
+create_knowledge_entry "$T16"
+create_feature_list "$T16" "feat-mixed"
+create_config "$T16" '[
+  {"id":"required-ok","command":["bash","-c","echo ok && exit 0"],"required_for_passing":true},
+  {"id":"required-na","command":["bash","-c","echo never && exit 0"],"required_for_passing":true,"applies_when":{"has_files":["nonexistent.xyz"]}}
+]'
+# Commit knowledge + config so post---write axes are fresh (mirrors Test 14);
+# feature_list.json stays untracked (excluded from fingerprint).
+git -C "$T16" add CLAUDE.md .harness/config.json 2>/dev/null
+git -C "$T16" commit -q -m "initial seed for mixed test" 2>/dev/null
+
+run_verify "feat-mixed" "$T16" --write
+OUT16="$VERIFY_OUT"
+RC16="$VERIFY_RC"
+RUN_ID16="$(echo "$OUT16" | grep -oE '[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+' | head -1)"
+
+assert_exit_code "mixed exits 0 (passed)" "0" "$RC16"
+assert_contains "mixed says PASSED" "$OUT16" "PASSED"
+assert_contains "mixed says not_applicable" "$OUT16" "not_applicable"
+
+LOG16="$T16/.harness/logs/runs/${RUN_ID16}.ndjson"
+TERM16="$(tail -1 "$LOG16" | jq -c '{overall_result, not_applicable_command_ids}')"
+if [ "$(printf '%s' "$TERM16" | jq -r '.overall_result')" = "passed" ] \
+   && [ "$(printf '%s' "$TERM16" | jq -r '.not_applicable_command_ids | sort | join(",")')" = "required-na" ]; then
+  echo "PASS: mixed terminal = passed with not_applicable=[required-na]"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: mixed terminal wrong: $TERM16"
+  FAILED=$((FAILED + 1))
+fi
+
+assert_validate_run_log_passes "mixed validates canonical (eff required = [required-ok])" "$RUN_ID16" "$T16"
+
+# eligible: effective required = 1 (required-ok) → Step 4 passes, all axes fresh.
+ELIG16="$(is_eligible_for_passing "feat-mixed" "$T16/feature_list.json" "$T16" 2>&1)"
+ELIG16_RC=$?
+if [ "$ELIG16_RC" = "0" ]; then
+  echo "PASS: mixed run is ELIGIBLE for passing (effective required = 1, not over-blocked)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: mixed run — expected eligible, got rc=$ELIG16_RC: $ELIG16"
+  FAILED=$((FAILED + 1))
+fi
+
+# ============================================================================
+# Test 17: Applicable-but-missing required → coverage gate still fails
+#          (P0-3 must NOT let a skipped-but-applicable required command through)
+# ============================================================================
+# detected+pending is a NON-not_applicable skip (predicate true, origin/confirmation
+# gate). Such a required command is applicable but never executed → the effective
+# required set still contains it → the coverage gate writes run_failed exit 1 and
+# validate_run_log step 13 flags missing_required_command.
+echo ""
+echo "========== Test 17: Applicable-but-missing → coverage gate fails =========="
+
+T17="$TMPROOT/test17"
+mkdir -p "$T17"
+git -C "$T17" init --quiet .
+git -C "$T17" config user.email "test@example.com"
+git -C "$T17" config user.name "Tester"
+create_knowledge_entry "$T17"
+create_feature_list "$T17" "feat-pending"
+create_config "$T17" '[
+  {"id":"pending-req","command":["bash","-c","echo never && exit 0"],"required_for_passing":true,"command_origin":"detected","confirmation":"pending"}
+]'
+
+run_verify "feat-pending" "$T17"
+OUT17="$VERIFY_OUT"
+RC17="$VERIFY_RC"
+RUN_ID17="$(echo "$OUT17" | grep -oE '[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+' | head -1)"
+
+assert_exit_code "applicable-but-missing exits 1 (run_failed)" "1" "$RC17"
+assert_contains "applicable-but-missing skips detected+pending" "$OUT17" "detected+pending"
+assert_contains "applicable-but-missing hits coverage gate" "$OUT17" "Required-coverage gate"
+
+# The log is structurally incomplete: validate_run_log step 13 must flag
+# missing_required_command (effective required = [pending-req], no completion).
+LOG17="$T17/.harness/logs/runs/${RUN_ID17}.ndjson"
+assert_file_nonempty "applicable-but-missing creates NDJSON log" "$LOG17"
+VAL17="$(validate_run_log "$RUN_ID17" "$T17" 2>&1)"
+VAL17_RC=$?
+if [ "$VAL17_RC" != "0" ] && printf '%s' "$VAL17" | grep -q "missing_required_command"; then
+  echo "PASS: applicable-but-missing log rejected (missing_required_command)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: applicable-but-missing — expected missing_required_command rejection, got rc=$VAL17_RC: $VAL17"
+  FAILED=$((FAILED + 1))
+fi
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo ""

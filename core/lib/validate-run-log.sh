@@ -167,6 +167,14 @@ _validate_event_fields() {
           return 0
         fi
       done
+      # not_applicable_command_ids (optional): if present, must be an array of
+      # strings (E5 unification — ids of required commands with predicate=false).
+      if printf '%s' "$ev" | jq -e 'has("not_applicable_command_ids")' >/dev/null 2>&1; then
+        if ! printf '%s' "$ev" | jq -e '(.not_applicable_command_ids | type) == "array" and ([.not_applicable_command_ids[]? | type] | all(. == "string"))' >/dev/null 2>&1; then
+          printf '%s: not_applicable_command_ids must be an array of strings' "$ev_type"
+          return 0
+        fi
+      fi
       # run_failed requires failed_command_ids
       if [ "$ev_type" = "run_failed" ]; then
         if ! printf '%s' "$ev" | jq -e '(.failed_command_ids | type) == "array"' >/dev/null 2>&1; then
@@ -367,10 +375,19 @@ validate_run_log() {
   fi
 
   # ---- 13: Required command coverage ----
-  local completed_ids missing_count
+  # E5 unification: the effective required set = run_started.required_command_ids
+  # minus the terminal's not_applicable_command_ids (required commands whose
+  # applies_when predicate was false are legitimately excluded from coverage).
+  # Every remaining required command must have a command_completed event, or the
+  # log is structurally incomplete.
+  local completed_ids missing_count eff_required
   completed_ids="$(printf '%s' "$cmd_events" | jq '[.[].command_id]')"
-  missing_count="$(printf '%s' "$run_started" | jq --argjson completed "$completed_ids" '
-    [.required_command_ids[] | select(. as $r | $completed | index($r) | not)] | length
+  eff_required="$(printf '%s' "$events_json" | jq -c \
+    --argjson last_idx "$last_idx" \
+    '.[0].required_command_ids - ((.[$last_idx].not_applicable_command_ids // []) as $na | $na)')"
+  missing_count="$(printf '%s' "$events_json" | jq --argjson eff "$eff_required" '
+    [.[] | select(.event == "command_completed") | .command_id] as $completed
+    | [$eff[] | select(. as $r | $completed | index($r) | not)] | length
   ')"
   if [ "$missing_count" != "0" ]; then
     jq -n --arg run_id "$run_id" '{valid: false, reason: "missing_required_command", run_id: $run_id}'

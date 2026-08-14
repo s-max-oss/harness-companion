@@ -138,46 +138,32 @@ jobs:
       # ------------------------------------------------------------------
       # Phase 5d — version-sync FAIL-CLOSED gate (all 9 items must pass)
       #
-      # Per rc.2 G0-rev4: installs to a temp directory first, then passes
-      # the real --installed-target to test-version-sync.sh so that items
-      # #6 (receipt) and #7 (target VERSION) can be verified against the
-      # installed copy. Item #8 requires each README to independently
-      # match the version when both README files exist.
+      # P0-7: the install + test sequence lives in ONE place —
+      # scripts/version-sync-gate.sh — and is the SAME method the local
+      # full-suite runner (tests/run-all.sh) uses, so local and CI can never
+      # diverge. The gate installs to a throwaway temp dir (never a real
+      # install path), passes the real --installed-target to
+      # test-version-sync.sh so items #6 (receipt) and #7 (target VERSION) are
+      # verified against the installed copy, cleans up, and exits with the
+      # test's rc (never the rm rc). Item #8 requires each README to
+      # independently match the version when both README files exist.
       # ------------------------------------------------------------------
       - name: Phase 5d — version-sync FAIL-CLOSED
         id: phase5d
         run: |
           set +e
-          # Install to a temp directory so we have a real installed target
-          INSTALL_TMP="$(mktemp -d)"
-          echo "Phase 5d: installing to temp target $INSTALL_TMP"
-          cd "$INSTALL_TMP"
-          bash "$GITHUB_WORKSPACE/adapters/claude-code/install.sh" --project > /dev/null 2>&1
-          INSTALL_RC=$?
-          cd "$GITHUB_WORKSPACE"
-          if [ "$INSTALL_RC" -ne 0 ]; then
-            echo "::error::Phase 5d pre-install failed (rc=$INSTALL_RC) — cannot verify installed artifacts"
-            echo "phase5d_result=failed" >> "$GITHUB_OUTPUT"
-            rm -rf "$INSTALL_TMP"
-            exit 1
-          fi
-          INSTALLED_TARGET="$INSTALL_TMP/.claude/skills/harness-companion"
-          echo "Phase 5d: installed target at $INSTALLED_TARGET"
-          bash tests/release/test-version-sync.sh --installed-target "$INSTALLED_TARGET"
+          echo "Phase 5d: shared version-sync gate (scripts/version-sync-gate.sh)"
+          bash scripts/version-sync-gate.sh "$GITHUB_WORKSPACE"
           rc=$?
-          rm -rf "$INSTALL_TMP"
           if [ "$rc" -eq 0 ]; then
             echo "phase5d_result=passed" >> "$GITHUB_OUTPUT"
           else
             echo "phase5d_result=failed" >> "$GITHUB_OUTPUT"
             echo "::error::version-sync FAIL-CLOSED gate failed (rc=$rc) — repo artifacts disagree on version"
           fi
-          # CRITICAL: exit with the test-version-sync rc, NOT with the rm rc
-          # that just ran. Earlier versions of this step ended with `exit $?`
-          # which leaked the success code of `rm -rf` back to GitHub Actions —
-          # making a failing version-sync gate look green in the workflow UI.
-          # The step output (phase5d_result) still records pass/fail for the
-          # summary step; the step's own exit code is what blocks the pipeline.
+          # Exit with the gate's rc (NOT the rc of whatever ran last inside the
+          # step body). The step output (phase5d_result) records pass/fail for
+          # the summary step; the step's own exit code blocks the pipeline.
           exit "$rc"
 
       # ------------------------------------------------------------------

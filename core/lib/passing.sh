@@ -112,12 +112,20 @@ is_eligible_for_passing() {
   fi
 
   # ===========================================================================
-  # Step 4: At least one required step (run_started.required_command_ids.length > 0)
+  # Step 4: At least one EFFECTIVE required step.
+  #         effective = run_started.required_command_ids − terminal.not_applicable_command_ids
+  #         (P0-3) A run whose every required command was not_applicable has ZERO
+  #         effective required steps and is NOT eligible for passing — the same
+  #         decision harness-verify makes when it emits overall_result="no_checks".
   # ===========================================================================
-  local req_len
-  req_len="$(printf '%s' "$run_started" | jq '.required_command_ids | length')"
-  if [ "$req_len" -eq 0 ]; then
-    echo "Error: no_required_steps — required_command_ids is empty" >&2
+  local eff_required eff_len
+  eff_required="$(jq -nc \
+    --argjson rs "$run_started" \
+    --argjson term "$terminal" \
+    '($rs.required_command_ids - ($term.not_applicable_command_ids // []))')"
+  eff_len="$(printf '%s' "$eff_required" | jq 'length')"
+  if [ "$eff_len" -eq 0 ]; then
+    echo "Error: no_required_steps — 0 effective required steps (required_command_ids minus not_applicable_command_ids)" >&2
     return 1
   fi
 
@@ -212,7 +220,17 @@ is_eligible_for_passing() {
   local stored_rev current_rev
   stored_rev="$(printf '%s' "$run_started" | jq -r '.vcs_revision // empty')"
 
-  if [ -n "$stored_rev" ] && [ "$stored_rev" != "null" ]; then
+  if [ -z "$stored_rev" ] || [ "$stored_rev" = "null" ]; then
+    # P0-14: a PASS run in a GIT project must record its vcs_revision. If the
+    # project IS a git repo but the run carries no revision (pre-tracking run or
+    # a runner that failed to stamp one), that is a MISSING-revision condition —
+    # fail closed, never silently skip. Non-git projects are unaffected: there
+    # is no revision to record, and step 8 simply does not apply.
+    if command -v git >/dev/null 2>&1 && git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
+      echo "Error: vcs_revision_missing — git project but run records no vcs_revision" >&2
+      return 1
+    fi
+  else
     # Stored revision present: we MUST verify it. If git is unavailable
     # OR not a repo, the comparison fails closed.
     if ! command -v git >/dev/null 2>&1; then
@@ -239,8 +257,8 @@ is_eligible_for_passing() {
       return 1
     fi
   fi
-  # If stored_rev is empty/null, the run pre-dates VCS tracking; design §9.1
-  # specifies this comparison only when run_started.vcs_revision != null.
+  # P0-14: stored_rev empty/null is only tolerated for non-git projects (handled
+  # above). For git projects a missing revision was already rejected.
 
   return 0
 }

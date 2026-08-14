@@ -91,7 +91,29 @@ build_sandbox() {
 
   # Self-host contract + runtime files (copies of the real ones).
   mkdir -p "$sb/.harness/logs/runs"
-  cp "$ROOT_DIR/.harness/config.json" "$sb/.harness/config.json" || return 1
+  # Self-contained sandbox config: a trivial syntax-check command that passes
+  # inside the sandbox. The REAL repo config now runs the full suite
+  # (bash tests/run-all.sh), which requires tests/ — absent here and irrelevant
+  # to the §5-b.5 gate this harness replica exercises. Generate a valid, fast
+  # command (matching the scripts/_dummy.sh glob below) rather than copy the
+  # full-suite config (which would fail for want of tests/).
+  cat > "$sb/.harness/config.json" <<'EOF' || return 1
+{
+  "project_type": "generic",
+  "verification": {
+    "commands": [
+      {
+        "id": "bash-syntax",
+        "command": ["bash", "-c", "bash -n core/lib/*.sh scripts/*.sh"],
+        "required_for_passing": true,
+        "timeout_seconds": 3600,
+        "command_origin": "configured",
+        "confirmation": "not_required"
+      }
+    ]
+  }
+}
+EOF
   cp "$ROOT_DIR/feature_list.json"     "$sb/feature_list.json"     || return 1
   cp "$ROOT_DIR/AGENTS.md"             "$sb/AGENTS.md"             || return 1
   cp "$ROOT_DIR/CLAUDE.md"             "$sb/CLAUDE.md"             || return 1

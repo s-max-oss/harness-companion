@@ -2,10 +2,13 @@
 # verdict-artifact.sh — Append-only Reviewer verdict artifact (writer + validator)
 #
 # Reviewer verdicts are persisted as append-only evidence at:
-#   .harness/reviews/feature/<feature_id>.jsonl   (per-feature ORIGINAL evidence)
-#   .harness/reviews/phase/<phase>.jsonl          (per-phase cumulative reviews)
+#   .harness/reviews/feature/<feature_id>.jsonl     (per-feature ORIGINAL evidence)
+#   .harness/reviews/phase/<phase>.jsonl            (per-phase cumulative reviews)
+#   .harness/reviews/maintenance/<feature_id>.jsonl (repository/maintenance)
 # Feature records and phase records have SEPARATE schemas (kind split) — a phase
-# cumulative review NEVER overwrites per-feature verdict records.
+# cumulative review NEVER overwrites per-feature verdict records. A maintenance
+# record (kind "maintenance") covers features OUTSIDE the PLAN phases (e.g.
+# F-MAINT-01) and is never used for PLAN phase coverage.
 #
 # Append-only: a re-review (fix_and_resubmit) appends ONE new record with
 # attempt = previous attempt + 1; existing records are never rewritten,
@@ -14,9 +17,11 @@
 #
 # Validation invariants (fail-closed, mirroring validate-run-log.sh style):
 #   - schema_version == 1
-#   - kind == "feature" | "phase"   (feature/phase schema SPLIT)
+#   - kind == "feature" | "phase" | "maintenance"   (kind schema SPLIT)
 #   - feature records: feature_id matching ^[A-Z][A-Z0-9_-]*$, phase integer 1..5
 #   - phase records:    phase integer 1..5, feature_ids non-empty array of strings
+#   - maintenance records: feature_id matching ^[A-Z][A-Z0-9_-]*$; NO phase
+#     (not bound to a PLAN.json phase — see "maintenance" kind below)
 #   - attempt integer >= 1
 #   - verdict == "PASS" | "FAIL" | "BLOCKER"
 #   - base_sha / head_sha are Git OIDs: 40-hex (SHA-1) OR 64-hex (SHA-256)
@@ -66,9 +71,10 @@
 _v_artifact_path() {
   local project_dir="$1" kind="$2" id="$3"
   case "$kind" in
-    feature) printf '%s/.harness/reviews/feature/%s.jsonl' "$project_dir" "$id" ;;
-    phase)   printf '%s/.harness/reviews/phase/%s.jsonl' "$project_dir" "$id" ;;
-    *)       printf '' ;;
+    feature)     printf '%s/.harness/reviews/feature/%s.jsonl' "$project_dir" "$id" ;;
+    phase)       printf '%s/.harness/reviews/phase/%s.jsonl' "$project_dir" "$id" ;;
+    maintenance) printf '%s/.harness/reviews/maintenance/%s.jsonl' "$project_dir" "$id" ;;
+    *)           printf '' ;;
   esac
 }
 
@@ -293,20 +299,32 @@ verdict_validate_record() {
   local kind
   kind="$(printf '%s' "$rec" | jq -r '.kind // empty')"
   case "$kind" in
-    feature|phase) ;;
-    *) echo "verdict: kind must be feature|phase" >&2; return 1 ;;
+    feature|phase|maintenance) ;;
+    *) echo "verdict: kind must be feature|phase|maintenance" >&2; return 1 ;;
   esac
-  if ! printf '%s' "$rec" | jq -e '(.phase | type) == "number" and .phase >= 1 and .phase <= 5' >/dev/null 2>&1; then
-    echo "verdict: phase must be integer 1..5" >&2
-    return 1
+  # phase 1..5 is a feature/phase invariant. The maintenance kind is a
+  # repository-level verdict (F-MAINT-01 and future maintenance features) NOT
+  # bound to any PLAN.json phase, so it carries no `phase` field and is never
+  # subject to PLAN phase membership or phase coverage.
+  if [ "$kind" = "feature" ] || [ "$kind" = "phase" ]; then
+    if ! printf '%s' "$rec" | jq -e '(.phase | type) == "number" and .phase >= 1 and .phase <= 5' >/dev/null 2>&1; then
+      echo "verdict: phase must be integer 1..5" >&2
+      return 1
+    fi
   fi
-  if [ "$kind" = "feature" ]; then
+  if [ "$kind" = "feature" ] || [ "$kind" = "maintenance" ]; then
     local fid
     fid="$(printf '%s' "$rec" | jq -r '.feature_id // empty')"
     if ! printf '%s' "$fid" | grep -qE '^[A-Z][A-Z0-9_-]*$'; then
-      echo "verdict: feature record requires valid feature_id" >&2
+      echo "verdict: $kind record requires valid feature_id" >&2
       return 1
     fi
+    # The PLAN.json phase-membership + phase-match checks below apply ONLY to
+    # `feature` records. A `maintenance` record (F-MAINT-01 and future
+    # maintenance features) is a repository-level verdict NOT bound to any
+    # PLAN.json phase — it has no `phase` field and is never subject to phase
+    # coverage (see verdict_validate_file / _v_phase_coverage).
+    if [ "$kind" = "feature" ]; then
     # Codex r4: a feature verdict's `phase` MUST equal the feature's declared
     # phase in .harness/PLAN.json (no `phase` reassignment out of band). The
     # record's own `phase` is a per-record label; the AUTHORITATIVE source of
@@ -342,7 +360,8 @@ verdict_validate_record() {
       echo "verdict: record phase=$rec_phase does not match PLAN-declared phase=$declared_phase for feature '$fid'" >&2
       return 1
     fi
-  else
+    fi
+  elif [ "$kind" = "phase" ]; then
     if ! printf '%s' "$rec" | jq -e '(.feature_ids | type) == "array" and (.feature_ids | length) > 0 and ([.feature_ids[]? | type] | all(. == "string"))' >/dev/null 2>&1; then
       echo "verdict: phase record requires non-empty feature_ids array of strings" >&2
       return 1
@@ -436,7 +455,7 @@ verdict_validate_record() {
   # feature's run. Phase records are not feature-scoped (no expect_fid).
   if [ "$verdict" = "PASS" ] && [ -n "$run_id" ]; then
     local pass_reason
-    if [ "$kind" = "feature" ]; then
+    if [ "$kind" = "feature" ] || [ "$kind" = "maintenance" ]; then
       pass_reason="$( _v_require_passed_fresh_run "$project_dir" "$run_id" "$head" "$fid" 2>&1 )"
     else
       pass_reason="$( _v_require_passed_fresh_run "$project_dir" "$run_id" "$head" 2>&1 )"
@@ -519,7 +538,7 @@ verdict_validate_file() {
         '{valid:false, reason:"kind_mismatch", line:$line, found:$found, expected:$expected}'
       return 1
     fi
-    if [ "$kind" = "feature" ]; then
+    if [ "$kind" = "feature" ] || [ "$kind" = "maintenance" ]; then
       local rfid
       rfid="$(printf '%s' "$rec" | jq -r '.feature_id')"
       if [ "$rfid" != "$id" ]; then

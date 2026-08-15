@@ -160,6 +160,18 @@ feature_rec() {
       reviewer_host:$host, checked:["spec-a"], reason:"test", recorded_at:"2026-08-08T00:00:00Z"}'
 }
 
+# maintenance_rec <dir> <fid> <verdict> <run_or_empty> <base> <head> [host]
+# A maintenance/repository record — NO `phase` field (not bound to a PLAN phase).
+maintenance_rec() {
+  local d="$1" fid="$2" verdict="$3" run="$4" base="$5" head="$6" host="${7:-subagent}"
+  jq -n --arg fid "$fid" --arg v "$verdict" --arg r "$run" \
+    --arg base "$base" --arg head "$head" --arg host "$host" \
+    '{schema_version:1, kind:"maintenance", feature_id:$fid, attempt:1,
+      verdict:$v, base_sha:$base, head_sha:$head,
+      run_id:($r | if . == "" then null else . end),
+      reviewer_host:$host, checked:["maint"], reason:"test", recorded_at:"2026-08-08T00:00:00Z"}'
+}
+
 rec_valid() {
   local d="$1" rec="$2"
   verdict_validate_record "$d" "$rec" >/dev/null 2>&1
@@ -363,7 +375,12 @@ write_plan "$D" 1 F-CONV-01
 build_passed_run "$D" run-cfg F-CONV-01
 BASE="$(git -C "$D" rev-parse HEAD)"
 HEAD="$BASE"
-printf '{"project_type":"generic","verification":{"commands":[]}}\n' > "$D/.harness/config.json"
+# Change a NON-argv field (required_for_passing) so config_sha256 differs from
+# the run's recorded config_sha256, while the c1 argv stays intact so Critical
+# #1's 5d argv-binding (command array must equal config-declared argv) still
+# passes. The old test set commands:[] which tripped 5d (command_not_in_config)
+# before the freshness axis could report config_stale.
+printf '{"project_type":"generic","verification":{"commands":[{"id":"c1","command":["true"],"required_for_passing":false}]}}\n' > "$D/.harness/config.json"
 REC="$(feature_rec "$D" F-CONV-01 1 PASS run-cfg "$BASE" "$HEAD")"
 check "T20: PASS binding a config-stale run rejected" 1 "$(rec_valid "$D" "$REC")"
 REASON="$(rec_invalid_reason "$D" "$REC")"
@@ -704,6 +721,120 @@ HEAD="$(git -C "$D" rev-parse HEAD)"
 # Well-formed: F-CONV-01 in phase 1, both PLAN and record agree.
 REC="$(feature_rec "$D" F-CONV-01 1 FAIL "" "$HEAD" "$HEAD")"
 check "V6: positive control — feature matches PLAN phase valid" 0 "$(rec_valid "$D" "$REC")"
+
+# ---- Important #6 (Codex r5): maintenance/repository verdict kind ------------
+# The `maintenance` kind covers features OUTSIDE the PLAN phases (F-MAINT-01).
+# It must: bind a valid feature_id, require base/head OIDs, bind a passed+fresh
+# feature-scoped run on PASS (P0-12), keep attempt continuity, and be REJECTED
+# when it would otherwise satisfy PLAN phase coverage (it lives in maintenance/,
+# never feature/, and phase coverage reads PLAN + feature/ only). It must NOT
+# require PLAN phase membership nor a `phase` field.
+
+# MAINT-1: maintenance FAIL record (no run) validates WITHOUT any PLAN.json and
+# WITHOUT a phase field — F-MAINT-01 is not in any PLAN phase.
+D="$(mktemp -d "$TMPDIR/maint1-XXXX")"
+ginit "$D"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+M1REC="$(maintenance_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD")"
+check "MAINT-1: maintenance FAIL without PLAN/phase validates" 0 "$(rec_valid "$D" "$M1REC")"
+
+# MAINT-2: maintenance PASS binds a passed+fresh run scoped to F-MAINT-01, even
+# though F-MAINT-01 is NOT declared in any PLAN.json phase → valid.
+D="$(mktemp -d "$TMPDIR/maint2-XXXX")"
+ginit "$D"
+write_plan "$D" 1 F-CONV-01          # PLAN has F-CONV-01 only (not F-MAINT-01)
+build_passed_run "$D" maint-run F-MAINT-01
+BASE="$(git -C "$D" rev-parse HEAD)"
+HEAD="$BASE"
+M2REC="$(maintenance_rec "$D" F-MAINT-01 PASS maint-run "$BASE" "$HEAD")"
+check "MAINT-2: maintenance PASS binding F-MAINT-01 run validates (not in PLAN)" 0 "$(rec_valid "$D" "$M2REC")"
+
+# MAINT-3: maintenance record missing feature_id → invalid
+D="$(mktemp -d "$TMPDIR/maint3-XXXX")"
+ginit "$D"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+M3REC="$(maintenance_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD" | jq 'del(.feature_id)')"
+check "MAINT-3: maintenance missing feature_id rejected" 1 "$(rec_valid "$D" "$M3REC")"
+
+# MAINT-4: maintenance record with invalid feature_id pattern → invalid
+D="$(mktemp -d "$TMPDIR/maint4-XXXX")"
+ginit "$D"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+M4REC="$(maintenance_rec "$D" "not-valid!" FAIL "" "$HEAD" "$HEAD")"
+check "MAINT-4: maintenance invalid feature_id rejected" 1 "$(rec_valid "$D" "$M4REC")"
+
+# MAINT-5: maintenance PASS binding a run scoped to a DIFFERENT feature → invalid
+# (P0-12 feature_id binding applies to maintenance exactly as to feature)
+D="$(mktemp -d "$TMPDIR/maint5-XXXX")"
+ginit "$D"
+write_plan "$D" 1 F-CONV-01
+build_passed_run "$D" maint-run-other F-CONV-01
+HEAD="$(git -C "$D" rev-parse HEAD)"
+M5REC="$(maintenance_rec "$D" F-MAINT-01 PASS maint-run-other "$HEAD" "$HEAD")"
+check "MAINT-5: maintenance PASS binding another feature's run rejected" 1 "$(rec_valid "$D" "$M5REC")"
+REASON="$(rec_invalid_reason "$D" "$M5REC")"
+check "MAINT-5b: reason run_feature_id_mismatch" yes "$(printf '%s' "$REASON" | grep -q 'run_feature_id_mismatch' && echo yes || echo no)"
+
+# MAINT-6: append-only writer + validate_file for maintenance kind (attempt 1..2,
+# feature_id == file id, kind consistency)
+D="$(mktemp -d "$TMPDIR/maint6-XXXX")"
+ginit "$D"
+gcommit "$D"
+BASE="$(git -C "$D" rev-parse HEAD~1 2>/dev/null || git -C "$D" rev-parse HEAD)"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+M6A="$(verdict_append_record "$D" maintenance F-MAINT-01 "$(maintenance_rec "$D" F-MAINT-01 FAIL "" "$BASE" "$HEAD")")"
+M6B="$(verdict_append_record "$D" maintenance F-MAINT-01 "$(maintenance_rec "$D" F-MAINT-01 FAIL "" "$BASE" "$HEAD")")"
+check "MAINT-6a: attempt 1 on first append" 1 "$(printf '%s' "$M6A" | jq '.attempt')"
+check "MAINT-6b: attempt 2 on second append" 2 "$(printf '%s' "$M6B" | jq '.attempt')"
+check "MAINT-6c: maintenance file validates" true "$(verdict_validate_file "$D" maintenance F-MAINT-01 | jq -r '.valid')"
+
+# MAINT-7: maintenance record feature_id must match the file id (validate_file)
+D="$(mktemp -d "$TMPDIR/maint7-XXXX")"
+ginit "$D"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+mkdir -p "$D/.harness/reviews/maintenance"
+maintenance_rec "$D" F-OTHER FAIL "" "$HEAD" "$HEAD" | jq -c . \
+  > "$D/.harness/reviews/maintenance/F-MAINT-01.jsonl"
+RES="$(verdict_validate_file "$D" maintenance F-MAINT-01)"
+check "MAINT-7: maintenance feature_id mismatch rejected" "feature_id_mismatch" "$(printf '%s' "$RES" | jq -r '.reason')"
+
+# MAINT-8: CLI end-to-end append + validate for maintenance kind (no --phase)
+D="$(mktemp -d "$TMPDIR/maint8-XXXX")"
+ginit "$D"
+BASE="$(git -C "$D" rev-parse HEAD)"
+CLI_OUT="$(bash "$ROOT_DIR/core/harness-verdict.sh" append "$D" maintenance F-MAINT-01 \
+  --verdict FAIL --base "$BASE" --head "$BASE" \
+  --host manual --checked maint-1 --reason "maintenance e2e")"
+check "MAINT-8a: CLI maintenance append attempt 1" 1 "$(printf '%s' "$CLI_OUT" | jq '.attempt')"
+check "MAINT-8b: CLI maintenance append has no phase" "null" "$(printf '%s' "$CLI_OUT" | jq -r '.phase // "null"')"
+check "MAINT-8c: CLI validate valid" true "$(bash "$ROOT_DIR/core/harness-verdict.sh" validate "$D" maintenance F-MAINT-01 | jq -r '.valid')"
+check "MAINT-8d: CLI next attempt 2" 2 "$(bash "$ROOT_DIR/core/harness-verdict.sh" next "$D" maintenance F-MAINT-01)"
+
+# MAINT-9: a maintenance record for a PLAN feature does NOT satisfy phase
+# coverage — phase coverage reads feature/ artifacts, never maintenance/.
+D="$(mktemp -d "$TMPDIR/maint9-XXXX")"
+ginit "$D"
+write_plan "$D" 1 F-CONV-01
+build_passed_run "$D" maint-ph-run F-CONV-01
+BASE="$(git -C "$D" rev-parse HEAD)"
+HEAD="$BASE"
+# A PASS maintenance record for F-CONV-01 lands in maintenance/ — NOT feature/.
+mkdir -p "$D/.harness/reviews/maintenance"
+maintenance_rec "$D" F-CONV-01 PASS maint-ph-run "$BASE" "$HEAD" | jq -c . \
+  > "$D/.harness/reviews/maintenance/F-CONV-01.jsonl"
+# Phase 1 PASS claims the full PLAN set (F-CONV-01) but there is no feature/
+# verdict artifact → coverage must FAIL (maintenance does not satisfy it).
+build_passed_run "$D" run-ph
+mkdir -p "$D/.harness/reviews/phase"
+jq -n --arg run "run-ph" --arg b "$BASE" --arg h "$HEAD" \
+  '{schema_version:1, kind:"phase", phase:1, feature_ids:["F-CONV-01"],
+    attempt:1, verdict:"PASS", base_sha:$b, head_sha:$h, run_id:$run,
+    reviewer_host:"subagent", checked:["spec"], reason:"phase ok", recorded_at:"2026-08-08T00:00:00Z"}' \
+  | jq -c . > "$D/.harness/reviews/phase/1.jsonl"
+RES="$(verdict_validate_file "$D" phase 1)"
+check "MAINT-9: maintenance does not satisfy phase coverage" false "$(printf '%s' "$RES" | jq -r '.valid')"
+check "MAINT-9b: reason phase_coverage_failed" "phase_coverage_failed" "$(printf '%s' "$RES" | jq -r '.reason')"
+check "MAINT-9c: detail phase_feature_missing_artifact" "phase_feature_missing_artifact" "$(printf '%s' "$RES" | jq -r '.detail.reason')"
 
 echo ""
 echo "Verdict-Artifact Results: $PASSED passed, $FAILED failed"

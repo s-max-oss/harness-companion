@@ -2,13 +2,14 @@
 # harness-verdict.sh — Append-only Reviewer verdict artifact CLI
 #
 # Wraps core/lib/verdict-artifact.sh for recording and validating independent
-# Reviewer verdicts. Feature verdicts and phase verdicts use SEPARATE schemas
-# (kind split) and live in separate append-only files:
+# Reviewer verdicts. Feature verdicts, phase verdicts, and maintenance verdicts
+# use SEPARATE schemas (kind split) and live in separate append-only files:
 #   .harness/reviews/feature/<feature_id>.jsonl
 #   .harness/reviews/phase/<phase>.jsonl
+#   .harness/reviews/maintenance/<feature_id>.jsonl
 #
 # Usage:
-#   bash harness-verdict.sh append <project_dir> <feature|phase> <id> \
+#   bash harness-verdict.sh append <project_dir> <feature|phase|maintenance> <id> \
 #       --verdict PASS|FAIL|BLOCKER \
 #       --run <run_id>          # verification run id (REQUIRED for PASS) \
 #       --base <sha> --head <sha>   # 40- or 64-hex Git OIDs \
@@ -18,8 +19,8 @@
 #       [--feature-ids A,B,...]     # phase records only \
 #       [--phase N]                 # feature records: feature's phase (1..5)
 #
-#   bash harness-verdict.sh validate <project_dir> <feature|phase> <id>
-#   bash harness-verdict.sh next <project_dir> <feature|phase> <id>
+#   bash harness-verdict.sh validate <project_dir> <feature|phase|maintenance> <id>
+#   bash harness-verdict.sh next <project_dir> <feature|phase|maintenance> <id>
 #
 # Append semantics: each re-review appends ONE new record with attempt =
 # previous + 1. Existing records are never rewritten, truncated, or deleted.
@@ -46,12 +47,12 @@ v_usage() {
 Usage: harness-verdict.sh <command> [args...]
 
 Commands:
-  append <project_dir> <feature|phase> <id> --verdict PASS|FAIL|BLOCKER \
+  append <project_dir> <feature|phase|maintenance> <id> --verdict PASS|FAIL|BLOCKER \
       --run <run_id> --base <sha> --head <sha> \
       [--host subagent|manual] [--checked a,b] [--reason "..."] \
       [--feature-ids A,B] [--phase N]
-  validate <project_dir> <feature|phase> <id>
-  next <project_dir> <feature|phase> <id>
+  validate <project_dir> <feature|phase|maintenance> <id>
+  next <project_dir> <feature|phase|maintenance> <id>
 
 Append-only: attempt = previous + 1; records are never rewritten or deleted.
 PASS verdicts MUST bind a non-empty verification run_id.
@@ -114,6 +115,15 @@ cmd_append() {
       --arg run "$run_id" --arg host "$host" --argjson checked "$checked_json" \
       --arg reason "$reason" --arg now "$now" \
       '{schema_version:1, kind:$kind, feature_id:$fid, phase:$ph,
+        verdict:$verdict, base_sha:$base, head_sha:$head,
+        run_id:($run | if . == "" then null else . end),
+        reviewer_host:$host, checked:$checked, reason:$reason, recorded_at:$now}')"
+  elif [ "$kind" = "maintenance" ]; then
+    record="$(jq -n --arg kind "$kind" --arg fid "$id" \
+      --arg verdict "$verdict" --arg base "$base_sha" --arg head "$head_sha" \
+      --arg run "$run_id" --arg host "$host" --argjson checked "$checked_json" \
+      --arg reason "$reason" --arg now "$now" \
+      '{schema_version:1, kind:$kind, feature_id:$fid,
         verdict:$verdict, base_sha:$base, head_sha:$head,
         run_id:($run | if . == "" then null else . end),
         reviewer_host:$host, checked:$checked, reason:$reason, recorded_at:$now}')"

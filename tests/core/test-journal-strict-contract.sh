@@ -373,15 +373,58 @@ TS_I7="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)"
 PRE_I7="$(sha256_file "$I7/feature_list.json")"
 PSHA_I7="$(printf '%s\n' "$POST_I6" | sha256sum | awk '{print $1}')"
 printf '%s\n' "{\"ts\":\"$TS_I7\",\"op\":\"journal_init\",\"revision\":0,\"feature_id\":null,\"from\":null,\"to\":null,\"pending\":false,\"op_key\":null,\"feature_list_sha_before\":null,\"feature_list_sha_after\":null,\"evidence_run_ids_after\":[],\"run_id\":null}" > "$I7/.harness/registry-journal.ndjson"
+# Codex r5 Important #5 — IMPORTANT: the I7 fixture intentionally has a
+# pending line + recovery_backfill + NO commit line for the op_key. The
+# writer-side test is "the FIRST journal_record_committed call for this
+# op_key (no prior commit) must succeed when recovery_backfill resolves the
+# expected_post_sha binding." Pre-seeding a commit line here would make the
+# test exercise the duplicate-commit-defense path instead of the
+# recovery_backfill path.
 printf '%s\n' "{\"ts\":\"$TS_I7\",\"op\":\"status\",\"feature_id\":\"F-001\",\"from\":\"not_started\",\"to\":\"in_progress\",\"revision\":2,\"pending\":true,\"op_key\":\"ffffffffffffffff\",\"feature_list_sha_before\":\"$PRE_I7\",\"feature_list_sha_after\":null,\"evidence_run_ids_after\":[],\"run_id\":null}" >> "$I7/.harness/registry-journal.ndjson"
-printf '%s\n' "{\"ts\":\"$TS_I7\",\"op\":\"commit\",\"feature_id\":null,\"from\":null,\"to\":null,\"revision\":2,\"pending\":false,\"op_key\":\"ffffffffffffffff\",\"feature_list_sha_before\":null,\"feature_list_sha_after\":\"$PSHA_I7\",\"evidence_run_ids_after\":[],\"run_id\":null}" >> "$I7/.harness/registry-journal.ndjson"
 printf '%s\n' "{\"ts\":\"$TS_I7\",\"op\":\"recovery_backfill\",\"op_key\":\"ffffffffffffffff\",\"expected_post_sha\":\"$PSHA_I7\",\"reason\":\"legacy pending lacked expected_post_sha — derived from committed feature_list_sha_after (deterministic, not fabricated)\"}" >> "$I7/.harness/registry-journal.ndjson"
 printf '%s\n' "$POST_I6" > "$I7/feature_list.json"
-# Write a SECOND commit to trigger the writer-side check. Pending is the one
-# we just constructed (no expected_post_sha) but recovery_backfill is present.
-# Writer must accept because the existing backfill resolves the binding.
+# First commit call: no prior commit exists → writer accepts because
+# recovery_backfill resolves the expected_post_sha binding.
 rc_i=0; out_i="$(journal_record_committed "$I7" "ffffffffffffffff" "$PSHA_I7" 2>&1)"; rc_i=$?
-check "I7a: commit accepts pending with recovery_backfill present" "0" "$rc_i"
+check "I7a: commit accepts pending with recovery_backfill present (no prior commit)" "0" "$rc_i"
+
+# I9: Codex r5 Important #5 — duplicate commit MUST be rejected at the writer.
+# A retry of journal_record_committed (crash-recovery / buggy caller / manual
+# re-run) MUST NOT silently append a second `op:"commit"` line for the same
+# op_key. Without this defense, the verifier-layer duplicate_commit check is
+# reached only AFTER the off-chain record is already in the journal — and any
+# intermediate reader that trusts the journal (e.g. a partial replay, a
+# migrate path) would see the false commit.
+I9="$(mktemp -d "$TMPDIR/i9-XXXX")"
+setup_project "$I9" >/dev/null
+POST_I9_DOC='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+PSHA_I9="$(printf '%s\n' "$POST_I9_DOC" | sha256sum 2>/dev/null | awk '{print $1}')"
+ok_i9="$(journal_record_pending "$I9" status F-001 not_started in_progress --revision 2 --post-sha "$PSHA_I9")"
+printf '%s\n' "$POST_I9_DOC" > "$I9/feature_list.json"
+# First commit: succeeds (no prior commit for this op_key).
+rc_i9=0; journal_record_committed "$I9" "$ok_i9" "$PSHA_I9" >/dev/null 2>&1 || rc_i9=$?
+check "I9a: first commit succeeds (no prior commit)" "0" "$rc_i9"
+# Second commit for the SAME op_key: MUST be rejected at the writer — rc=1,
+# and no second `op:"commit"` line is appended.
+JP_I9="$I9/.harness/registry-journal.ndjson"
+I9_LINES_BEFORE="$(grep -c '"op":"commit"' "$JP_I9" 2>/dev/null || echo 0)"
+rc_i9b=0; journal_record_committed "$I9" "$ok_i9" "$PSHA_I9" >/dev/null 2>&1 || rc_i9b=$?
+check "I9b: second commit for same op_key returns nonzero" "1" "$rc_i9b"
+I9_LINES_AFTER="$(grep -c '"op":"commit"' "$JP_I9" 2>/dev/null || echo 0)"
+check "I9c: no second commit line appended (count unchanged)" "$I9_LINES_BEFORE" "$I9_LINES_AFTER"
+
+# I10: positive control — different op_key CAN have its own commit (the
+# duplicate check is per-op_key, not journal-wide).
+I10="$(mktemp -d "$TMPDIR/i10-XXXX")"
+setup_project "$I10" >/dev/null
+PSHA_I10="$PSHA_I9"
+ok_i10a="$(journal_record_pending "$I10" status F-001 not_started in_progress --revision 2 --post-sha "$PSHA_I10")"
+ok_i10b="$(journal_record_pending "$I10" status F-001 not_started in_progress --revision 2 --post-sha "$PSHA_I10")"
+printf '%s\n' "$POST_I9_DOC" > "$I10/feature_list.json"
+rc_i10a=0; journal_record_committed "$I10" "$ok_i10a" "$PSHA_I10" >/dev/null 2>&1 || rc_i10a=$?
+rc_i10b=0; journal_record_committed "$I10" "$ok_i10b" "$PSHA_I10" >/dev/null 2>&1 || rc_i10b=$?
+check "I10a: commit for op_key A succeeds" "0" "$rc_i10a"
+check "I10b: commit for DIFFERENT op_key B succeeds (per-key defense)" "0" "$rc_i10b"
 
 # I8: Critical #2 — duplicate recovery_backfill op_key MUST be detected and
 # rejected. Previously the `from_entries` collapse at registry-journal.sh:538

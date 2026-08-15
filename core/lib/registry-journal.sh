@@ -226,6 +226,21 @@ journal_record_committed() {
   local jp; jp="$(journal_path "$dir")"
   [ -f "$jp" ] || { echo "journal: no journal file at $jp" >&2; return 1; }
 
+  # Codex r5 Important #5 — refuse to mint a duplicate commit. A retry of
+  # journal_record_committed (crash-recovery / buggy caller / manual re-run)
+  # MUST NOT silently append a second `op:"commit"` line for the same op_key:
+  # journal_verify_pairs WOULD catch it on the next pass (duplicate_commit
+  # token) but the journal would already carry an off-chain record that an
+  # earlier read might trust. The committed line must be minted EXACTLY ONCE
+  # per op_key; if a commit line already exists for this op_key, this is the
+  # caller's bug — fail-closed at the writer, not at the verifier.
+  local existing_commit
+  existing_commit="$(grep -F "\"op_key\":\"$op_key\"" "$jp" | grep '"op":"commit"' | tail -1)"
+  if [ -n "$existing_commit" ]; then
+    echo "journal: committed called for op_key=$op_key but a commit line already exists (duplicate commit would be minted — refusing)" >&2
+    return 1
+  fi
+
   # Find the matching pending line by op_key. If missing, this is a bug
   # (committed without pending) — fail-closed.
   local pending_line

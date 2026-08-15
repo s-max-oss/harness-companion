@@ -129,6 +129,30 @@ _validate_event_fields() {
         printf 'command_completed: missing or invalid duration_ms'
         return 0
       fi
+      # log_artifact: required string (empty string permitted for missing-tool case
+      # where the command was never executed — see harness-verify.sh line 326).
+      # CRITICAL (Codex r5 defect 1): without this check, an attacker can hand-
+      # craft an NDJSON with any command:["..."] and a fake exit_code — the
+      # recorded log_artifact and log_sha256 are the ONLY way to bind the
+      # recorded evidence to an actual file on disk. The empty-string allow is
+      # scoped to the structurally-verifiable missing-tool path (no log_artifact
+      # AND no log_sha256 AND exit_code=127 → tool-not-found sentinel). Any
+      # other path with non-empty log_artifact triggers step 5b/5c/5d below.
+      if ! printf '%s' "$ev" | jq -e 'has("log_artifact") and (.log_artifact | type) == "string"' >/dev/null 2>&1; then
+        printf 'command_completed: missing or non-string log_artifact'
+        return 0
+      fi
+      # log_sha256: required, type string OR null. A real recorded sha256 is a
+      # 64-hex string; null is the canonical "no artifact, no hash" sentinel.
+      if ! printf '%s' "$ev" | jq -e '
+          has("log_sha256") and (
+            (.log_sha256 == null) or
+            (.log_sha256 | type == "string")
+          )
+        ' >/dev/null 2>&1; then
+        printf 'command_completed: missing or invalid log_sha256 (must be null or string)'
+        return 0
+      fi
       ;;
 
     run_completed|run_failed|run_aborted)
@@ -280,6 +304,141 @@ validate_run_log() {
       jq -n --arg run_id "$run_id" --argjson line "$((i + 1))" --arg detail "$field_err" \
         '{valid: false, reason: "invalid_event_fields", run_id: $run_id, line: $line, detail: $detail}'
       return 1
+    fi
+    i=$((i + 1))
+  done
+
+  # ---- 5b: log_artifact path validation (Codex r5 defect 1) --------------
+  # When log_artifact is non-empty, the path MUST resolve to a real regular
+  # file under the project (symlinks rejected — `[ -f ]` follows symlinks and
+  # an attacker could redirect the recorded evidence to an arbitrary file).
+  # Empty log_artifact is the legitimate missing-tool sentinel: harness-verify
+  # emits command_completed with log_artifact="" + log_sha256=null + exit_code=127
+  # when the command's argv[0] is not on PATH (harness-verify.sh lines 315-340).
+  # Anything else (non-empty log_artifact) is a positive claim that the run
+  # captured the command's stdout/stderr to disk — the file MUST be there.
+  local i=0
+  while [ "$i" -lt "$count" ]; do
+    local ev cid la abs_la
+    ev="$(printf '%s' "$events_json" | jq -c ".[$i]")"
+    cid="$(printf '%s' "$ev" | jq -r '.command_id // empty')"
+    if [ -n "$cid" ]; then
+      la="$(printf '%s' "$ev" | jq -r '.log_artifact // ""')"
+      if [ -n "$la" ]; then
+        case "$la" in
+          /*) abs_la="$la" ;;
+          *)  abs_la="$project_dir/$la" ;;
+        esac
+        # Symlink rejection (must come BEFORE [ -f ]: `[ -f ]` follows symlinks
+        # and would silently accept a symlink pointing to a real file).
+        if [ -L "$abs_la" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" --arg path "$la" \
+            '{valid: false, reason: "log_artifact_symlink",
+              run_id: $run_id, command_id: $cid, path: $path}'
+          return 1
+        fi
+        if [ ! -f "$abs_la" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" --arg path "$la" \
+            '{valid: false, reason: "log_artifact_missing",
+              run_id: $run_id, command_id: $cid, path: $path}'
+          return 1
+        fi
+      fi
+    fi
+    i=$((i + 1))
+  done
+
+  # ---- 5c: log_sha256 must equal the recomputed sha256 of log_artifact -----
+  # Codex r5 defect 1: a hand-crafted NDJSON can claim any log_sha256; the only
+  # way to bind the recorded claim to reality is to rehash the artifact and
+  # compare byte-for-byte. Empty log_artifact + null log_sha256 is the
+  # missing-tool sentinel and is allowed without a recompute. Any other state
+  # (non-empty log_artifact + any log_sha256) MUST match a fresh recomputation.
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    local ev cid la sha actual_sha abs_la
+    ev="$(printf '%s' "$events_json" | jq -c ".[$i]")"
+    cid="$(printf '%s' "$ev" | jq -r '.command_id // empty')"
+    if [ -n "$cid" ]; then
+      la="$(printf '%s' "$ev" | jq -r '.log_artifact // ""')"
+      sha="$(printf '%s' "$ev" | jq -r '.log_sha256 // "null"')"
+      if [ -n "$la" ] && [ "$sha" != "null" ] && [ -n "$sha" ]; then
+        case "$la" in
+          /*) abs_la="$la" ;;
+          *)  abs_la="$project_dir/$la" ;;
+        esac
+        actual_sha="$(sha256sum "$abs_la" 2>/dev/null | awk '{print $1}')"
+        if [ "$actual_sha" != "$sha" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" \
+            --arg expected "$sha" --arg actual "$actual_sha" --arg path "$la" \
+            '{valid: false, reason: "log_sha256_mismatch",
+              run_id: $run_id, command_id: $cid,
+              expected_sha256: $expected, actual_sha256: $actual, path: $path}'
+          return 1
+        fi
+      fi
+    fi
+    i=$((i + 1))
+  done
+
+  # ---- 5d: command array MUST equal the config-declared argv (Codex r5) ----
+  # Codex r5 defect 1: an attacker can forge a NDJSON with command:["true"]
+  # and any command_id, exit_code=0, and a config-matching command_origin —
+  # the recorded command array is meaningless without an independent anchor.
+  # The anchor is the project's .harness/config.json: the recorded command
+  # array MUST equal the canonical argv the project declared for that
+  # command_id (accepting both `verification.commands[*].command` (canonical
+  # real-repo format) and `verification_plan.commands[*].argv` (legacy test
+  # format)). Symlink PLAN/config is rejected: `[ -f ]` follows symlinks.
+  #
+  # Fail-closed semantics:
+  #   origin=configured + config missing         → configured_command_without_config
+  #   origin=configured + command_id not in cfg  → command_not_in_config
+  #   origin=configured + argv differs           → command_array_mismatch
+  #   origin=detected                           → skip (detected commands have
+  #                                                no canonical config anchor)
+  local config_path="$project_dir/.harness/config.json"
+  local has_config="false"
+  if [ -f "$config_path" ] && [ ! -L "$config_path" ]; then
+    has_config="true"
+  fi
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    local ev cid co cmd_json config_cmd recorded_cmd
+    ev="$(printf '%s' "$events_json" | jq -c ".[$i]")"
+    cid="$(printf '%s' "$ev" | jq -r '.command_id // empty')"
+    if [ -n "$cid" ]; then
+      co="$(printf '%s' "$ev" | jq -r '.command_origin // empty')"
+      if [ "$co" = "configured" ]; then
+        recorded_cmd="$(printf '%s' "$ev" | jq -c '.command')"
+        if [ "$has_config" != "true" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" \
+            '{valid: false, reason: "configured_command_without_config",
+              run_id: $run_id, command_id: $cid}'
+          return 1
+        fi
+        # Look up command_id in config (accept either canonical or legacy schema)
+        config_cmd="$(jq -c --arg cid "$cid" '
+            ((.verification.commands // .verification_plan.commands // [])
+             | map(select(.id == $cid))[0]
+             | (.command // .argv))
+            // empty
+          ' "$config_path" 2>/dev/null)"
+        if [ -z "$config_cmd" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" \
+            '{valid: false, reason: "command_not_in_config",
+              run_id: $run_id, command_id: $cid}'
+          return 1
+        fi
+        if [ "$recorded_cmd" != "$config_cmd" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" \
+            --argjson expected "$config_cmd" --argjson actual "$recorded_cmd" \
+            '{valid: false, reason: "command_array_mismatch",
+              run_id: $run_id, command_id: $cid,
+              config_command: $expected, recorded_command: $actual}'
+          return 1
+        fi
+      fi
     fi
     i=$((i + 1))
   done

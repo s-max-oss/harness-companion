@@ -95,6 +95,56 @@ make_config() {
 CFG
 }
 
+# write_test_config — overwrite .harness/config.json with a custom shape that
+# declares the listed command_ids so validate_run_log step 5d can match
+# recorded argv against the config anchor. Codex r5 defect 1 makes this
+# required; without it, the recorded command array is meaningless to the
+# validator. The shape mirrors make_config's verification_plan so canonical
+# and legacy schema paths in validate_run_log both find the ids.
+#
+# Args:
+#   $1 — dir
+#   $2 — JSON array of {id, argv} objects, e.g. '[{"id":"x","argv":["a"]}]'
+#        (plain strings are also accepted and get argv=["x"] by default)
+write_test_config() {
+  local dir="$1"
+  local cmds_json="$2"
+  # Normalize: if the first element is a string, wrap each as {id,argv:["x"]}.
+  local commands
+  commands="$(printf '%s' "$cmds_json" | jq -c '
+    if (.[0] | type) == "string" then
+      map({id: ., argv: ["x"], required_for_passing: true})
+    else
+      map(. + {required_for_passing: (true)})
+    end
+  ')"
+  jq -nc \
+    --argjson commands "$commands" \
+    '{version: 1, schema_version: 2, verification_plan: {commands: $commands}}' \
+    > "$dir/.harness/config.json"
+}
+
+# write_test_config_for — variant that takes a list of id→argv pairs as
+# positional arguments (id1 argv1_json id2 argv2_json ...). Used by tests
+# whose hand-crafted command_completed events have non-["x"] argv.
+write_test_config_for() {
+  local dir="$1"
+  shift
+  local commands="[]"
+  while [ $# -gt 0 ]; do
+    local cid="$1" argv="$2"
+    commands="$(printf '%s' "$commands" | jq -c \
+      --arg cid "$cid" --argjson argv "$argv" \
+      '. + [{id: $cid, argv: $argv, required_for_passing: true}]'
+    )"
+    shift 2
+  done
+  jq -nc \
+    --argjson commands "$commands" \
+    '{version: 1, schema_version: 2, verification_plan: {commands: $commands}}' \
+    > "$dir/.harness/config.json"
+}
+
 # Compute a "clean workspace" placeholder fingerprint matching what
 # workspace-fingerprint.sh would return when there are no tracked or untracked
 # files modified (i.e., "clean" for a git repo, or computed for non-git).
@@ -107,6 +157,13 @@ CFG
 # Construct an NDJSON run log with the given run_id, required_command_ids,
 # vcs_revision, config_sha256 (or "null"), overall_result, failed_commands,
 # passed/failed/skipped, and verified fingerprint.
+#
+# Codex r5 defect 1: validate_run_log step 5d requires that the recorded
+# command array equal the config-declared argv (otherwise command_array_mismatch
+# fires). make_run_log therefore looks up each command_id's argv in the
+# project_dir's .harness/config.json and writes that array into the run log;
+# for unknown command_ids it falls back to ["x"] (a placeholder that signals
+# the test is intentionally NOT exercising the config-anchor path).
 make_run_log() {
   local dir="$1"
   local run_id="$2"
@@ -120,6 +177,7 @@ make_run_log() {
   local feature_id="${13:-feat-x}"  # Codex r4: run's feature_id; default "feat-x" for legacy callers
 
   local log="$dir/.harness/logs/runs/${run_id}.ndjson"
+  local config_path="$dir/.harness/config.json"
   local failed_ids_field=""
   if [ "$overall" = "failed" ]; then
     failed_ids_field=",\"failed_command_ids\":${failed_ids_json}"
@@ -147,11 +205,27 @@ make_run_log() {
     if [ "$overall" = "failed" ] && printf '%s' "$failed_ids_json" | jq -e --arg c "$cmd_id" 'index($c)' >/dev/null; then
       exit_code=1
     fi
+    # Look up argv for this command_id from config (canonical or legacy schema);
+    # fall back to ["x"] if the id is not declared so tests that don't care about
+    # the config-anchor can still produce a structurally valid run log.
+    local cmd_argv
+    if [ -f "$config_path" ]; then
+      cmd_argv="$(jq -c --arg cid "$cmd_id" '
+          ((.verification.commands // .verification_plan.commands // [])
+           | map(select(.id == $cid))[0]
+           | (.command // .argv))
+          // ["x"]
+        ' "$config_path" 2>/dev/null)"
+      if [ -z "$cmd_argv" ]; then cmd_argv='["x"]'; fi
+    else
+      cmd_argv='["x"]'
+    fi
     jq -nc \
       --arg run_id "$run_id" \
       --arg cmd_id "$cmd_id" \
       --argjson exit_code "$exit_code" \
-      '{event:"command_completed",schema_version:2,run_id:$run_id,command_id:$cmd_id,command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:$exit_code,started_at:"2026-07-31T15:13:00Z",duration_ms:100,log_artifact:"x.log",log_sha256:"sha256:y"}' \
+      --argjson cmd_argv "$cmd_argv" \
+      '{event:"command_completed",schema_version:2,run_id:$run_id,command_id:$cmd_id,command:$cmd_argv,command_origin:"configured",confirmation:"not_required",exit_code:$exit_code,started_at:"2026-07-31T15:13:00Z",duration_ms:100,log_artifact:"",log_sha256:null}' \
       >> "$log"
   done <<< "$cmd_ids"
 
@@ -224,7 +298,7 @@ cp "$GOLDEN_DIR/run-log-valid.ndjson" "$T1/.harness/logs/runs/20260731T151257Z-1
 rm -f "$T1/.harness/logs/runs/20260731T151257Z-12345-32767.ndjson"
 
 # Generate config, compute its hash
-printf '{"version":1}\n' > "$T1/.harness/config.json"
+write_test_config "$T1" '["typecheck","unit-test"]'
 T1_CONFIG_SHA="sha256:$(sha256sum "$T1/.harness/config.json" | awk '{print $1}')"
 
 # For non-git (mktemp -d is not a git repo), compute_workspace_fingerprint
@@ -247,7 +321,7 @@ echo ""
 echo "=== Test 2: no_checks ==="
 T2="$(mktemp -d)"
 make_config "$T2"
-printf '{"version":1}\n' > "$T2/.harness/config.json"
+write_test_config "$T2" '[]'
 T2_CONFIG_SHA="sha256:$(sha256sum "$T2/.harness/config.json" | awk '{print $1}')"
 T2_VERIFIED_FP="$(compute_workspace_fingerprint "$T2")"
 # no_checks terminal: required_command_ids must be [] for validate_run_log
@@ -297,7 +371,7 @@ echo ""
 echo "=== Test 5: Failed run ==="
 T5="$(mktemp -d)"
 make_config "$T5"
-printf '{"version":1}\n' > "$T5/.harness/config.json"
+write_test_config "$T5" '["unit-test"]'
 T5_CONFIG_SHA="sha256:$(sha256sum "$T5/.harness/config.json" | awk '{print $1}')"
 T5_VERIFIED_FP="$(compute_workspace_fingerprint "$T5")"
 make_run_log "$T5" "20260731T151257Z-failed-01" '["unit-test"]' "null" "$T5_CONFIG_SHA" \
@@ -328,7 +402,10 @@ echo ""
 echo "=== Test 7: empty required_command_ids + optional success → not eligible ==="
 T7="$(mktemp -d)"
 make_config "$T7"
-printf '{"version":1}\n' > "$T7/.harness/config.json"
+# optional-lint is hand-crafted below with command=["echo","ok"]; declare it
+# explicitly with matching argv so validate_run_log step 5d finds it in the
+# config (otherwise command_array_mismatch fires).
+write_test_config_for "$T7" "optional-lint" '["echo","ok"]'
 T7_CONFIG_SHA="sha256:$(sha256sum "$T7/.harness/config.json" | awk '{print $1}')"
 T7_VERIFIED_FP="$(compute_workspace_fingerprint "$T7")"
 # required_command_ids=[], but execute one command and write terminal passed
@@ -341,7 +418,7 @@ jq -nc --arg rid "20260731T-optional" --arg csha "$T7_CONFIG_SHA" --arg vfp "$T7
   '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:[],capability_level:1,feature_id:"feat-opt"}' \
   > "$LOG"
 jq -nc --arg rid "20260731T-optional" \
-  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:"optional-lint",command:["echo","ok"],command_origin:"detected",confirmation:"confirmed",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:"o.log",log_sha256:"sha256:o"}' \
+  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:"optional-lint",command:["echo","ok"],command_origin:"detected",confirmation:"confirmed",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:"",log_sha256:null}' \
   >> "$LOG"
 jq -nc --arg rid "20260731T-optional" --arg vfp "$T7_VERIFIED_FP" \
   '{event:"run_completed",schema_version:2,run_id:$rid,completed_at:"2026-07-31T15:13:12Z",overall_result:"passed",workspace_fingerprint_verified:$vfp,planned_commands:1,executed_commands:1,passed_commands:1,failed_commands:0,skipped_commands:0}' \
@@ -360,7 +437,7 @@ echo ""
 echo "=== Test 8: overall_result=passed but failed_commands>0 → not eligible ==="
 T8="$(mktemp -d)"
 make_config "$T8"
-printf '{"version":1}\n' > "$T8/.harness/config.json"
+write_test_config "$T8" '["c1"]'
 T8_CONFIG_SHA="sha256:$(sha256sum "$T8/.harness/config.json" | awk '{print $1}')"
 T8_VERIFIED_FP="$(compute_workspace_fingerprint "$T8")"
 # Forge a terminal event with overall_result="passed" but failed_commands=1
@@ -371,7 +448,7 @@ jq -nc --arg rid "20260731T-inconsistent" --arg csha "$T8_CONFIG_SHA" --arg vfp 
   '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:$req,capability_level:1,feature_id:"feat-incon"}' \
   > "$LOG"
 jq -nc --arg rid "20260731T-inconsistent" \
-  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:"c1",command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:"c1.log",log_sha256:"sha256:c1"}' \
+  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:"c1",command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:"",log_sha256:null}' \
   >> "$LOG"
 jq -nc --arg rid "20260731T-inconsistent" --arg vfp "$T8_VERIFIED_FP" \
   '{event:"run_completed",schema_version:2,run_id:$rid,completed_at:"2026-07-31T15:13:12Z",overall_result:"passed",workspace_fingerprint_verified:$vfp,planned_commands:1,executed_commands:1,passed_commands:0,failed_commands:1,skipped_commands:0}' \
@@ -388,7 +465,7 @@ echo ""
 echo "=== Test 9: config hash match → eligible ==="
 T9="$(mktemp -d)"
 make_config "$T9"
-printf '{"version":1}\n' > "$T9/.harness/config.json"
+write_test_config "$T9" '["typecheck"]'
 T9_CONFIG_SHA="sha256:$(sha256sum "$T9/.harness/config.json" | awk '{print $1}')"
 T9_VERIFIED_FP="$(compute_workspace_fingerprint "$T9")"
 make_run_log "$T9" "20260731T-cfgmatch" '["typecheck"]' "null" "$T9_CONFIG_SHA" \
@@ -405,13 +482,17 @@ echo ""
 echo "=== Test 10: config changed → not eligible ==="
 T10="$(mktemp -d)"
 make_config "$T10"
-printf '{"version":1}\n' > "$T10/.harness/config.json"
+write_test_config "$T10" '["typecheck"]'
 T10_ORIG_SHA="sha256:$(sha256sum "$T10/.harness/config.json" | awk '{print $1}')"
 T10_VERIFIED_FP="$(compute_workspace_fingerprint "$T10")"
 make_run_log "$T10" "20260731T-cfgstale" '["typecheck"]' "null" "$T10_ORIG_SHA" \
   "$T10_VERIFIED_FP" "passed" 1 1 0 0 '[]' "feat-cfgstale"
-# Now mutate config.json
-printf '{"version":2}\n' > "$T10/.harness/config.json"
+# Now mutate config.json — keep the typecheck declaration intact (otherwise
+# validate_run_log step 5d fires command_not_in_config BEFORE passing.sh
+# step 7 gets a chance to detect the SHA mismatch). The version bump alone
+# changes the SHA so passing.sh step 7 fires config_changed_since_run.
+printf '{"version":2,"verification_plan":{"commands":[{"id":"typecheck","argv":["x"],"required_for_passing":true}]}}\n' \
+  > "$T10/.harness/config.json"
 make_feature_list "$T10" "feat-cfgstale" "20260731T-cfgstale" '[]'
 assert_passing_not_eligible "config modified → not eligible (step 7)" \
   "feat-cfgstale" "$T10/feature_list.json" "$T10" "config_changed_since_run"
@@ -424,7 +505,7 @@ echo ""
 echo "=== Test 11: Git HEAD matches → eligible ==="
 T11="$(mktemp -d)"
 make_config "$T11"
-printf '{"version":1}\n' > "$T11/.harness/config.json"
+write_test_config "$T11" '["typecheck"]'
 T11_CONFIG_SHA="sha256:$(sha256sum "$T11/.harness/config.json" | awk '{print $1}')"
 # Initialize git so this is a git repo
 git -C "$T11" init -q 2>/dev/null
@@ -449,7 +530,7 @@ echo ""
 echo "=== Test 12: Git HEAD advanced → not eligible ==="
 T12="$(mktemp -d)"
 make_config "$T12"
-printf '{"version":1}\n' > "$T12/.harness/config.json"
+write_test_config "$T12" '["typecheck"]'
 T12_CONFIG_SHA="sha256:$(sha256sum "$T12/.harness/config.json" | awk '{print $1}')"
 git -C "$T12" init -q 2>/dev/null
 git -C "$T12" config user.email "test@test"
@@ -475,7 +556,7 @@ echo ""
 echo "=== Test 13: Non-git project → VCS skipped, eligible ==="
 T13="$(mktemp -d)"
 make_config "$T13"
-printf '{"version":1}\n' > "$T13/.harness/config.json"
+write_test_config "$T13" '["typecheck"]'
 T13_CONFIG_SHA="sha256:$(sha256sum "$T13/.harness/config.json" | awk '{print $1}')"
 T13_VERIFIED_FP="$(compute_workspace_fingerprint "$T13")"
 # vcs_revision=null means step 8 is skipped
@@ -493,7 +574,7 @@ echo ""
 echo "=== Test 14: workspace changed → not eligible ==="
 T14="$(mktemp -d)"
 make_config "$T14"
-printf '{"version":1}\n' > "$T14/.harness/config.json"
+write_test_config "$T14" '["typecheck"]'
 T14_CONFIG_SHA="sha256:$(sha256sum "$T14/.harness/config.json" | awk '{print $1}')"
 T14_VERIFIED_FP="$(compute_workspace_fingerprint "$T14")"
 make_run_log "$T14" "20260731T-fpstale" '["typecheck"]' "null" "$T14_CONFIG_SHA" \
@@ -516,7 +597,8 @@ echo ""
 echo "=== Test 15: passed but 0 effective required → not eligible ==="
 T15="$(mktemp -d)"
 make_config "$T15"
-printf '{"version":1}\n' > "$T15/.harness/config.json"
+# c1/c2 hand-crafted below with command:["x"]; declare both so step 5d passes.
+write_test_config "$T15" '["c1","c2"]'
 T15_CONFIG_SHA="sha256:$(sha256sum "$T15/.harness/config.json" | awk '{print $1}')"
 T15_VERIFIED_FP="$(compute_workspace_fingerprint "$T15")"
 # Hand-crafted log: required=["c1","c2"], terminal not_applicable=["c1","c2"].
@@ -528,10 +610,10 @@ jq -nc --arg rid "20260731T-zeroeff" --arg csha "$T15_CONFIG_SHA" --arg vfp "$T1
   '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:$req,capability_level:1,feature_id:"feat-zeroeff"}' \
   > "$LOG"
 jq -nc --arg rid "20260731T-zeroeff" --arg cid "c1" \
-  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:$cid,command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:"c1.log",log_sha256:"sha256:c1"}' \
+  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:$cid,command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:"",log_sha256:null}' \
   >> "$LOG"
 jq -nc --arg rid "20260731T-zeroeff" --arg cid "c2" \
-  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:$cid,command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:01Z",duration_ms:50,log_artifact:"c2.log",log_sha256:"sha256:c2"}' \
+  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:$cid,command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:01Z",duration_ms:50,log_artifact:"",log_sha256:null}' \
   >> "$LOG"
 jq -nc --arg rid "20260731T-zeroeff" --arg vfp "$T15_VERIFIED_FP" \
   --argjson na '["c1","c2"]' \
@@ -552,7 +634,7 @@ echo ""
 echo "=== Test 16: git project + missing vcs_revision → not eligible ==="
 T16="$(mktemp -d)"
 make_config "$T16"
-printf '{"version":1}\n' > "$T16/.harness/config.json"
+write_test_config "$T16" '["typecheck"]'
 T16_CONFIG_SHA="sha256:$(sha256sum "$T16/.harness/config.json" | awk '{print $1}')"
 git -C "$T16" init -q 2>/dev/null
 git -C "$T16" config user.email "test@test"
@@ -579,7 +661,7 @@ echo ""
 echo "=== Test 17: cross-feature run pollution guard (step 2b) ==="
 T17="$(mktemp -d)"
 make_config "$T17"
-printf '{"version":1}\n' > "$T17/.harness/config.json"
+write_test_config "$T17" '["typecheck"]'
 T17_CONFIG_SHA="sha256:$(sha256sum "$T17/.harness/config.json" | awk '{print $1}')"
 T17_VERIFIED_FP="$(compute_workspace_fingerprint "$T17")"
 # Run log records feature_id="feat-A" (a clean passing run for A).
@@ -598,7 +680,7 @@ echo ""
 echo "=== Test 18: empty run_started.feature_id → not eligible (step 2b) ==="
 T18="$(mktemp -d)"
 make_config "$T18"
-printf '{"version":1}\n' > "$T18/.harness/config.json"
+write_test_config "$T18" '["typecheck"]'
 T18_CONFIG_SHA="sha256:$(sha256sum "$T18/.harness/config.json" | awk '{print $1}')"
 T18_VERIFIED_FP="$(compute_workspace_fingerprint "$T18")"
 # Build a valid run log via make_run_log, then strip feature_id.

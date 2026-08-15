@@ -312,14 +312,24 @@ dwm_emit_manifest() {
     # detect removals/rewrites. Marker `!!` distinguishes "gitignored,
     # manifest-enumerated" from the `??` untracked git-status entries (the
     # field is diagnostic only — the compare logic does not act on it).
+    #
+    # Codex r5 defect 1 follow-up: also enumerate the per-command `.log`
+    # artifacts under `.harness/logs/runs/<run_id>/<command_id>.log`. These
+    # are the file-on-disk anchors that validate-run-log step 5b/5c binds to
+    # the recorded log_artifact + log_sha256. Without enumeration, an attacker
+    # could swap or delete the command log AFTER the NDJSON was captured and
+    # the manifest gate would never notice — defeating step 5b/5c. The same
+    # byte-equality contract applies: existing log files must stay byte-equal.
     # Ancestor directory records for the run path are already emitted by the
     # `git status` loop above when any peer sibling file is reported; here we
     # only need the file records.
     if [ -d ".harness/logs/runs" ]; then
       while IFS= read -r rpath; do
         [ -n "$rpath" ] || continue
-        case "$rpath" in *.ndjson) dwm_record ".harness/logs/runs/$rpath" "!!" ;; esac
-      done < <(cd ".harness/logs/runs" && find . -name '*.ndjson' -type f -printf '%P\n' 2>/dev/null \
+        case "$rpath" in
+          *.ndjson|*.log) dwm_record ".harness/logs/runs/$rpath" "!!" ;;
+        esac
+      done < <(cd ".harness/logs/runs" && find . \( -name '*.ndjson' -o -name '*.log' \) -type f -printf '%P\n' 2>/dev/null \
         | sed 's|^\./||' | LC_ALL=C sort)
     fi
   ) > "$tmp"

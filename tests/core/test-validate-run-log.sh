@@ -423,6 +423,44 @@ cat > "$TMPDIR/.harness/logs/runs/forgery3.ndjson" <<EOF
 EOF
 assert_invalid "5c: log_sha256 mismatch rejected (recorded != recomputed)" "forgery3" "log_sha256_mismatch"
 
+# 5b/5c regression (Windows/MSYS): harness-verify.sh records project_root and
+# log_artifact as mixed-style "D:/..." paths on Windows. The old /*-only case
+# treated drive-letter paths as relative and prefixed them with $project_dir,
+# producing a broken path and a false log_artifact_missing. Verify the resolver
+# treats drive-letter paths as absolute while still prefixing true relatives.
+WL_A="$(_vl_resolve_abs_path "D:/foo/bar.log" "/proj")"
+WL_B="$(_vl_resolve_abs_path 'D:\foo\bar.log' "/proj")"
+WL_C="$(_vl_resolve_abs_path "rel/foo.log" "/proj")"
+WL_D="$(_vl_resolve_abs_path "/abs/foo.log" "/proj")"
+if [ "$WL_A" = "D:/foo/bar.log" ] \
+   && [ "$WL_B" = 'D:\foo\bar.log' ] \
+   && [ "$WL_C" = "/proj/rel/foo.log" ] \
+   && [ "$WL_D" = "/abs/foo.log" ]; then
+  echo "PASS: 5b/5c: drive-letter + POSIX absolute + relative path resolution"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: 5b/5c: _vl_resolve_abs_path (A=$WL_A B=$WL_B C=$WL_C D=$WL_D)"
+  FAILED=$((FAILED + 1))
+fi
+
+# End-to-end positive: on Windows/MSYS, a real file referenced by a drive-letter
+# absolute log_artifact must pass 5b/5c (not be prefixed into a broken path).
+if command -v cygpath >/dev/null 2>&1; then
+  mkdir -p "$TMPDIR/.harness/logs/runs/winpath"
+  printf 'winpath log content\n' > "$TMPDIR/.harness/logs/runs/winpath/win.log"
+  WIN_ABS="$(cygpath -m "$TMPDIR/.harness/logs/runs/winpath/win.log")"
+  WIN_SHA="$(sha256sum "$TMPDIR/.harness/logs/runs/winpath/win.log" | awk '{print $1}')"
+  cat > "$TMPDIR/.harness/logs/runs/winpath.ndjson" <<EOF
+{"event":"run_started","schema_version":2,"run_id":"winpath","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
+{"event":"command_completed","schema_version":2,"run_id":"winpath","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"$WIN_ABS","log_sha256":"$WIN_SHA"}
+{"event":"run_completed","schema_version":2,"run_id":"winpath","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":0}
+EOF
+  assert_valid "5b/5c: drive-letter absolute log_artifact accepted end-to-end" "winpath"
+else
+  echo "  [SKIP] 5b/5c drive-letter end-to-end positive — non-Windows platform"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
 # 5d: forged command array (doesn't match config) → rejected. The command
 # "c1" is not declared in TMPDIR/.harness/config.json so command_not_in_config
 # fires first; use a declared command_id with a forged argv to test the

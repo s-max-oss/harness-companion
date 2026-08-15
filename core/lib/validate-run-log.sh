@@ -219,6 +219,22 @@ _validate_event_fields() {
   printf ''
 }
 
+# ---- _vl_resolve_abs_path ---------------------------------------------------
+# Resolve a recorded artifact path to an absolute path for existence/hash
+# checks. Accepts POSIX absolute (/...), Windows drive-letter (C:/... and
+# C:\...) and UNC (//...) paths as already-absolute; prefixes anything else
+# with the project directory. Codex r5 steps 5b/5c recorded Windows mixed
+# paths (D:/...) which the old `/*`-only case treated as relative and broke.
+_vl_resolve_abs_path() {
+  local p="$1" proj="$2"
+  case "$p" in
+    /*)               printf '%s' "$p" ;;
+    [A-Za-z]:/*)      printf '%s' "$p" ;;
+    [A-Za-z]:\\*)     printf '%s' "$p" ;;
+    *)                printf '%s/%s' "$proj" "$p" ;;
+  esac
+}
+
 # ---- validate_run_log -------------------------------------------------------
 # The canonical 16-step validation.
 # Args: <run_id> [project_dir]
@@ -325,10 +341,7 @@ validate_run_log() {
     if [ -n "$cid" ]; then
       la="$(printf '%s' "$ev" | jq -r '.log_artifact // ""')"
       if [ -n "$la" ]; then
-        case "$la" in
-          /*) abs_la="$la" ;;
-          *)  abs_la="$project_dir/$la" ;;
-        esac
+        abs_la="$(_vl_resolve_abs_path "$la" "$project_dir")"
         # Symlink rejection (must come BEFORE [ -f ]: `[ -f ]` follows symlinks
         # and would silently accept a symlink pointing to a real file).
         if [ -L "$abs_la" ]; then
@@ -363,10 +376,7 @@ validate_run_log() {
       la="$(printf '%s' "$ev" | jq -r '.log_artifact // ""')"
       sha="$(printf '%s' "$ev" | jq -r '.log_sha256 // "null"')"
       if [ -n "$la" ] && [ "$sha" != "null" ] && [ -n "$sha" ]; then
-        case "$la" in
-          /*) abs_la="$la" ;;
-          *)  abs_la="$project_dir/$la" ;;
-        esac
+        abs_la="$(_vl_resolve_abs_path "$la" "$project_dir")"
         actual_sha="$(sha256sum "$abs_la" 2>/dev/null | awk '{print $1}')"
         if [ "$actual_sha" != "$sha" ]; then
           jq -n --arg run_id "$run_id" --arg cid "$cid" \

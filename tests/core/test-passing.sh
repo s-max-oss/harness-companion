@@ -233,7 +233,7 @@ T1_VERIFIED_FP="$(compute_workspace_fingerprint "$T1")"
 
 make_run_log "$T1" "20260731T151257Z-12345-32767" \
   '["typecheck","unit-test"]' "null" "$T1_CONFIG_SHA" "$T1_VERIFIED_FP" \
-  "passed" 2 2 0 0 '[]'
+  "passed" 2 2 0 0 '[]' "feat-ok"
 
 make_feature_list "$T1" "feat-ok" "20260731T151257Z-12345-32767" '[]'
 assert_passing_eligible "passed run is eligible (canonical valid, fresh config & workspace)" \
@@ -252,7 +252,7 @@ T2_CONFIG_SHA="sha256:$(sha256sum "$T2/.harness/config.json" | awk '{print $1}')
 T2_VERIFIED_FP="$(compute_workspace_fingerprint "$T2")"
 # no_checks terminal: required_command_ids must be [] for validate_run_log
 make_run_log "$T2" "20260731T151257Z-00000-00000" '[]' "null" "$T2_CONFIG_SHA" \
-  "$T2_VERIFIED_FP" "no_checks" 0 0 0 0 '[]'
+  "$T2_VERIFIED_FP" "no_checks" 0 0 0 0 '[]' "feat-nochecks"
 make_feature_list "$T2" "feat-nochecks" "20260731T151257Z-00000-00000" '[]'
 assert_passing_not_eligible "no_checks run is not eligible (step 3: overall_result)" \
   "feat-nochecks" "$T2/feature_list.json" "$T2" "overall_result_not_passed"
@@ -301,7 +301,7 @@ printf '{"version":1}\n' > "$T5/.harness/config.json"
 T5_CONFIG_SHA="sha256:$(sha256sum "$T5/.harness/config.json" | awk '{print $1}')"
 T5_VERIFIED_FP="$(compute_workspace_fingerprint "$T5")"
 make_run_log "$T5" "20260731T151257Z-failed-01" '["unit-test"]' "null" "$T5_CONFIG_SHA" \
-  "$T5_VERIFIED_FP" "failed" 1 0 1 0 '["unit-test"]'
+  "$T5_VERIFIED_FP" "failed" 1 0 1 0 '["unit-test"]' "feat-failed"
 make_feature_list "$T5" "feat-failed" "20260731T151257Z-failed-01" '[]'
 assert_passing_not_eligible "failed run is not eligible (step 3: terminal=run_failed)" \
   "feat-failed" "$T5/feature_list.json" "$T5" "run_not_completed"
@@ -392,7 +392,7 @@ printf '{"version":1}\n' > "$T9/.harness/config.json"
 T9_CONFIG_SHA="sha256:$(sha256sum "$T9/.harness/config.json" | awk '{print $1}')"
 T9_VERIFIED_FP="$(compute_workspace_fingerprint "$T9")"
 make_run_log "$T9" "20260731T-cfgmatch" '["typecheck"]' "null" "$T9_CONFIG_SHA" \
-  "$T9_VERIFIED_FP" "passed" 1 1 0 0 '[]'
+  "$T9_VERIFIED_FP" "passed" 1 1 0 0 '[]' "feat-cfgmatch"
 make_feature_list "$T9" "feat-cfgmatch" "20260731T-cfgmatch" '[]'
 assert_passing_eligible "config SHA matches → eligible (step 7)" \
   "feat-cfgmatch" "$T9/feature_list.json" "$T9"
@@ -409,7 +409,7 @@ printf '{"version":1}\n' > "$T10/.harness/config.json"
 T10_ORIG_SHA="sha256:$(sha256sum "$T10/.harness/config.json" | awk '{print $1}')"
 T10_VERIFIED_FP="$(compute_workspace_fingerprint "$T10")"
 make_run_log "$T10" "20260731T-cfgstale" '["typecheck"]' "null" "$T10_ORIG_SHA" \
-  "$T10_VERIFIED_FP" "passed" 1 1 0 0 '[]'
+  "$T10_VERIFIED_FP" "passed" 1 1 0 0 '[]' "feat-cfgstale"
 # Now mutate config.json
 printf '{"version":2}\n' > "$T10/.harness/config.json"
 make_feature_list "$T10" "feat-cfgstale" "20260731T-cfgstale" '[]'
@@ -436,7 +436,7 @@ git -C "$T11" commit -q -m "init" 2>/dev/null
 T11_HEAD="$(git -C "$T11" rev-parse --short=12 HEAD 2>/dev/null)"
 T11_VERIFIED_FP="$(compute_workspace_fingerprint "$T11")"
 make_run_log "$T11" "20260731T-vcsmatch" '["typecheck"]' "$T11_HEAD" "$T11_CONFIG_SHA" \
-  "$T11_VERIFIED_FP" "passed" 1 1 0 0 '[]'
+  "$T11_VERIFIED_FP" "passed" 1 1 0 0 '[]' "feat-vcsmatch"
 make_feature_list "$T11" "feat-vcsmatch" "20260731T-vcsmatch" '[]'
 assert_passing_eligible "Git HEAD matches → eligible (step 8)" \
   "feat-vcsmatch" "$T11/feature_list.json" "$T11"
@@ -459,7 +459,7 @@ git -C "$T12" add -A 2>/dev/null
 git -C "$T12" commit -q -m "init" 2>/dev/null
 T12_OLD_HEAD="$(git -C "$T12" rev-parse --short=12 HEAD 2>/dev/null)"
 T12_VERIFIED_FP="$(compute_workspace_fingerprint "$T12")"
-make_run_log "$T12" "20260731T-vcsstale" '["typecheck"]' "$T12_OLD_HEAD" "$T12_CONFIG_SHA" "$T12_VERIFIED_FP" "passed" 1 1 0 0 '[]'
+make_run_log "$T12" "20260731T-vcsstale" '["typecheck"]' "$T12_OLD_HEAD" "$T12_CONFIG_SHA" "$T12_VERIFIED_FP" "passed" 1 1 0 0 '[]' "feat-vcsstale"
 # Now advance HEAD
 echo "extra" > "$T12/extra.txt"
 git -C "$T12" add -A 2>/dev/null
@@ -480,7 +480,7 @@ T13_CONFIG_SHA="sha256:$(sha256sum "$T13/.harness/config.json" | awk '{print $1}
 T13_VERIFIED_FP="$(compute_workspace_fingerprint "$T13")"
 # vcs_revision=null means step 8 is skipped
 make_run_log "$T13" "20260731T-nongit" '["typecheck"]' "null" "$T13_CONFIG_SHA" \
-  "$T13_VERIFIED_FP" "passed" 1 1 0 0 '[]'
+  "$T13_VERIFIED_FP" "passed" 1 1 0 0 '[]' "feat-nongit"
 make_feature_list "$T13" "feat-nongit" "20260731T-nongit" '[]'
 assert_passing_eligible "non-git project: VCS skipped → eligible (step 8)" \
   "feat-nongit" "$T13/feature_list.json" "$T13"
@@ -497,7 +497,7 @@ printf '{"version":1}\n' > "$T14/.harness/config.json"
 T14_CONFIG_SHA="sha256:$(sha256sum "$T14/.harness/config.json" | awk '{print $1}')"
 T14_VERIFIED_FP="$(compute_workspace_fingerprint "$T14")"
 make_run_log "$T14" "20260731T-fpstale" '["typecheck"]' "null" "$T14_CONFIG_SHA" \
-  "$T14_VERIFIED_FP" "passed" 1 1 0 0 '[]'
+  "$T14_VERIFIED_FP" "passed" 1 1 0 0 '[]' "feat-fpstale"
 # Now modify a tracked file (workspace fingerprint step 6 check)
 printf "changed\n" > "$T14/foo.txt"
 make_feature_list "$T14" "feat-fpstale" "20260731T-fpstale" '[]'
@@ -563,7 +563,7 @@ git -C "$T16" commit -q -m "init" 2>/dev/null
 T16_VERIFIED_FP="$(compute_workspace_fingerprint "$T16")"
 # vcs_revision=null inside a git project → missing revision, fail-closed
 make_run_log "$T16" "20260809T-norev" '["typecheck"]' "null" "$T16_CONFIG_SHA" \
-  "$T16_VERIFIED_FP" "passed" 1 1 0 0 '[]'
+  "$T16_VERIFIED_FP" "passed" 1 1 0 0 '[]' "feat-norev"
 make_feature_list "$T16" "feat-norev" "20260809T-norev" '[]'
 assert_passing_not_eligible "git project + run missing vcs_revision → not eligible (step 8)" \
   "feat-norev" "$T16/feature_list.json" "$T16" "vcs_revision_missing"

@@ -145,9 +145,12 @@ EOF
   # branch-gate name check is SATISFIED on the default sandbox (P0-3: a PLAN
   # without branch_gate.target_branch now FAILS CLOSED, so the default must name
   # one rather than rely on the old "empty target = no name check" behavior).
+  # Codex r4 defect 5: verdict_validate_record requires PLAN.json to declare the
+  # feature_id in some .phases[].features[] entry, so the default PLAN must
+  # declare F-CONV-01 (and F-CONV-02 — T1/T6 refer to it) in phase 1.
   local plan_json="${SANDBOX_PLAN_JSON:-}"
   if [ -z "$plan_json" ]; then
-    plan_json='{ "version": "2.0.0-rc.3", "branch_gate": { "target_branch": "master" } }'
+    plan_json='{ "version": "2.0.0-rc.3", "branch_gate": { "target_branch": "master" }, "phases": [ { "phase": 1, "features": [ "F-CONV-01", "F-CONV-02" ] } ] }'
   fi
   printf '%s\n' "$plan_json" > "$sb/.harness/PLAN.json" || return 1
 

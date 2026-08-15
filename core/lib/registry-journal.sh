@@ -354,7 +354,15 @@ journal_recover() {
         local rec
         rec="$(jq -cn --arg ts "$ts" --arg k "$key" \
           '{ts:$ts, op:"recovery_backout", op_key:$k, reason:"pending orphan + sha unchanged (append-only backout)"}')"
-        printf '%s\n' "$rec" >> "$jp"
+        # Codex r5 Important #4 — recovery_backout append failure must NOT be
+        # silently swallowed. A partial recovery would leave an orphan pending
+        # line unmarked, allowing a subsequent recover to re-emit (or worse,
+        # leave the journal in a state where journal_verify_pairs passes while
+        # the audit trail is incomplete). Fail-closed and stop the loop.
+        if ! printf '%s\n' "$rec" >> "$jp"; then
+          echo "journal-recover: cannot append recovery_backout for $key (op_key=$key) — recovery aborted" >&2
+          return 1
+        fi
       fi
     else
       # Roll-forward ONLY when current SHA exactly equals the expected post-state.
@@ -373,7 +381,16 @@ journal_recover() {
             feature_list_sha_before:null, feature_list_sha_after:$sha,
             evidence_run_ids_after:[], run_id:null,
             recovery_note:"forward-roll-forward on crash recovery (sha == expected post-state)"}')"
-        printf '%s\n' "$rec" >> "$jp"
+        # Codex r5 Important #4 — forward-roll commit append failure must NOT be
+        # silently swallowed. The pending line was about to be paired with this
+        # commit record by journal_verify_pairs; if the append fails, leaving
+        # the pair half-formed would corrupt the strict pairing invariant and
+        # could allow an unrecorded mutation to satisfy verification on a retry.
+        # Fail-closed and stop the loop.
+        if ! printf '%s\n' "$rec" >> "$jp"; then
+          echo "journal-recover: cannot append forward-roll commit for $key — recovery aborted" >&2
+          return 1
+        fi
       else
         # BLOCKER: current SHA is neither the pre-SHA nor the expected post-SHA.
         # Leave the pending line in place (a later retry re-runs this decision);
@@ -383,7 +400,14 @@ journal_recover() {
           '{ts:$ts, op:"recovery_blocked", op_key:$k,
             reason:"current sha matches neither pre-sha nor expected post-state",
             current_sha:$cur, expected_post_sha:($exp | if . == "null" then null else . end)}')"
-        printf '%s\n' "$rec" >> "$jp" 2>/dev/null || true
+        # Codex r5 Important #4 — recovery_blocked audit append failure must
+        # NOT be silently swallowed. The audit record is the only way a
+        # blocked orphan becomes visible to a subsequent verify; losing it
+        # would let an unrecorded mutation pass silently on retry. Fail-closed.
+        if ! printf '%s\n' "$rec" >> "$jp"; then
+          echo "journal-recover: cannot append recovery_blocked for $key — recovery aborted" >&2
+          return 1
+        fi
         echo "journal-recover: BLOCKED orphan op_key=$key (feature_list sha $fl_sha matches neither pre-sha $pre_sha nor expected post-state ${exp_sha:-null})" >&2
         return 1
       fi
@@ -672,10 +696,17 @@ journal_backfill_legacy_pending() {
     rec="$(jq -cn --arg ts "$ts" --arg k "$key" --arg sha "$sha" \
       '{ts:$ts, op:"recovery_backfill", op_key:$k, expected_post_sha:$sha,
         reason:"legacy pending lacked expected_post_sha — derived from committed feature_list_sha_after (deterministic, not fabricated)"}')"
-    printf '%s\n' "$rec" >> "$jp" 2>/dev/null || {
-      echo "journal-backfill: cannot append recovery_backfill for $key" >&2
-      return 1
-    }
+    # Codex r5 Important #4 — append failure must surface, not be swallowed. The
+  # `return 1` exits the while-loop (returning from the function), so subsequent
+  # op_keys are NOT processed. The `journal_verify_pairs` follow-up will see a
+  # partially-backfilled journal (some legacy keys compliant, others still
+  # lacking expected_post_sha) and will reject it, forcing a re-run. We must
+  # NOT mask the failure with `|| true`, and we must let the diagnostic reach
+  # the caller verbatim.
+  printf '%s\n' "$rec" >> "$jp" || {
+    echo "journal-backfill: cannot append recovery_backfill for $key (write failed: $?)" >&2
+    return 1
+  }
   done <<<"$keys"
   return 0
 }

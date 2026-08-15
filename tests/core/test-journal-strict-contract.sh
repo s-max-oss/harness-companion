@@ -532,6 +532,158 @@ check "K4g: canonical journal is now migrated (has checkpoint marker)" "1" "$(co
 check "K4h: legacy file removed after re-migration" "0" "$( [ -f "$K4LEG" ] && echo 1 || echo 0 )"
 
 # ============================================================================
+# M: Codex r5 Important #4 — recovery appends must FAIL-CLOSED on write failure.
+#   The previous code silently swallowed `>>` errors via `2>/dev/null` (or no
+#   check at all), so a disk-full / read-only filesystem / permission denialled
+#   append would leave the audit trail PARTIAL — pending orphan unmarked, or
+#   forward-roll commit dropped, or BLOCKED record missing — while journal_recover
+#   returned 0 (silent success on a state that fails journal_verify_pairs).
+#   The fix wraps every append with explicit fail-closed error handling that
+#   surfaces stderr AND returns nonzero, so a half-recovered journal cannot
+#   pass.
+#
+#   Sabotage strategy: wrap `printf` via a shell function override for the
+#   duration of the call. The override matches any redirect containing the
+#   journal path and returns 1 WITHOUT actually writing — this is portable
+#   across MSYS/Git Bash and exercises the EXACT code path that runs on a real
+#   disk-full / EACCES. The override is scoped to the test process and
+#   restored after journal_recover returns.
+# ============================================================================
+
+# sabotage_journal_write <journal_path> — make the journal read-only so any
+# subsequent `printf '%s\n' "$rec" >> "$jp"` from journal_recover /
+# journal_backfill_legacy_pending errors with EACCES. This is portable
+# across MSYS/Git Bash (chmod is honoured against the bash process) and
+# exercises the EXACT same code path as a disk-full / EACCES at runtime.
+# The file is restored to writable after the test by the caller via
+# restore_journal_write.
+sabotage_journal_write() {
+  local jp="$1"
+  chmod 400 "$jp" 2>/dev/null || true
+}
+
+restore_journal_write() {
+  local jp="$1"
+  chmod 600 "$jp" 2>/dev/null || true
+}
+
+# ---- M1: recovery_backout append failure → journal_recover returns nonzero --
+# Setup: a pending line whose pre_sha == current sha (orphan + sha unchanged)
+# so the recovery_backout branch is taken. Sabotage printf to fail any write
+# to the journal; journal_recover must return 1, NOT silently leave the orphan
+# unmarked.
+M1="$(mktemp -d "$TMPDIR/m1-XXXX")"
+setup_project "$M1" >/dev/null
+JP_M1="$M1/.harness/registry-journal.ndjson"
+POST_M1='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+ps_m1="$(printf '%s\n' "$POST_M1" | sha256sum 2>/dev/null | awk '{print $1}')"
+# sha-unchanged orphan: current feature_list.json IS rev1, so pre_sha == fl_sha
+ok_m1="$(journal_record_pending "$M1" status F-001 not_started in_progress --revision 2 --post-sha "$ps_m1")"
+# Sabotage the journal so any append errors with EACCES (chmod 400 = read-only).
+sabotage_journal_write "$JP_M1"
+rc_m1=0; journal_recover "$M1" >/dev/null 2>&1 || rc_m1=$?
+restore_journal_write "$JP_M1"
+check "M1a: journal_recover returns nonzero when recovery_backout append fails" "1" "$rc_m1"
+
+# ---- M2: forward-roll commit append failure → journal_recover returns nonzero
+# Setup: pending whose current sha == expected_post_sha (forward-roll branch).
+M2="$(mktemp -d "$TMPDIR/m2-XXXX")"
+setup_project "$M2" >/dev/null
+JP_M2="$M2/.harness/registry-journal.ndjson"
+POST_M2='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+ps_m2="$(printf '%s\n' "$POST_M2" | sha256sum 2>/dev/null | awk '{print $1}')"
+ok_m2="$(journal_record_pending "$M2" status F-001 not_started in_progress --revision 2 --post-sha "$ps_m2")"
+# Make current feature_list.json == rev2 so current sha == expected post sha.
+printf '%s\n' "$POST_M2" > "$M2/feature_list.json"
+sabotage_journal_write "$JP_M2"
+rc_m2=0; journal_recover "$M2" >/dev/null 2>&1 || rc_m2=$?
+restore_journal_write "$JP_M2"
+check "M2a: journal_recover returns nonzero when forward-roll commit append fails" "1" "$rc_m2"
+
+# ---- M3: recovery_blocked append failure → journal_recover returns nonzero --
+# Setup: third-SHA orphan (pre_sha != current sha != expected_post_sha).
+M3="$(mktemp -d "$TMPDIR/m3-XXXX")"
+setup_project "$M3" >/dev/null
+JP_M3="$M3/.harness/registry-journal.ndjson"
+POST_M3='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+ps_m3="$(printf '%s\n' "$POST_M3" | sha256sum 2>/dev/null | awk '{print $1}')"
+ok_m3="$(journal_record_pending "$M3" status F-001 not_started in_progress --revision 2 --post-sha "$ps_m3")"
+EVIL_M3='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"blocked","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+printf '%s\n' "$EVIL_M3" > "$M3/feature_list.json"
+sabotage_journal_write "$JP_M3"
+rc_m3=0; journal_recover "$M3" >/dev/null 2>&1 || rc_m3=$?
+restore_journal_write "$JP_M3"
+check "M3a: journal_recover returns nonzero when recovery_blocked append fails" "1" "$rc_m3"
+
+# ---- M4: journal_backfill_legacy_pending append failure returns nonzero ----
+# Setup: a legacy pending line (no expected_post_sha) with a committed partner.
+PRE_M4="$(printf '%s\n' '{"revision":1,"schema_version":"2.0.0","features":[{"id":"F-001","status":"not_started","evidence_associations":[],"legacy_audit_evidence":[]}]}' | sha256sum 2>/dev/null | awk '{print $1}')"
+POST_M4_DOC='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+POST_M4="$(printf '%s\n' "$POST_M4_DOC" | sha256sum 2>/dev/null | awk '{print $1}')"
+TS_M4=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)
+M4="$(mktemp -d "$TMPDIR/m4-XXXX")"
+mkdir -p "$M4/.harness"
+JP_M4="$M4/.harness/registry-journal.ndjson"
+OK_M4="legacy-op-key-m4"
+printf '%s\n' "{\"ts\":\"$TS_M4\",\"op\":\"status\",\"feature_id\":\"F-001\",\"from\":\"not_started\",\"to\":\"in_progress\",\"revision\":2,\"pending\":true,\"op_key\":\"$OK_M4\",\"feature_list_sha_before\":\"$PRE_M4\",\"feature_list_sha_after\":\"$POST_M4\",\"evidence_run_ids_after\":[],\"run_id\":null}" > "$JP_M4"
+jq -c 'del(.expected_post_sha)' "$JP_M4" > "$JP_M4.tmp" && mv "$JP_M4.tmp" "$JP_M4"
+printf '%s\n' "{\"ts\":\"$TS_M4\",\"op\":\"commit\",\"feature_id\":\"F-001\",\"from\":\"not_started\",\"to\":\"in_progress\",\"revision\":2,\"pending\":false,\"op_key\":\"$OK_M4\",\"feature_list_sha_before\":\"$PRE_M4\",\"feature_list_sha_after\":\"$POST_M4\",\"evidence_run_ids_after\":[],\"run_id\":null}" >> "$JP_M4"
+sabotage_journal_write "$JP_M4"
+rc_m4=0; journal_backfill_legacy_pending "$M4" >/dev/null 2>&1 || rc_m4=$?
+restore_journal_write "$JP_M4"
+check "M4a: journal_backfill_legacy_pending returns nonzero on append failure" "1" "$rc_m4"
+
+# ---- M5: positive control — unsabotaged backfill still succeeds ------------
+M5="$(mktemp -d "$TMPDIR/m5-XXXX")"
+mkdir -p "$M5/.harness"
+JP_M5="$M5/.harness/registry-journal.ndjson"
+PRE_M5="$PRE_M4"; POST_M5="$POST_M4"; TS_M5="$TS_M4"; OK_M5="legacy-op-key-m5"
+printf '%s\n' "{\"ts\":\"$TS_M5\",\"op\":\"status\",\"feature_id\":\"F-001\",\"from\":\"not_started\",\"to\":\"in_progress\",\"revision\":2,\"pending\":true,\"op_key\":\"$OK_M5\",\"feature_list_sha_before\":\"$PRE_M5\",\"feature_list_sha_after\":\"$POST_M5\",\"evidence_run_ids_after\":[],\"run_id\":null}" > "$JP_M5"
+jq -c 'del(.expected_post_sha)' "$JP_M5" > "$JP_M5.tmp" && mv "$JP_M5.tmp" "$JP_M5"
+printf '%s\n' "{\"ts\":\"$TS_M5\",\"op\":\"commit\",\"feature_id\":\"F-001\",\"from\":\"not_started\",\"to\":\"in_progress\",\"revision\":2,\"pending\":false,\"op_key\":\"$OK_M5\",\"feature_list_sha_before\":\"$PRE_M5\",\"feature_list_sha_after\":\"$POST_M5\",\"evidence_run_ids_after\":[],\"run_id\":null}" >> "$JP_M5"
+rc_m5=0; journal_backfill_legacy_pending "$M5" >/dev/null 2>&1 || rc_m5=$?
+check "M5a: unsabotaged backfill returns zero (positive control)" "0" "$rc_m5"
+check "M5b: recovery_backfill record appended on success" "1" "$(count_in 'recovery_backfill' "$JP_M5")"
+
+# ---- M6: positive control — unsabotaged recovery_backout still succeeds -----
+# Proves M1's sabotage actually flips behavior: without sabotage, the orphan
+# gets the recovery_backout record AND journal_recover returns 0.
+M6="$(mktemp -d "$TMPDIR/m6-XXXX")"
+setup_project "$M6" >/dev/null
+JP_M6="$M6/.harness/registry-journal.ndjson"
+POST_M6='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+ps_m6="$(printf '%s\n' "$POST_M6" | sha256sum 2>/dev/null | awk '{print $1}')"
+ok_m6="$(journal_record_pending "$M6" status F-001 not_started in_progress --revision 2 --post-sha "$ps_m6")"
+rc_m6=0; journal_recover "$M6" >/dev/null 2>&1 || rc_m6=$?
+check "M6a: unsabotaged recovery_backout returns zero (positive control)" "0" "$rc_m6"
+check "M6b: recovery_backout record appended on success" "1" "$(count_in 'recovery_backout' "$JP_M6")"
+
+# ---- M7: positive control — unsabotaged forward-roll still succeeds --------
+M7="$(mktemp -d "$TMPDIR/m7-XXXX")"
+setup_project "$M7" >/dev/null
+JP_M7="$M7/.harness/registry-journal.ndjson"
+POST_M7='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+ps_m7="$(printf '%s\n' "$POST_M7" | sha256sum 2>/dev/null | awk '{print $1}')"
+ok_m7="$(journal_record_pending "$M7" status F-001 not_started in_progress --revision 2 --post-sha "$ps_m7")"
+printf '%s\n' "$POST_M7" > "$M7/feature_list.json"
+rc_m7=0; journal_recover "$M7" >/dev/null 2>&1 || rc_m7=$?
+check "M7a: unsabotaged forward-roll returns zero (positive control)" "0" "$rc_m7"
+check "M7b: forward-roll commit record appended on success" "1" "$(count_in '"op":"commit"' "$JP_M7")"
+
+# ---- M8: positive control — unsabotaged recovery_blocked still succeeds ----
+M8="$(mktemp -d "$TMPDIR/m8-XXXX")"
+setup_project "$M8" >/dev/null
+JP_M8="$M8/.harness/registry-journal.ndjson"
+POST_M8='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+ps_m8="$(printf '%s\n' "$POST_M8" | sha256sum 2>/dev/null | awk '{print $1}')"
+ok_m8="$(journal_record_pending "$M8" status F-001 not_started in_progress --revision 2 --post-sha "$ps_m8")"
+EVIL_M8='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"blocked","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+printf '%s\n' "$EVIL_M8" > "$M8/feature_list.json"
+rc_m8=0; journal_recover "$M8" >/dev/null 2>&1 || rc_m8=$?
+check "M8a: unsabotaged recovery_blocked returns nonzero (this is the documented behavior)" "1" "$rc_m8"
+check "M8b: recovery_blocked record appended on success" "1" "$(count_in 'recovery_blocked' "$JP_M8")"
+
+# ============================================================================
 # L: Codex r4 — journal_verify_pairs MUST fail-closed on a corrupt NDJSON line.
 #   The previous implementation piped jq's stdout to `tr -d '\r'` and silenced
 #   stderr with `2>/dev/null`. When a single line failed to parse, jq exited

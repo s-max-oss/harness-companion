@@ -93,6 +93,24 @@ is_eligible_for_passing() {
   terminal="$(printf '%s' "$validation" | jq -c '.terminal')"
 
   # ===========================================================================
+  # Step 2b: Run's feature_id must equal the target feature_id.
+  #   (Codex r4: cross-feature run pollution guard — a passing run bound to
+  #    feature X must NEVER make feature Y passing, even if Y's evidence
+  #    associations reference X's run_id. Without this check, a registry that
+  #    is mutated out-of-band can chain the wrong run log to the wrong feature.)
+  # ===========================================================================
+  local run_feature_id
+  run_feature_id="$(printf '%s' "$run_started" | jq -r '.feature_id // empty')"
+  if [ -z "$run_feature_id" ]; then
+    echo "Error: feature_id_missing_in_run_started — run_started.feature_id is empty (run_id=$run_id)" >&2
+    return 1
+  fi
+  if [ "$run_feature_id" != "$fid" ]; then
+    echo "Error: feature_id_mismatch — run_started.feature_id='$run_feature_id' but target feature_id='$fid' (run_id=$run_id)" >&2
+    return 1
+  fi
+
+  # ===========================================================================
   # Step 3: Terminal must be run_completed with overall_result="passed"
   # ===========================================================================
   local term_event overall_result

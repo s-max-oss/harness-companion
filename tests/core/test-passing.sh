@@ -117,6 +117,7 @@ make_run_log() {
   local overall="$7"         # "passed" | "no_checks" | "failed" | "aborted"
   local executed="$8" passed_n="$9" failed_n="${10}" skipped_n="${11}"
   local failed_ids_json="${12}"  # e.g. '[]' or '["unit-test"]'
+  local feature_id="${13:-feat-x}"  # Codex r4: run's feature_id; default "feat-x" for legacy callers
 
   local log="$dir/.harness/logs/runs/${run_id}.ndjson"
   local failed_ids_field=""
@@ -131,7 +132,8 @@ make_run_log() {
     --arg config_sha "$config_sha" \
     --argjson req "$required_json" \
     --arg verified_fp "$verified_fp" \
-    '{event:"run_started",schema_version:2,run_id:$run_id,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:$vcs_rev,vcs_revision_source:"git",workspace_fingerprint_initial:$verified_fp,config_sha256:$config_sha,required_command_ids:$req,capability_level:1,feature_id:"feat-x"}' \
+    --arg fid "$feature_id" \
+    '{event:"run_started",schema_version:2,run_id:$run_id,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:$vcs_rev,vcs_revision_source:"git",workspace_fingerprint_initial:$verified_fp,config_sha256:$config_sha,required_command_ids:$req,capability_level:1,feature_id:$fid}' \
     > "$log"
 
   # command_completed events (one per required; all pass unless overall=failed)
@@ -566,6 +568,56 @@ make_feature_list "$T16" "feat-norev" "20260809T-norev" '[]'
 assert_passing_not_eligible "git project + run missing vcs_revision → not eligible (step 8)" \
   "feat-norev" "$T16/feature_list.json" "$T16" "vcs_revision_missing"
 rm -rf "$T16"
+
+# ============================================================================
+# Test 17 (Codex r4): cross-feature run pollution guard (step 2b)
+#   Run's run_started.feature_id must equal the target feature_id.
+#   A passing run for feat-A must NOT make feat-B passing, even if feat-B's
+#   evidence_associations reference A's run_id.
+# ============================================================================
+echo ""
+echo "=== Test 17: cross-feature run pollution guard (step 2b) ==="
+T17="$(mktemp -d)"
+make_config "$T17"
+printf '{"version":1}\n' > "$T17/.harness/config.json"
+T17_CONFIG_SHA="sha256:$(sha256sum "$T17/.harness/config.json" | awk '{print $1}')"
+T17_VERIFIED_FP="$(compute_workspace_fingerprint "$T17")"
+# Run log records feature_id="feat-A" (a clean passing run for A).
+make_run_log "$T17" "20260809T-xfeat" '["typecheck"]' "null" "$T17_CONFIG_SHA" \
+  "$T17_VERIFIED_FP" "passed" 1 1 0 0 '[]' "feat-A"
+# But the feature_list mistakenly associates it with feat-B (cross-feature pollution).
+make_feature_list "$T17" "feat-B" "20260809T-xfeat" '[]'
+assert_passing_not_eligible "cross-feature run (feat-A log, feat-B target) → not eligible (step 2b)" \
+  "feat-B" "$T17/feature_list.json" "$T17" "feature_id_mismatch"
+rm -rf "$T17"
+
+# ============================================================================
+# Test 18 (Codex r4): run_started.feature_id empty → not eligible (step 2b)
+# ============================================================================
+echo ""
+echo "=== Test 18: empty run_started.feature_id → not eligible (step 2b) ==="
+T18="$(mktemp -d)"
+make_config "$T18"
+printf '{"version":1}\n' > "$T18/.harness/config.json"
+T18_CONFIG_SHA="sha256:$(sha256sum "$T18/.harness/config.json" | awk '{print $1}')"
+T18_VERIFIED_FP="$(compute_workspace_fingerprint "$T18")"
+# Build a valid run log via make_run_log, then strip feature_id.
+make_run_log "$T18" "20260809T-nofid" '["typecheck"]' "null" "$T18_CONFIG_SHA" \
+  "$T18_VERIFIED_FP" "passed" 1 1 0 0 '[]' "feat-X"
+jq -c '.feature_id |= ""' "$T18/.harness/logs/runs/20260809T-nofid.ndjson" > "$T18/.harness/logs/runs/20260809T-nofid.ndjson.new" \
+  && mv "$T18/.harness/logs/runs/20260809T-nofid.ndjson.new" "$T18/.harness/logs/runs/20260809T-nofid.ndjson"
+# First line: replace with feature_id=""
+head -1 "$T18/.harness/logs/runs/20260809T-nofid.ndjson" | \
+  jq -c 'del(.feature_id)' > "$T18/.harness/logs/runs/20260809T-nofid.ndjson.l1"
+sed -n '2,$p' "$T18/.harness/logs/runs/20260809T-nofid.ndjson" > "$T18/.harness/logs/runs/20260809T-nofid.ndjson.tail"
+cat "$T18/.harness/logs/runs/20260809T-nofid.ndjson.l1" "$T18/.harness/logs/runs/20260809T-nofid.ndjson.tail" \
+  > "$T18/.harness/logs/runs/20260809T-nofid.ndjson.new"
+mv "$T18/.harness/logs/runs/20260809T-nofid.ndjson.new" "$T18/.harness/logs/runs/20260809T-nofid.ndjson"
+rm -f "$T18/.harness/logs/runs/20260809T-nofid.ndjson.l1" "$T18/.harness/logs/runs/20260809T-nofid.ndjson.tail"
+make_feature_list "$T18" "feat-X" "20260809T-nofid" '[]'
+assert_passing_not_eligible "empty run_started.feature_id → not eligible (step 2b)" \
+  "feat-X" "$T18/feature_list.json" "$T18" "feature_id_missing_in_run_started"
+rm -rf "$T18"
 
 # ============================================================================
 # Summary

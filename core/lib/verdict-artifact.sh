@@ -307,9 +307,80 @@ verdict_validate_record() {
       echo "verdict: feature record requires valid feature_id" >&2
       return 1
     fi
+    # Codex r4: a feature verdict's `phase` MUST equal the feature's declared
+    # phase in .harness/PLAN.json (no `phase` reassignment out of band). The
+    # record's own `phase` is a per-record label; the AUTHORITATIVE source of
+    # which phase a feature belongs to is PLAN.json's `.phases[].features[]`.
+    # Without this check, a feature declared in phase 1 can be re-reviewed as
+    # phase 5 and the validator will not notice — review-state machine stays
+    # coherent only when the record's phase matches the PLAN phase.
+    # Fail-closed: a missing/unparseable PLAN is rejected (no implicit allow);
+    # a feature unknown to PLAN is rejected (no fallback); a phase mismatch
+    # is rejected (no coercion).
+    local plan="$project_dir/.harness/PLAN.json"
+    local rec_phase
+    rec_phase="$(printf '%s' "$rec" | jq -r '.phase')"
+    if [ ! -f "$plan" ]; then
+      echo "verdict: PLAN.json missing — cannot verify feature_id belongs to declared phase" >&2
+      return 1
+    fi
+    if [ -L "$plan" ]; then
+      echo "verdict: PLAN.json is a symlink — refusing (must be a regular file)" >&2
+      return 1
+    fi
+    if ! jq -e 'type == "object" and (.phases | type) == "array"' "$plan" >/dev/null 2>&1; then
+      echo "verdict: PLAN.json missing required .phases array" >&2
+      return 1
+    fi
+    local declared_phase
+    declared_phase="$(jq -r --arg fid "$fid" '[.phases[] | select((.features // []) | index($fid)) | .phase] | first // empty' "$plan" 2>/dev/null)"
+    if [ -z "$declared_phase" ] || [ "$declared_phase" = "null" ]; then
+      echo "verdict: feature_id '$fid' is not declared in any PLAN.json phase" >&2
+      return 1
+    fi
+    if [ "$rec_phase" != "$declared_phase" ]; then
+      echo "verdict: record phase=$rec_phase does not match PLAN-declared phase=$declared_phase for feature '$fid'" >&2
+      return 1
+    fi
   else
     if ! printf '%s' "$rec" | jq -e '(.feature_ids | type) == "array" and (.feature_ids | length) > 0 and ([.feature_ids[]? | type] | all(. == "string"))' >/dev/null 2>&1; then
       echo "verdict: phase record requires non-empty feature_ids array of strings" >&2
+      return 1
+    fi
+    # Codex r4: a phase record's `feature_ids` set must be a SUBSET of the
+    # features declared in PLAN.json for the record's `phase`. PLAN.json
+    # is the AUTHORITATIVE source of which features belong to which phase;
+    # a verdict cannot claim a feature is in this phase when PLAN says it
+    # belongs to another (phantom-phase-feature) — even though
+    # _v_phase_coverage enforces equality on PASS, this rule prevents
+    # phantom features from appearing in BLOCKER / FAIL / earlier attempts.
+    # Fail-closed: a feature_ids entry not in PLAN is rejected.
+    local plan="$project_dir/.harness/PLAN.json"
+    if [ ! -f "$plan" ]; then
+      echo "verdict: PLAN.json missing — cannot verify phase feature_ids belong to declared phase" >&2
+      return 1
+    fi
+    if [ -L "$plan" ]; then
+      echo "verdict: PLAN.json is a symlink — refusing (must be a regular file)" >&2
+      return 1
+    fi
+    if ! jq -e 'type == "object" and (.phases | type) == "array"' "$plan" >/dev/null 2>&1; then
+      echo "verdict: PLAN.json missing required .phases array" >&2
+      return 1
+    fi
+    local rec_phase
+    rec_phase="$(printf '%s' "$rec" | jq -r '.phase')"
+    local phase_features_json
+    phase_features_json="$(jq -c --argjson ph "$rec_phase" '[.phases[] | select((.phase | tostring) == ($ph | tostring)) | .features[]?] // empty | .' "$plan" 2>/dev/null)"
+    if [ -z "$phase_features_json" ] || [ "$phase_features_json" = "null" ] || [ "$phase_features_json" = "[]" ]; then
+      echo "verdict: phase=$rec_phase is unknown in PLAN.json" >&2
+      return 1
+    fi
+    local phantom_in_phase
+    phantom_in_phase="$(jq -nc --argjson rec "$(printf '%s' "$rec" | jq -c '.feature_ids')" --argjson plan "$phase_features_json" \
+      '($rec - $plan) as $p | if ($p|length)>0 then $p else empty end' 2>/dev/null)"
+    if [ -n "$phantom_in_phase" ] && [ "$phantom_in_phase" != "null" ] && [ "$phantom_in_phase" != "[]" ]; then
+      echo "verdict: phase record claims feature_ids not in PLAN.json for phase=$rec_phase: $phantom_in_phase" >&2
       return 1
     fi
   fi

@@ -187,6 +187,7 @@ mk_feature_artifact() {
 # ---- T1: valid feature PASS record (passed+fresh run, real head) → valid ----
 D="$(mktemp -d "$TMPDIR/t1-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01
 build_passed_run "$D" run-1 F-CONV-01
 BASE="$(git -C "$D" rev-parse HEAD)"
 HEAD="$(git -C "$D" rev-parse HEAD)"
@@ -195,6 +196,7 @@ check "T1: passed+fresh feature PASS record validates" 0 "$(rec_valid "$D" "$REC
 
 # ---- T2: 64-hex OIDs accepted (SHA-256-style OIDs; non-repo dir) → valid ----
 D="$(mktemp -d "$TMPDIR/t2-XXXX")"
+write_plan "$D" 1 F-CONV-01
 REC="$(feature_rec "$D" F-CONV-01 1 FAIL "" "$OID64" "$OID64")"
 check "T2: 64-hex OIDs accepted" 0 "$(rec_valid "$D" "$REC")"
 
@@ -227,6 +229,7 @@ check "T7: PASS with invalid run log rejected" 1 "$(rec_valid "$D" "$REC")"
 
 # ---- T8: FAIL with null run_id → valid ----
 D="$(mktemp -d "$TMPDIR/t8-XXXX")"
+write_plan "$D" 1 F-CONV-01
 REC="$(feature_rec "$D" F-CONV-01 1 FAIL "" "$OID40" "$OID40B")"
 check "T8: FAIL with null run_id valid" 0 "$(rec_valid "$D" "$REC")"
 
@@ -238,6 +241,7 @@ check "T9: non-enum verdict rejected" 1 "$(rec_valid "$D" "$REC")"
 # ---- T10: phase record with feature_ids → valid; missing feature_ids → invalid ----
 D="$(mktemp -d "$TMPDIR/t10-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01 F-CONV-02
 build_passed_run "$D" run-10
 BASE="$(git -C "$D" rev-parse HEAD)"
 HEAD="$(git -C "$D" rev-parse HEAD)"
@@ -258,6 +262,7 @@ check "T11: feature record missing feature_id rejected" 1 "$(rec_valid "$D" "$RE
 # ---- T12: writer append-only — attempts 1,2,3 contiguous; validate passes ----
 D="$(mktemp -d "$TMPDIR/t12-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01
 gcommit "$D"
 BASE="$(git -C "$D" rev-parse HEAD~1 2>/dev/null || git -C "$D" rev-parse HEAD)"
 HEAD="$(git -C "$D" rev-parse HEAD)"
@@ -283,6 +288,7 @@ check "T13b: no record appended" yes "$([ ! -f "$D/.harness/reviews/feature/F-CO
 # ---- T14: validate_file — attempt gap detected ----
 D="$(mktemp -d "$TMPDIR/t14-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01
 gcommit "$D"
 BASE="$(git -C "$D" rev-parse HEAD~1 2>/dev/null || git -C "$D" rev-parse HEAD)"
 HEAD="$(git -C "$D" rev-parse HEAD)"
@@ -300,6 +306,7 @@ check "T15: missing artifact invalid" "artifact_missing" "$(printf '%s' "$RES" |
 # ---- T16: validate_file — kind mismatch in file ----
 D="$(mktemp -d "$TMPDIR/t16-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01
 gcommit "$D"
 BASE="$(git -C "$D" rev-parse HEAD~1 2>/dev/null || git -C "$D" rev-parse HEAD)"
 HEAD="$(git -C "$D" rev-parse HEAD)"
@@ -315,6 +322,7 @@ check "T16: kind mismatch in file rejected" "kind_mismatch" "$(printf '%s' "$RES
 # ---- T17: CLI end-to-end append + validate (passed+fresh run) ----
 D="$(mktemp -d "$TMPDIR/t17-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-07
 gcommit "$D"
 BASE="$(git -C "$D" rev-parse HEAD~1 2>/dev/null || git -C "$D" rev-parse HEAD)"
 HEAD="$(git -C "$D" rev-parse HEAD)"
@@ -340,6 +348,7 @@ check "T18: CLI PASS without --run refused" 1 "$([ -f "$D/.harness/reviews/featu
 # T19: PASS cannot bind a valid but NON-passing (no_checks) run
 D="$(mktemp -d "$TMPDIR/t19-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01
 build_no_checks_run "$D" run-nc F-CONV-01
 HEAD="$(git -C "$D" rev-parse HEAD)"
 REC="$(feature_rec "$D" F-CONV-01 1 PASS run-nc "$HEAD" "$HEAD")"
@@ -350,6 +359,7 @@ check "T19b: reason run_not_passed" yes "$(printf '%s' "$REASON" | grep -q 'run_
 # T20: PASS binding a passed run but config CHANGED after the run → config_stale
 D="$(mktemp -d "$TMPDIR/t20-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01
 build_passed_run "$D" run-cfg F-CONV-01
 BASE="$(git -C "$D" rev-parse HEAD)"
 HEAD="$BASE"
@@ -363,6 +373,7 @@ check "T20b: reason config_stale" yes "$(printf '%s' "$REASON" | grep -q 'config
 # workspace_stale (only axis 1 trips: config + HEAD unchanged)
 D="$(mktemp -d "$TMPDIR/t21-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01
 printf 'tracked\n' > "$D/tracked.txt"
 git -C "$D" add tracked.txt
 git -C "$D" -c user.email=test@example.com -c user.name=test commit -q -m t
@@ -377,6 +388,7 @@ check "T21b: reason workspace_stale" yes "$(printf '%s' "$REASON" | grep -q 'wor
 # T22: PASS binding a passed run but git HEAD ADVANCED after the run → vcs_stale
 D="$(mktemp -d "$TMPDIR/t22-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01
 build_passed_run "$D" run-vcs F-CONV-01
 OLD_HEAD="$(git -C "$D" rev-parse HEAD)"
 gcommit "$D"
@@ -389,6 +401,7 @@ check "T22b: reason vcs_stale" yes "$(printf '%s' "$REASON" | grep -q 'vcs_stale
 # T23: PASS binding a fresh run but record head_sha != current HEAD → head_mismatch
 D="$(mktemp -d "$TMPDIR/t23-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01
 build_passed_run "$D" run-head F-CONV-01
 BASE="$(git -C "$D" rev-parse HEAD)"
 HEAD="$BASE"
@@ -459,7 +472,12 @@ jq -n --arg run "run-ph" --arg b "$BASE" --arg h "$HEAD" \
   | jq -c . > "$D/.harness/reviews/phase/1.jsonl"
 RES="$(verdict_validate_file "$D" phase 1)"
 check "T26: phase PASS with phantom feature rejected" false "$(printf '%s' "$RES" | jq -r '.valid')"
-check "T26b: detail phantom" "phase_phantom_feature" "$(printf '%s' "$RES" | jq -r '.detail.reason')"
+# Codex r4 defect 5: phantom features are now caught at record-validation
+# (verdict_validate_record → "phase record claims feature_ids not in PLAN"),
+# so verdict_validate_file returns {valid:false, reason:"invalid_record"} before
+# the file-level coverage gate runs. Either rejection path is correct; both
+# prove the phantom is rejected.
+check "T26b: file-level rejects phantom" "invalid_record" "$(printf '%s' "$RES" | jq -r '.reason')"
 
 # T27: phase PASS covers all PLAN features but ONE feature's latest verdict is
 # FAIL → phase_feature_not_passed
@@ -488,6 +506,7 @@ check "T27c: offending feature" "F-CONV-02" "$(printf '%s' "$RES" | jq -r '.deta
 # T28: feature PASS binding a run scoped to ANOTHER feature → run_feature_id_mismatch
 D="$(mktemp -d "$TMPDIR/t28-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01 F-CONV-02
 build_passed_run "$D" run-x F-CONV-02
 HEAD="$(git -C "$D" rev-parse HEAD)"
 REC="$(feature_rec "$D" F-CONV-01 1 PASS run-x "$HEAD" "$HEAD")"
@@ -499,6 +518,7 @@ check "T28b: reason run_feature_id_mismatch" yes "$(printf '%s' "$REASON" | grep
 # (fail-closed: a feature PASS cannot be backed by a phase/unscoped run)
 D="$(mktemp -d "$TMPDIR/t29-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01
 build_passed_run "$D" run-nofid
 HEAD="$(git -C "$D" rev-parse HEAD)"
 REC="$(feature_rec "$D" F-CONV-01 1 PASS run-nofid "$HEAD" "$HEAD")"
@@ -524,7 +544,10 @@ jq -n --arg run "run-ph" --arg b "$BASE" --arg h "$HEAD" \
   | jq -c . > "$D/.harness/reviews/phase/1.jsonl"
 RES="$(verdict_validate_file "$D" phase 1)"
 check "T30: phase PASS without PLAN.json rejected" false "$(printf '%s' "$RES" | jq -r '.valid')"
-check "T30b: detail plan_missing" "plan_missing" "$(printf '%s' "$RES" | jq -r '.detail.reason')"
+# Codex r4 defect 5: phase record validation now also rejects when PLAN.json is
+# missing (fail-closed), so verdict_validate_file returns
+# {valid:false, reason:"invalid_record"} before _v_phase_coverage runs.
+check "T30b: file-level rejects missing PLAN" "invalid_record" "$(printf '%s' "$RES" | jq -r '.reason')"
 
 # T31: phase PASS for a phase NOT in PLAN.json → phase_unknown_or_no_features
 D="$(mktemp -d "$TMPDIR/t31-XXXX")"
@@ -543,7 +566,10 @@ jq -n --arg run "run-ph" --arg b "$BASE" --arg h "$HEAD" \
   | jq -c . > "$D/.harness/reviews/phase/2.jsonl"
 RES="$(verdict_validate_file "$D" phase 2)"
 check "T31: phase PASS for unknown phase rejected" false "$(printf '%s' "$RES" | jq -r '.valid')"
-check "T31b: detail phase_unknown_or_no_features" "phase_unknown_or_no_features" "$(printf '%s' "$RES" | jq -r '.detail.reason')"
+# Codex r4 defect 5: an unknown-phase record is rejected at record-validation
+# ("phase=$rec_phase is unknown in PLAN.json"), so verdict_validate_file returns
+# {valid:false, reason:"invalid_record"} before _v_phase_coverage runs.
+check "T31b: file-level rejects unknown phase" "invalid_record" "$(printf '%s' "$RES" | jq -r '.reason')"
 
 # T32: the coverage set comes from PLAN.json, NOT the verdict files — a PASS
 # artifact for a feature NOT in the phase does not change the required set, and
@@ -580,6 +606,7 @@ check "T32: non-PLAN PASS artifact ignored (PLAN authoritative)" true "$(printf 
 # BEFORE the three-axis check, masking the P0-14 reason this test asserts.
 D="$(mktemp -d "$TMPDIR/t33-XXXX")"
 ginit "$D"
+write_plan "$D" 1 F-CONV-01
 build_passed_run "$D" run-norev F-CONV-01
 jq -c 'if .event == "run_started" then del(.vcs_revision) else . end' \
   "$D/.harness/logs/runs/run-norev.ndjson" | tr -d '\r' \
@@ -590,6 +617,93 @@ REC="$(feature_rec "$D" F-CONV-01 1 PASS run-norev "$HEAD" "$HEAD")"
 check "T33: git-project PASS binding a run with no vcs_revision rejected" 1 "$(rec_valid "$D" "$REC")"
 REASON="$(rec_invalid_reason "$D" "$REC")"
 check "T33b: reason vcs_revision_missing" yes "$(printf '%s' "$REASON" | grep -q 'vcs_revision_missing' && echo yes || echo no)"
+
+# ---- Codex r4 defect 5: feature_id ∈ phase.feature_ids (PLAN.json authoritative) ----
+#
+# The record's own `phase` is a per-record label; the AUTHORITATIVE source of
+# which phase a feature belongs to is PLAN.json's `.phases[].features[]`. The
+# negative tests below exercise each of the failure modes the validator must
+# reject: phantom feature, phase reassignment out of band, PLAN missing,
+# PLAN as symlink, phase record phantom features. The positive control at
+# the end keeps the well-formed case valid.
+
+# ---- V1: feature verdict with feature_id NOT declared in PLAN.json → invalid ----
+D="$(mktemp -d "$TMPDIR/v1-XXXX")"
+ginit "$D"
+write_plan "$D" 1 F-CONV-01
+HEAD="$(git -C "$D" rev-parse HEAD)"
+# F-PHANTOM is not in any PLAN.json phase — must be rejected (no fallback).
+REC="$(feature_rec "$D" F-PHANTOM 1 FAIL "" "$HEAD" "$HEAD")"
+check "V1: feature_id not in PLAN rejected" 1 "$(rec_valid "$D" "$REC")"
+REASON="$(rec_invalid_reason "$D" "$REC")"
+check "V1b: reason mentions PLAN" yes "$(printf '%s' "$REASON" | grep -q 'is not declared in any PLAN' && echo yes || echo no)"
+
+# ---- V2: feature verdict with phase reassigned out of band (1 → 5) → invalid ----
+D="$(mktemp -d "$TMPDIR/v2-XXXX")"
+ginit "$D"
+write_plan "$D" 1 F-CONV-01
+HEAD="$(git -C "$D" rev-parse HEAD)"
+# PLAN says F-CONV-01 is in phase 1; record says phase=5 — out-of-band reassign.
+REC="$(feature_rec "$D" F-CONV-01 5 FAIL "" "$HEAD" "$HEAD")"
+check "V2: phase reassigned out of band rejected" 1 "$(rec_valid "$D" "$REC")"
+REASON="$(rec_invalid_reason "$D" "$REC")"
+check "V2b: reason mentions phase mismatch" yes "$(printf '%s' "$REASON" | grep -q 'does not match PLAN-declared phase' && echo yes || echo no)"
+
+# ---- V3: feature verdict with PLAN.json MISSING → invalid ----
+D="$(mktemp -d "$TMPDIR/v3-XXXX")"
+ginit "$D"
+# No write_plan → PLAN.json absent.
+HEAD="$(git -C "$D" rev-parse HEAD)"
+REC="$(feature_rec "$D" F-CONV-01 1 FAIL "" "$HEAD" "$HEAD")"
+check "V3: feature verdict with PLAN.json missing rejected" 1 "$(rec_valid "$D" "$REC")"
+REASON="$(rec_invalid_reason "$D" "$REC")"
+check "V3b: reason mentions PLAN.json missing" yes "$(printf '%s' "$REASON" | grep -q 'PLAN.json missing' && echo yes || echo no)"
+
+# ---- V4: feature verdict with PLAN.json as SYMLINK → invalid ----
+D="$(mktemp -d "$TMPDIR/v4-XXXX")"
+ginit "$D"
+TMP_PLAN="$(mktemp -d)"
+# Real PLAN.json contents: F-CONV-01 in phase 1.
+printf '%s\n' '{"phases":[{"phase":1,"features":["F-CONV-01"]}]}' > "$TMP_PLAN/real.json"
+mkdir -p "$D/.harness"
+ln -s "$TMP_PLAN/real.json" "$D/.harness/PLAN.json" 2>/dev/null
+if [ -L "$D/.harness/PLAN.json" ]; then
+  HEAD="$(git -C "$D" rev-parse HEAD)"
+  REC="$(feature_rec "$D" F-CONV-01 1 FAIL "" "$HEAD" "$HEAD")"
+  check "V4: feature verdict with symlinked PLAN rejected" 1 "$(rec_valid "$D" "$REC")"
+  REASON="$(rec_invalid_reason "$D" "$REC")"
+  check "V4b: reason mentions symlink" yes "$(printf '%s' "$REASON" | grep -q 'symlink' && echo yes || echo no)"
+else
+  # Windows Git Bash often creates a regular-file copy via `ln -s`; skip cleanly.
+  echo "  [SKIP] V4 symlinked PLAN — symlink creation unsupported on this platform"
+  check "V4: skipped on platform (symlink unsupported)" 0 "0"
+  check "V4b: skipped on platform" 0 "0"
+fi
+
+# ---- V5: phase record claims feature NOT in PLAN for that phase → invalid ----
+D="$(mktemp -d "$TMPDIR/v5-XXXX")"
+ginit "$D"
+# PLAN: phase 1 has F-CONV-01 only.
+write_plan "$D" 1 F-CONV-01
+HEAD="$(git -C "$D" rev-parse HEAD)"
+# Phase record claims F-CONV-99 (not in PLAN phase 1) — phantom-phase-feature.
+PHREC="$(jq -n --arg run "" --arg b "$HEAD" --arg h "$HEAD" \
+  '{schema_version:1, kind:"phase", phase:1, feature_ids:["F-CONV-01","F-CONV-99"],
+    attempt:1, verdict:"FAIL", base_sha:$b, head_sha:$h, run_id:($run|if .=="" then null else . end),
+    reviewer_host:"subagent", checked:["spec"], reason:"phase review",
+    recorded_at:"2026-08-08T00:00:00Z"}')"
+check "V5: phase record with phantom feature rejected" 1 "$(rec_valid "$D" "$PHREC")"
+REASON="$(rec_invalid_reason "$D" "$PHREC")"
+check "V5b: reason mentions phantom" yes "$(printf '%s' "$REASON" | grep -q 'claims feature_ids not in PLAN' && echo yes || echo no)"
+
+# ---- V6: positive control — feature verdict with matching PLAN phase → valid ----
+D="$(mktemp -d "$TMPDIR/v6-XXXX")"
+ginit "$D"
+write_plan "$D" 1 F-CONV-01
+HEAD="$(git -C "$D" rev-parse HEAD)"
+# Well-formed: F-CONV-01 in phase 1, both PLAN and record agree.
+REC="$(feature_rec "$D" F-CONV-01 1 FAIL "" "$HEAD" "$HEAD")"
+check "V6: positive control — feature matches PLAN phase valid" 0 "$(rec_valid "$D" "$REC")"
 
 echo ""
 echo "Verdict-Artifact Results: $PASSED passed, $FAILED failed"

@@ -452,6 +452,84 @@ check "K3c: legacy file preserved on install failure" "1" "$( [ -f "$K3LEG" ] &&
 check "K3d: legacy bytes byte-identical on install failure" "1" "$( [ "$K3_LEG_BEFORE" = "$(cat "$K3LEG")" ] && echo 1 || echo 0 )"
 check "K3e: no checkpoint marker minted" "0" "$(count_in 'checkpoint_migrated' "$K3JP")"
 
+# ============================================================================
+# L: Codex r4 — journal_verify_pairs MUST fail-closed on a corrupt NDJSON line.
+#   The previous implementation piped jq's stdout to `tr -d '\r'` and silenced
+#   stderr with `2>/dev/null`. When a single line failed to parse, jq exited
+#   non-zero and printed nothing, so the function silently returned valid
+#   (reason="" → no violation). A journal we cannot parse cannot be trusted
+#   to record a valid pairing contract — fail-closed with reason journal_corrupt.
+# ============================================================================
+L1="$(mktemp -d "$TMPDIR/l1-XXXX")"
+mkdir -p "$L1/.harness"
+L1JP="$L1/.harness/registry-journal.ndjson"
+setup_project "$L1" >/dev/null
+# Inject a well-formed line, then a CORRUPT line, then another well-formed one.
+# `jq -rs` slurps the whole file; one bad line breaks the parse and triggers
+# the journal_corrupt path. Both well-formed lines would otherwise pass the
+# strict contract — without the fix, journal_verify_pairs returned valid.
+TS_L1=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)
+L1POST_DOC='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+L1PSHA="$(printf '%s\n' "$L1POST_DOC" | sha256sum 2>/dev/null | awk '{print $1}')"
+L1PRE="$(sha256_file "$L1/feature_list.json")"
+printf '%s\n' "{\"ts\":\"$TS_L1\",\"op\":\"status\",\"feature_id\":\"F-001\",\"from\":\"not_started\",\"to\":\"in_progress\",\"revision\":2,\"pending\":true,\"op_key\":\"dddddddddddddddd\",\"feature_list_sha_before\":\"$L1PRE\",\"feature_list_sha_after\":\"$L1PSHA\",\"evidence_run_ids_after\":[],\"run_id\":null}" > "$L1JP"
+printf '%s\n' "this is not json at all" >> "$L1JP"
+printf '%s\n' "{\"ts\":\"$TS_L1\",\"op\":\"commit\",\"feature_id\":\"F-001\",\"from\":\"not_started\",\"to\":\"in_progress\",\"revision\":2,\"pending\":false,\"op_key\":\"dddddddddddddddd\",\"feature_list_sha_before\":\"$L1PRE\",\"feature_list_sha_after\":\"$L1PSHA\",\"evidence_run_ids_after\":[],\"run_id\":null}" >> "$L1JP"
+V_L1="$(journal_verify_pairs "$L1")"; rc_l1=$?
+check "L1a: corrupt NDJSON line → verify_pairs nonzero" "1" "$rc_l1"
+check "L1b: token journal_corrupt" "journal_corrupt" "$V_L1"
+
+# L2: an EMPTY journal (zero non-blank lines) must also fail-closed. The
+# previous code accepted the file because `jq -rs` over zero bytes exits 0
+# and prints `[]` (no violation), and `[ -f "$jp" ] || return 0` was the
+# only emptiness check. A zero-line file is not a valid audit trail.
+L2="$(mktemp -d "$TMPDIR/l2-XXXX")"
+mkdir -p "$L2/.harness"
+L2JP="$L2/.harness/registry-journal.ndjson"
+: > "$L2JP"   # create empty file
+V_L2="$(journal_verify_pairs "$L2")"; rc_l2=$?
+check "L2a: empty journal → verify_pairs nonzero" "1" "$rc_l2"
+check "L2b: empty journal token journal_corrupt" "journal_corrupt" "$V_L2"
+
+# L3: a journal containing only blank lines (whitespace-only) must also fail.
+L3="$(mktemp -d "$TMPDIR/l3-XXXX")"
+mkdir -p "$L3/.harness"
+L3JP="$L3/.harness/registry-journal.ndjson"
+printf '\n\n   \n\n' > "$L3JP"
+V_L3="$(journal_verify_pairs "$L3")"; rc_l3=$?
+check "L3a: blank-only journal → verify_pairs nonzero" "1" "$rc_l3"
+check "L3b: blank-only journal token journal_corrupt" "journal_corrupt" "$V_L3"
+
+# L4: replay also refuses a corrupt journal (proves the fail-closed contract
+# holds at the highest layer — replay is what init/r4-style gates actually call).
+L4="$(mktemp -d "$TMPDIR/l4-XXXX")"
+mkdir -p "$L4/.harness"
+L4JP="$L4/.harness/registry-journal.ndjson"
+setup_project "$L4" >/dev/null
+TS_L4=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)
+L4POST_DOC='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+L4PSHA="$(printf '%s\n' "$L4POST_DOC" | sha256sum 2>/dev/null | awk '{print $1}')"
+L4PRE="$(sha256_file "$L4/feature_list.json")"
+printf '%s\n' "garbage not json" > "$L4JP"
+L4REC_FEATURES='[{"id":"F-001","status":"not_started","evidence_associations":[],"legacy_audit_evidence":[]}]'
+L4REC="$(printf '{"revision":1,"features":%s,"_recorded_sha":"%s"}' "$L4REC_FEATURES" "$L4PRE")"
+jr_l4=0; journal_replay "$L4" "$L4REC" >/dev/null 2>&1 || jr_l4=$?
+check "L4a: replay rejects corrupt journal (fail-closed)" "1" "$jr_l4"
+
+# L5: positive control — a real, well-formed journal pair still passes after
+# the fix. Pins that the journal_corrupt branch is INDEPENDENT of the
+# strict-pairing logic (regression guard: a fix must not break valid pairs).
+L5="$(mktemp -d "$TMPDIR/l5-XXXX")"
+mkdir -p "$L5/.harness"
+L5JP="$L5/.harness/registry-journal.ndjson"
+setup_project "$L5" >/dev/null
+L5OK="$(journal_record_pending "$L5" "status" "F-001" "not_started" "in_progress" --revision 2 --post-sha "$(printf '%s\n' '{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}' | sha256sum 2>/dev/null | awk '{print $1}')")"
+printf '%s\n' '{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}' > "$L5/feature_list.json"
+journal_record_committed "$L5" "$L5OK" "$(sha256_file "$L5/feature_list.json")"
+V_L5="$(journal_verify_pairs "$L5")"; rc_l5=$?
+check "L5a: well-formed pair still passes (positive control)" "0" "$rc_l5"
+check "L5b: well-formed pair empty reason" "" "$V_L5"
+
 echo ""
 echo "Journal-Strict-Contract Results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

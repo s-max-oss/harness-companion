@@ -124,6 +124,14 @@ _dwm_validate_branch_gate_first_add() {
   # cannot be validated without it, so missing/malformed/untargeted PLAN is
   # REJECTED (fail-closed), never silently allowed.
   local plan="$project_dir/.harness/PLAN.json"
+  # Codex r4: a SYMLINK at the PLAN path is tampering, not a state file. It
+  # must NOT bypass validation by resolving to a regular file (or a dangling
+  # target) elsewhere — `[ -f ]` follows symlinks, so without this explicit
+  # guard a symlink → valid-plan would be accepted, allowing the baseline
+  # gate's branch policy to be redirected to an attacker-controlled file.
+  # Reject before any follow-the-link test (matches the branch-gate
+  # symlink_rejected treatment immediately above).
+  if [ -L "$plan" ]; then echo "plan_symlink"; return 0; fi
   if [ ! -f "$plan" ]; then echo "plan_missing"; return 0; fi
   if ! jq -e 'type == "object"' "$plan" >/dev/null 2>&1; then echo "plan_bad_json"; return 0; fi
   local target
@@ -292,6 +300,28 @@ dwm_emit_manifest() {
         done
       fi
     done < <(git status --porcelain=v1 --untracked-files=all 2>/dev/null)
+
+    # Codex r4 fix: enumerate .harness/logs/runs/*.ndjson even when gitignored.
+    # The directory is in .gitignore (`# Harness runtime artifacts`), so
+    # `git status --porcelain --untracked-files=all` never reports individual
+    # run-log files; without this enumeration, deletions and rewrites of run
+    # logs are INVISIBLE to the manifest gate. The per-class rule
+    # `.harness/logs/runs/*.ndjson — existing run NDJSON must stay BYTE-EQUAL`
+    # already covers the byte-equality contract — the missing piece is the
+    # enumeration itself, so the gate can compare current vs recorded and
+    # detect removals/rewrites. Marker `!!` distinguishes "gitignored,
+    # manifest-enumerated" from the `??` untracked git-status entries (the
+    # field is diagnostic only — the compare logic does not act on it).
+    # Ancestor directory records for the run path are already emitted by the
+    # `git status` loop above when any peer sibling file is reported; here we
+    # only need the file records.
+    if [ -d ".harness/logs/runs" ]; then
+      while IFS= read -r rpath; do
+        [ -n "$rpath" ] || continue
+        case "$rpath" in *.ndjson) dwm_record ".harness/logs/runs/$rpath" "!!" ;; esac
+      done < <(cd ".harness/logs/runs" && find . -name '*.ndjson' -type f -printf '%P\n' 2>/dev/null \
+        | sed 's|^\./||' | LC_ALL=C sort)
+    fi
   ) > "$tmp"
   local rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -377,7 +407,6 @@ dwm_compare_manifest() {
   fi
 
   # ---- P0-5: classify each content-changed mutable path (needs disk reads) ----
-  local mutable_violations=() appended_mutable=() feature_advanced=() content_changed_mutable=()
 
   # ---- Contract 4: branch-gate.json FIRST-ADD is validated, not just allowed --
   # A brand-new branch-gate.json may NOT enter through the mutable-namespace

@@ -958,6 +958,133 @@ RES="$(dwm_compare_manifest "$D" "$OUT")"
 check "D11a: first-add base != master tip (target ahead) invalid" false "$(printf '%s' "$RES" | jq -r '.valid')"
 check "D11b: violation invalid_branch_gate detail not_first_baseline" "1" "$(printf '%s' "$RES" | jq -r '[.violations[] | select(.path == ".harness/branch-gate.json" and .reason == "invalid_branch_gate" and (.detail | test("not_first_baseline")))] | length')"
 
+# ---- T37 (Codex r4): gitignored run log REMOVAL must be detected ------------
+# The .harness/logs/ directory IS in .gitignore, so `git status --porcelain`
+# never reports run-log files. The manifest must enumerate them directly so a
+# deletion of a recorded run is detectable (without this fix the deletion is
+# invisible to the gate — `valid=true` even after the run is gone).
+D="$(mktemp -d "$TMPDIR/t37-XXXX")"
+setup_repo "$D"
+# Make .harness/logs/ gitignored (matches the real repo's .gitignore).
+printf '.harness/logs/\n' >> "$D/.gitignore"
+git -C "$D" add .gitignore
+git -C "$D" -c user.email=t@e.com -c user.name=t commit -q -m "ignore logs" 2>/dev/null
+# The file is in the dir we just gitignored — git status no longer reports it.
+printf 'run-1\n' > "$D/.harness/logs/runs/run-1.ndjson"
+OUT="$(mf "$D" t37)"
+dwm_emit_manifest "$D" "$OUT"
+# The manifest MUST contain the run-log record (Codex r4 fix).
+HAS_RUN="$(jq -r 'select(.path == ".harness/logs/runs/run-1.ndjson") | .path' "$OUT" | head -1)"
+check "T37a: gitignored run-log file enumerated by manifest" ".harness/logs/runs/run-1.ndjson" "$HAS_RUN"
+# Marker `!!` distinguishes manifest-enumerated gitignored entries from
+# the `??` git-status untracked entries (diagnostic only — compare logic
+# does not act on git_status, but the field must be present and non-null).
+GIT_ST="$(jq -r 'select(.path == ".harness/logs/runs/run-1.ndjson") | .git_status' "$OUT")"
+check "T37b: run-log record carries manifest-enumerated marker" "!!" "$GIT_ST"
+# Baseline gates valid: nothing else has changed.
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T37c: gitignored-run baseline valid" true "$(printf '%s' "$RES" | jq -r '.valid')"
+# Now REMOVE the recorded run log — must be detected.
+rm "$D/.harness/logs/runs/run-1.ndjson"
+RES2="$(dwm_compare_manifest "$D" "$OUT")"
+check "T37d: gitignored run-log removal invalid" false "$(printf '%s' "$RES2" | jq -r '.valid')"
+check "T37e: violation reason removed" "removed" "$(printf '%s' "$RES2" | jq -r '.violations[] | select(.path == ".harness/logs/runs/run-1.ndjson") | .reason')"
+check "T37f: exactly one violation" 1 "$(printf '%s' "$RES2" | jq '.violations | length')"
+
+# ---- T38 (Codex r4): gitignored run log REWRITE must be detected -------------
+# Same gitignored dir — a recorded run's bytes get rewritten; the per-class
+# rule (`.harness/logs/runs/*.ndjson — existing run NDJSON must stay BYTE-EQUAL`)
+# must fire even though git status never saw the file in the first place.
+D="$(mktemp -d "$TMPDIR/t38-XXXX")"
+setup_repo "$D"
+printf '.harness/logs/\n' >> "$D/.gitignore"
+git -C "$D" add .gitignore
+git -C "$D" -c user.email=t@e.com -c user.name=t commit -q -m "ignore logs" 2>/dev/null
+printf 'run-1\n' > "$D/.harness/logs/runs/run-1.ndjson"
+OUT="$(mf "$D" t38)"
+dwm_emit_manifest "$D" "$OUT"
+# Rewrite the run-log bytes.
+printf 'run-1-REWRITTEN\n' > "$D/.harness/logs/runs/run-1.ndjson"
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T38a: gitignored run-log rewrite invalid" false "$(printf '%s' "$RES" | jq -r '.valid')"
+check "T38b: violation reason not_byte_equal" "not_byte_equal" "$(printf '%s' "$RES" | jq -r '.violations[] | select(.path == ".harness/logs/runs/run-1.ndjson") | .reason')"
+check "T38c: exactly one violation" 1 "$(printf '%s' "$RES" | jq '.violations | length')"
+
+# ---- T39 (Codex r4): gitignored NEW run log → allowed_new (positive) ----------
+# Same gitignored dir — adding a new run-log file is allowed (mutable namespace
+# new path), confirming the new enumeration integrates with allowed_new instead
+# of being misclassified as new_non_mutable.
+D="$(mktemp -d "$TMPDIR/t39-XXXX")"
+setup_repo "$D"
+printf '.harness/logs/\n' >> "$D/.gitignore"
+git -C "$D" add .gitignore
+git -C "$D" -c user.email=t@e.com -c user.name=t commit -q -m "ignore logs" 2>/dev/null
+# A recorded run-log establishes the baseline's run-log inventory.
+printf 'run-1\n' > "$D/.harness/logs/runs/run-1.ndjson"
+OUT="$(mf "$D" t39)"
+dwm_emit_manifest "$D" "$OUT"
+# Add a NEW run-log file.
+printf 'run-2\n' > "$D/.harness/logs/runs/run-2.ndjson"
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T39a: new gitignored run-log valid" true "$(printf '%s' "$RES" | jq -r '.valid')"
+check "T39b: run-2.ndjson in allowed_new" "1" "$(printf '%s' "$RES" | jq '[.allowed_new[] | select(. == ".harness/logs/runs/run-2.ndjson")] | length')"
+check "T39c: no violations" 0 "$(printf '%s' "$RES" | jq '.violations | length')"
+
+# ---- D12 (Codex r4): symlink PLAN.json is rejected, not followed ------------
+# `[ -f ]` follows symlinks, so without the explicit symlink guard a symlink →
+# valid-PLAN would be accepted, allowing the baseline gate's branch policy to
+# be redirected to an attacker-controlled file. Symlink creation is
+# platform-gated (see D6); where unsupported the assertion is skipped.
+D="$(mktemp -d "$TMPDIR/d12-XXXX")"
+setup_repo "$D"
+OUT="$(mf "$D" d12)"
+dwm_emit_manifest "$D" "$OUT"
+base_sha="$(git -C "$D" rev-parse HEAD)"
+# Build a real PLAN.json at a separate path, then redirect via symlink.
+TMP_PLAN="$(mktemp -d)"
+printf '%s\n' '{"schema_version":1,"branch_gate":{"target_branch":"master"}}' > "$TMP_PLAN/real-plan.json"
+if ln -s "$TMP_PLAN/real-plan.json" "$D/.harness/PLAN.json" 2>/dev/null; then
+  printf '%s' "{\"schema_version\":1,\"branch_base_sha\":\"$base_sha\",\"branch_name\":\"master\"}" > "$D/.harness/branch-gate.json"
+  RES="$(dwm_compare_manifest "$D" "$OUT")"
+  check "D12a: symlink PLAN.json invalid" false "$(printf '%s' "$RES" | jq -r '.valid')"
+  check "D12b: violation invalid_branch_gate detail plan_symlink" "1" "$(printf '%s' "$RES" | jq -r '[.violations[] | select(.path == ".harness/branch-gate.json" and .reason == "invalid_branch_gate" and (.detail | test("plan_symlink")))] | length')"
+else
+  echo "  [SKIP] D12 symlink PLAN.json — symlink creation unsupported on this platform"
+fi
+rm -rf "$TMP_PLAN"
+
+# ---- D13 (Codex r4): config-validate also rejects symlink config.json --------
+# The same symlink-following bug lives in validate_config_schema: `[ -f ]`
+# follows symlinks, so a symlink → valid-config would be accepted, allowing
+# verification policy to be redirected to an attacker-controlled file. This
+# pins the related vulnerability at the config-validate layer. Symlink
+# creation is platform-gated (see D6 / D12); on Windows Git Bash `ln -s`
+# silently creates a regular file copy, defeating the test — skip there.
+D="$(mktemp -d "$TMPDIR/d13-XXXX")"
+mkdir -p "$D/.harness"
+TMP_CFG="$(mktemp -d)"
+printf '%s\n' '{"project_type":"generic","verification":{"commands":[]}}' > "$TMP_CFG/real.json"
+ln -s "$TMP_CFG/real.json" "$D/.harness/config.json" 2>/dev/null
+# Probe: did the symlink survive? `readlink` returns the target only for real
+# symlinks; on Windows Git Bash `ln -s` falls back to a file copy and the
+# test cannot exercise the symlink path.
+if [ -L "$D/.harness/config.json" ]; then
+  # shellcheck disable=SC1090
+  if source "$ROOT_DIR/core/lib/config-validate.sh" 2>/dev/null; then
+    rc=0; out="$(validate_config_schema "$D/.harness/config.json" 2>&1)"; rc=$?
+    check "D13a: symlink config.json → nonzero" "1" "$rc"
+    case "$out" in
+      *symlink*) check "D13b: detail mentions symlink" "1" "1" ;;
+      *) check "D13b: detail mentions symlink" "1" "0" ;;
+    esac
+  else
+    echo "  [SKIP] D13 config-validate symlink — could not source validator"
+  fi
+else
+  echo "  [SKIP] D13 config-validate symlink — symlink creation unsupported on this platform"
+fi
+rm -rf "$TMP_CFG"
+
 echo ""
 echo "Dirty-Worktree-Manifest Results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

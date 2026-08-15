@@ -517,11 +517,17 @@ journal_verify_pairs() {
   # journal.
   local jp; jp="${2:-$(journal_path "$dir")}"
   [ -f "$jp" ] || return 0
-  local reason
+  local reason jq_rc jq_out
   # -s (slurp): the journal is NDJSON; the pairing contract is CROSS-LINE, so the
   # whole file must be evaluated as one array (without -s jq would evaluate the
   # program per line and never see duplicates/withouts).
-  reason="$(jq -rs '
+  # Codex r4: a corrupt NDJSON line would cause jq to fail (exit != 0) and
+  # print nothing on stdout; the previous `2>/dev/null` swallowed the error
+  # message and the function silently returned valid. Fail-CLOSED: capture
+  # jq's exit code and any stdout, and treat any non-zero exit OR empty output
+  # against a non-empty file as a `journal_corrupt` violation. A journal that
+  # we cannot parse cannot be trusted to be a valid pairing record.
+  jq_out="$(jq -rs '
     [ .[] | select(.pending == true) ] as $pend
     | [ .[] | select(.op == "commit" and .pending == false) ] as $comm
     | [ $pend[].op_key ] as $pk
@@ -554,7 +560,35 @@ journal_verify_pairs() {
       elif ($nRev > 0) then "pending_no_revision"
       elif ($nEff > 0) then "pending_no_expected_sha"
       elif ($nPair > 0) then "sha_after_mismatch"
-      else "" end' "$jp" 2>/dev/null | tr -d '\r')"
+      else "" end' "$jp" 2>/dev/null)"
+  jq_rc=$?
+  reason="$(printf '%s' "$jq_out" | tr -d '\r')"
+  # Codex r4: fail-closed on jq parse error. A journal we cannot parse cannot
+  # be trusted as a valid pairing record. The same fail-closed rule covers
+  # an empty journal (zero non-blank lines) — `jq -rs` over an empty input
+  # succeeds with stdout `[]`-empty and reason "", which the old code treated
+  # as valid. An empty journal is a meaningless audit trail: reject so a
+  # tampered or zero-content journal cannot pass.
+  if [ "$jq_rc" -ne 0 ]; then
+    echo "journal-verify-pairs: journal_corrupt (jq parse error, rc=$jq_rc)" >&2
+    printf '%s' "journal_corrupt"
+    return 1
+  fi
+  if [ -z "$reason" ]; then
+    # Cross-check: a journal whose every line parsed but that contained zero
+    # non-blank lines is corrupt by design (NDJSON that is fully empty passes
+    # `jq -rs` as `[]`, no violation, and silently accepts what is in fact no
+    # audit trail at all). Distinguish "valid empty array" from "missing or
+    # blank-only file" by counting non-blank lines; both must agree — `0` ⇒
+    # journal_corrupt (the gate must never trust a zero-line audit trail).
+    local nonempty
+    nonempty="$(grep -c '[^[:space:]]' "$jp" 2>/dev/null | tr -d '\r' || true)"
+    if [ "${nonempty:-0}" = "0" ]; then
+      echo "journal-verify-pairs: journal_corrupt (zero non-blank lines)" >&2
+      printf '%s' "journal_corrupt"
+      return 1
+    fi
+  fi
   if [ -n "$reason" ]; then
     echo "journal-verify-pairs: $reason" >&2
     printf '%s' "$reason"

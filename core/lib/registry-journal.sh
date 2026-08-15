@@ -466,15 +466,43 @@ journal_migrate_legacy() {
   # 4) Migration fully written and validated — commit. Atomic replace keeps the
   #    journal consistent (no partial append observable); the legacy file is
   #    only processed AFTER the canonical journal is installed.
+  #
+  #    Snapshot the canonical journal bytes BEFORE the mv. If the subsequent
+  #    rm of the legacy file fails, restore the snapshot so the caller's view
+  #    of "both files exactly as they were" is preserved even when the rm
+  #    step itself fails — otherwise a successful mv with a failed rm would
+  #    leave the legacy file behind and the caller would see rc=1, hiding the
+  #    fact that migration actually succeeded (Codex r5 defect, Critical #3).
+  local jp_snapshot; jp_snapshot="$(mktemp "$dir/.harness/.migrate-rollback.XXXXXX")" || {
+    rm -f "$probe"; echo "journal-migrate: cannot create rollback snapshot" >&2; return 1; }
+  if ! cp -f "$jp" "$jp_snapshot" 2>/dev/null; then
+    rm -f "$probe" "$jp_snapshot"
+    echo "journal-migrate: cannot snapshot pre-migration journal" >&2
+    return 1
+  fi
   if ! mv -f "$probe" "$jp"; then
-    rm -f "$probe"
+    rm -f "$probe" "$jp_snapshot"
     echo "journal-migrate: cannot install migrated journal" >&2
     return 1
   fi
   if ! rm -f "$legacy"; then
-    echo "journal-migrate: journal migrated but cannot remove legacy file ($legacy)" >&2
+    # Legacy file could not be removed — roll back the canonical journal to
+    # its pre-migration bytes so the caller's view of "both files untouched
+    # on failure" holds. If the rollback mv itself fails (which would be a
+    # filesystem-level disaster), we have nothing else to do — fail closed
+    # with both states now inconsistent. The journal IS migrated at that
+    # point; subsequent callers see checkpoint_migrated on the journal side
+    # and re-attempt the legacy cleanup via the idempotent path above.
+    if ! mv -f "$jp_snapshot" "$jp" 2>/dev/null; then
+      echo "journal-migrate: FATAL — journal migrated AND rollback failed ($legacy still present)" >&2
+      rm -f "$jp_snapshot"
+      return 1
+    fi
+    rm -f "$jp_snapshot"
+    echo "journal-migrate: cannot remove legacy file ($legacy); rolled back journal" >&2
     return 1
   fi
+  rm -f "$jp_snapshot"
 
   # 5) Durability flush (best-effort platform guard: MSYS provides sync as a
   #    no-op that still returns 0; if a real sync exists and fails, fail closed).
@@ -535,8 +563,9 @@ journal_verify_pairs() {
     | (([$pk | group_by(.)[] | select(length > 1) | .[0]] | length) > 0) as $dupP
     | (([$ck | group_by(.)[] | select(length > 1) | .[0]] | length) > 0) as $dupC
     | (([$ck[] | select(($pk | index(.)) == null)] | length) > 0) as $noP
-    | ([ .[] | select(.op == "recovery_backfill") ]
-        | map({key:.op_key, value:.expected_post_sha}) | from_entries) as $bf
+    | ([ .[] | select(.op == "recovery_backfill") ]) as $bfAll
+    | (([$bfAll | group_by(.op_key)[] | select(length > 1) | .[0].op_key] | length) > 0) as $dupBf
+    | ([ $bfAll | map({key:.op_key, value:.expected_post_sha}) | from_entries] | add // {}) as $bf
     | ([ $pk[] as $k
          | select(($ck | index($k)) != null)
          | ([ $pend[] | select(.op_key == $k) ][0]) as $p
@@ -556,6 +585,7 @@ journal_verify_pairs() {
     | ([ $bad[] | select(.badPair and (.badEff | not)) ] | length) as $nPair
     | if $dupP then "duplicate_pending"
       elif $dupC then "duplicate_commit"
+      elif $dupBf then "duplicate_backfill"
       elif $noP then "commit_without_pending"
       elif ($nRev > 0) then "pending_no_revision"
       elif ($nEff > 0) then "pending_no_expected_sha"

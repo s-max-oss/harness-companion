@@ -383,6 +383,37 @@ printf '%s\n' "$POST_I6" > "$I7/feature_list.json"
 rc_i=0; out_i="$(journal_record_committed "$I7" "ffffffffffffffff" "$PSHA_I7" 2>&1)"; rc_i=$?
 check "I7a: commit accepts pending with recovery_backfill present" "0" "$rc_i"
 
+# I8: Critical #2 — duplicate recovery_backfill op_key MUST be detected and
+# rejected. Previously the `from_entries` collapse at registry-journal.sh:538
+# silently kept only the LAST backfill SHA for any op_key, hiding a third
+# orphan SHA from the verifier. The fix detects `group_by(.op_key) | length>1`
+# and rejects with `duplicate_backfill`. Construct a journal with TWO
+# recovery_backfill records on the same op_key (different SHAs — the third
+# orphan) and verify_pairs must reject.
+I8="$(mktemp -d "$TMPDIR/i8-XXXX")"
+mkdir -p "$I8/.harness"
+printf '%s\n' "$REV0_I6" > "$I8/feature_list.json"
+TS_I8="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)"
+PRE_I8="$(sha256_file "$I8/feature_list.json")"
+PSHA_I8_A="$(printf '%s\n' "$POST_I6" | sha256sum | awk '{print $1}')"
+PSHA_I8_B="$(printf '%s\n' "$POST_I6-forged" | sha256sum | awk '{print $1}')"
+printf '%s\n' "{\"ts\":\"$TS_I8\",\"op\":\"journal_init\",\"revision\":0,\"feature_id\":null,\"from\":null,\"to\":null,\"pending\":false,\"op_key\":null,\"feature_list_sha_before\":null,\"feature_list_sha_after\":null,\"evidence_run_ids_after\":[],\"run_id\":null}" > "$I8/.harness/registry-journal.ndjson"
+printf '%s\n' "{\"ts\":\"$TS_I8\",\"op\":\"status\",\"feature_id\":\"F-001\",\"from\":\"not_started\",\"to\":\"in_progress\",\"revision\":2,\"pending\":true,\"op_key\":\"1111111111111111\",\"feature_list_sha_before\":\"$PRE_I8\",\"feature_list_sha_after\":null,\"evidence_run_ids_after\":[],\"run_id\":null}" >> "$I8/.harness/registry-journal.ndjson"
+printf '%s\n' "{\"ts\":\"$TS_I8\",\"op\":\"commit\",\"feature_id\":null,\"from\":null,\"to\":null,\"revision\":2,\"pending\":false,\"op_key\":\"1111111111111111\",\"feature_list_sha_before\":null,\"feature_list_sha_after\":\"$PSHA_I8_A\",\"evidence_run_ids_after\":[],\"run_id\":null}" >> "$I8/.harness/registry-journal.ndjson"
+# Two recovery_backfill records for the SAME op_key with DIFFERENT SHAs — the
+# second is the third-SHA orphan that `from_entries` used to silently hide.
+printf '%s\n' "{\"ts\":\"$TS_I8\",\"op\":\"recovery_backfill\",\"op_key\":\"1111111111111111\",\"expected_post_sha\":\"$PSHA_I8_A\",\"reason\":\"first backfill (deterministic)\"}" >> "$I8/.harness/registry-journal.ndjson"
+printf '%s\n' "{\"ts\":\"$TS_I8\",\"op\":\"recovery_backfill\",\"op_key\":\"1111111111111111\",\"expected_post_sha\":\"$PSHA_I8_B\",\"reason\":\"third-SHA orphan that from_entries used to hide\"}" >> "$I8/.harness/registry-journal.ndjson"
+rc_i=0; out_i="$(journal_verify_pairs "$I8" 2>/dev/null)"; rc_i=$?
+check "I8a: duplicate recovery_backfill rejected (rc 1)" "1" "$rc_i"
+check "I8b: token duplicate_backfill" "duplicate_backfill" "$(printf '%s' "$out_i" | tr -d '\r' | head -c 256 | grep -oE 'duplicate_backfill' || true)"
+# Even if the SHAs were identical (still two records on the same op_key) the
+# contract requires a single backfill per op_key — confirm.
+printf '%s\n' "$POST_I6" > "$I8/feature_list.json"
+# Sanity: ensure journal_verify_pairs does NOT silently accept the journal
+# (the very behavior that hid the third SHA before the fix).
+check "I8c: rc is non-zero (fail-closed)" "1" "$rc_i"
+
 # ---- K: legacy migration fail-atomic (Codex item 4) ------------------------
 # Three mid-stage failure scenarios each MUST restore the canonical journal AND
 # the legacy file to their pre-migration byte-identical state. The "no swap
@@ -451,6 +482,54 @@ check "K3b: canonical journal byte-identical (untouched on install failure)" "1"
 check "K3c: legacy file preserved on install failure" "1" "$( [ -f "$K3LEG" ] && echo 1 || echo 0 )"
 check "K3d: legacy bytes byte-identical on install failure" "1" "$( [ "$K3_LEG_BEFORE" = "$(cat "$K3LEG")" ] && echo 1 || echo 0 )"
 check "K3e: no checkpoint marker minted" "0" "$(count_in 'checkpoint_migrated' "$K3JP")"
+
+# K4: rm-legacy failure → roll back canonical journal so the caller's view of
+# "both files untouched on failure" still holds. Previously the migration
+# function would successfully mv the probe into the canonical journal but
+# fail to remove the legacy file, returning nonzero while the data was in
+# fact migrated — leaving the caller uncertain about the actual state. The
+# Codex r5 defect (Critical #3) fix snapshots the canonical journal BEFORE
+# the mv and restores it on rm-legacy failure.
+K4="$(mktemp -d "$TMPDIR/k4-XXXX")"
+mkdir -p "$K4/.harness/.registry.lock"
+K4JP="$K4/.harness/registry-journal.ndjson"
+K4LEG="$K4/.harness/.registry.lock/journal.ndjson"
+setup_project "$K4" >/dev/null
+TS_K4=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)
+K4PRE="$(sha256_file "$K4/feature_list.json")"
+K4POST='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+K4PSHA="$(printf '%s\n' "$K4POST" | sha256sum 2>/dev/null | awk '{print $1}')"
+printf '%s\n' "{\"ts\":\"$TS_K4\",\"op\":\"status\",\"feature_id\":\"F-001\",\"from\":\"not_started\",\"to\":\"in_progress\",\"revision\":2,\"pending\":true,\"op_key\":\"dddddddddddddddd\",\"feature_list_sha_before\":\"$K4PRE\",\"feature_list_sha_after\":\"$K4PSHA\",\"evidence_run_ids_after\":[],\"run_id\":null}" > "$K4LEG"
+printf '%s\n' "{\"ts\":\"$TS_K4\",\"op\":\"commit\",\"feature_id\":\"F-001\",\"from\":\"not_started\",\"to\":\"in_progress\",\"revision\":2,\"pending\":false,\"op_key\":\"dddddddddddddddd\",\"feature_list_sha_before\":\"$K4PRE\",\"feature_list_sha_after\":\"$K4PSHA\",\"evidence_run_ids_after\":[],\"run_id\":null}" >> "$K4LEG"
+K4_JP_BEFORE="$(cat "$K4JP")"
+K4_LEG_BEFORE="$(cat "$K4LEG")"
+# Override `rm` so only the legacy-cleanup call fails. We let all other rm
+# calls (probe/snapshot cleanup) pass through — detect the legacy path by
+# checking if the target path contains ".registry.lock/journal.ndjson".
+rc=0
+output="$( (
+  rm() {
+    case "$*" in
+      *".registry.lock/journal.ndjson"*) return 1 ;;
+      *) command rm "$@" ;;
+    esac
+  }
+  export -f rm
+  journal_migrate_legacy "$K4"
+) 2>&1)"
+rc=$?
+check "K4a: rm-legacy failure → nonzero" "1" "$rc"
+check "K4b: canonical journal ROLLED BACK to pre-migration bytes" "1" "$( [ "$K4_JP_BEFORE" = "$(cat "$K4JP")" ] && echo 1 || echo 0 )"
+check "K4c: legacy file preserved on rm-legacy failure" "1" "$( [ -f "$K4LEG" ] && echo 1 || echo 0 )"
+check "K4d: legacy bytes byte-identical on rm-legacy failure" "1" "$( [ "$K4_LEG_BEFORE" = "$(cat "$K4LEG")" ] && echo 1 || echo 0 )"
+check "K4e: no checkpoint marker minted after rollback" "0" "$(count_in 'checkpoint_migrated' "$K4JP")"
+# After rollback, a fresh call to migrate_legacy should see the same legacy
+# state and succeed cleanly (no leftover rollback snapshot, idempotent path).
+K4_JP_AFTER_ROLLBACK="$(cat "$K4JP")"
+rc=0; journal_migrate_legacy "$K4" >/dev/null 2>&1 || rc=$?
+check "K4f: re-migration succeeds cleanly after rollback" "0" "$rc"
+check "K4g: canonical journal is now migrated (has checkpoint marker)" "1" "$(count_in 'checkpoint_migrated' "$K4JP")"
+check "K4h: legacy file removed after re-migration" "0" "$( [ -f "$K4LEG" ] && echo 1 || echo 0 )"
 
 # ============================================================================
 # L: Codex r4 — journal_verify_pairs MUST fail-closed on a corrupt NDJSON line.

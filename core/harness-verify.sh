@@ -381,8 +381,11 @@ while IFS= read -r -u 3 cmd_id; do
   # Prepare log artifact path
   LOG_FILE="$RUN_DIR/${cmd_id}.log"
 
-  # Resolve timeout
+  # Resolve timeout (env var HARNESS_VERIFY_TIMEOUT_OVERRIDE can raise cap for slow hosts)
   TIMEOUT_SECS="$(printf '%s' "$CMD_JSON" | jq -r '.timeout_seconds // 300')"
+  if [ -n "${HARNESS_VERIFY_TIMEOUT_OVERRIDE:-}" ]; then
+    TIMEOUT_SECS="$HARNESS_VERIFY_TIMEOUT_OVERRIDE"
+  fi
 
   START_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   START_MS="$(date +%s)000"

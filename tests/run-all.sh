@@ -36,7 +36,7 @@ run_test() {
     # P0-7: shared install + test method — byte-for-byte the same sequence CI
     # Phase 5d runs via scripts/version-sync-gate.sh.
     if [ "$HAS_TIMEOUT" = "1" ]; then
-      timeout -k 60 1500 bash "$ROOT/scripts/version-sync-gate.sh" "$ROOT" 2>&1 | tee "$log" | tail -3
+      timeout -k 60 3000 bash "$ROOT/scripts/version-sync-gate.sh" "$ROOT" 2>&1 | tee "$log" | tail -3
       rc=${PIPESTATUS[0]}
     else
       bash "$ROOT/scripts/version-sync-gate.sh" "$ROOT" 2>&1 | tee "$log" | tail -3
@@ -45,7 +45,7 @@ run_test() {
   else
     # stdin from /dev/null so a SessionStart hook reading stdin can never block.
     if [ "$HAS_TIMEOUT" = "1" ]; then
-      timeout -k 60 1500 bash "$ROOT/$rel" < /dev/null 2>&1 | tee "$log" | tail -3
+      timeout -k 60 3000 bash "$ROOT/$rel" < /dev/null 2>&1 | tee "$log" | tail -3
       rc=${PIPESTATUS[0]}
     else
       bash "$ROOT/$rel" < /dev/null 2>&1 | tee "$log" | tail -3

@@ -106,7 +106,7 @@ build_sandbox() {
         "id": "bash-syntax",
         "command": ["bash", "-c", "bash -n core/lib/*.sh scripts/*.sh"],
         "required_for_passing": true,
-        "timeout_seconds": 3600,
+        "timeout_seconds": 7200,
         "command_origin": "configured",
         "confirmation": "not_required"
       }

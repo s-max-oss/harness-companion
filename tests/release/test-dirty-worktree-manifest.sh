@@ -45,6 +45,9 @@ source "$ROOT_DIR/core/lib/dirty-worktree-manifest.sh"
 # append-only mutation journal exactly like the CLI's two-phase commit.
 # shellcheck source=../../core/lib/registry-journal.sh
 source "$ROOT_DIR/core/lib/registry-journal.sh"
+# Codex r7: the runtime-artifact byte-binding registry (writer-side register).
+# shellcheck source=../../core/lib/runtime-manifest.sh
+source "$ROOT_DIR/core/lib/runtime-manifest.sh"
 
 PASSED=0
 FAILED=0
@@ -1029,6 +1032,51 @@ RES="$(dwm_compare_manifest "$D" "$OUT")"
 check "T39a: new gitignored run-log valid" true "$(printf '%s' "$RES" | jq -r '.valid')"
 check "T39b: run-2.ndjson in allowed_new" "1" "$(printf '%s' "$RES" | jq '[.allowed_new[] | select(. == ".harness/logs/runs/run-2.ndjson")] | length')"
 check "T39c: no violations" 0 "$(printf '%s' "$RES" | jq '.violations | length')"
+
+# ---- T40 (Codex r7 item 3): runtime-artifact byte-binding — joint tamper -----
+# The frozen fixture pre-dates the canonical run, so its NDJSON + command log +
+# reviewer verdict enter as `allowed_new` and are NOT byte-bound by the fixture.
+# The runtime-manifest registry binds their first-seen bytes; once registered, a
+# joint tamper of NDJSON + log + verdict must fail the formal DWM gate even
+# though NONE of the three is in the recorded fixture (all three are allowed_new
+# — without the registry the gate would return valid=true and the tamper would
+# be invisible). This pins the "no long-term allowed_new bypass" contract.
+D="$(mktemp -d "$TMPDIR/t40-XXXX")"
+setup_repo "$D"
+OUT="$(mf "$D" t40)"
+dwm_emit_manifest "$D" "$OUT"
+# Canonical-run artifacts that post-date the recorded fixture:
+printf 'run-2\n' > "$D/.harness/logs/runs/run-2.ndjson"
+mkdir -p "$D/.harness/logs/runs/run-2"
+printf 'full-suite log\n' > "$D/.harness/logs/runs/run-2/full-suite.log"
+printf 'verdict-2\n' > "$D/.harness/reviews/feature/F-CONV-02.jsonl"
+# Bind their first-seen bytes exactly as the writers/bootstrap would.
+runtime_register "$D" ".harness/logs/runs/run-2.ndjson" "ndjson"
+runtime_register "$D" ".harness/logs/runs/run-2/full-suite.log" "log"
+runtime_register "$D" ".harness/reviews/feature/F-CONV-02.jsonl" "verdict"
+# Joint tamper: rewrite NDJSON + log in place, and rewrite (not append) the verdict.
+printf 'run-2-TAMPERED\n' > "$D/.harness/logs/runs/run-2.ndjson"
+printf 'full-suite log TAMPERED\n' > "$D/.harness/logs/runs/run-2/full-suite.log"
+printf 'verdict-2-TAMPERED\n' > "$D/.harness/reviews/feature/F-CONV-02.jsonl"
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T40a: joint tamper of registered allowed_new artifacts invalid" false "$(printf '%s' "$RES" | jq -r '.valid')"
+check "T40b: run NDJSON tamper → runtime_artifact_not_byte_equal" "1" "$(printf '%s' "$RES" | jq -r '[.violations[] | select(.path == ".harness/logs/runs/run-2.ndjson" and .reason == "runtime_artifact_not_byte_equal")] | length')"
+check "T40c: command log tamper → runtime_artifact_not_byte_equal" "1" "$(printf '%s' "$RES" | jq -r '[.violations[] | select(.path == ".harness/logs/runs/run-2/full-suite.log" and .reason == "runtime_artifact_not_byte_equal")] | length')"
+check "T40d: verdict tamper → runtime_artifact_not_append_only" "1" "$(printf '%s' "$RES" | jq -r '[.violations[] | select(.path == ".harness/reviews/feature/F-CONV-02.jsonl" and .reason == "runtime_artifact_not_append_only")] | length')"
+
+# ---- T41 (Codex r7 item 3): registered verdict APPEND stays valid ------------
+# A legitimate re-review APPENDS one record; the registry's append-only binding
+# (registered bytes are a PREFIX of current) must NOT flag it — the negative
+# T40 proves tamper detection, this positive pins the no-false-positive side.
+D="$(mktemp -d "$TMPDIR/t41-XXXX")"
+setup_repo "$D"
+OUT="$(mf "$D" t41)"
+dwm_emit_manifest "$D" "$OUT"
+runtime_register "$D" ".harness/reviews/feature/F-CONV-01.jsonl" "verdict"
+printf 'verdict-1-APPENDED\n' >> "$D/.harness/reviews/feature/F-CONV-01.jsonl"
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T41a: registered verdict append still valid" true "$(printf '%s' "$RES" | jq -r '.valid')"
+check "T41b: no runtime_artifact violations" 0 "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason | startswith("runtime_artifact"))] | length')"
 
 # ---- D12 (Codex r4): symlink PLAN.json is rejected, not followed ------------
 # `[ -f ]` follows symlinks, so without the explicit symlink guard a symlink →

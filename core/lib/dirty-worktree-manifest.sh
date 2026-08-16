@@ -64,6 +64,7 @@ DWM_MUTABLE=(
   ".harness/logs/runs/"
   ".harness/reviews/"
   ".harness/registry-journal.ndjson"
+  ".harness/runtime-manifest.jsonl"
   ".harness/.registry.lock/"
   ".harness/branch-gate.json"
   "feature_list.json"
@@ -515,6 +516,22 @@ dwm_compare_manifest() {
           mutable_violations+=("$(jq -nc --arg p "$p" '{path:$p, reason:"not_append_only"}')")
         fi
         ;;
+      ".harness/runtime-manifest.jsonl")
+        # Codex r7: the byte-binding registry is itself append-only — new
+        # registrations append NEW lines, existing lines are never rewritten.
+        # Same recorded-PREFIX-vs-current verification as reviews/journal.
+        local rec_sha rec_size actual=""
+        rec_sha="$(jq -r --arg p "$p" 'select(.path == $p) | .sha256 // ""' "$recorded" | head -1)"
+        rec_size="$(jq -r --arg p "$p" 'select(.path == $p) | .size // 0' "$recorded" | head -1)"
+        if [ -n "$rec_sha" ] && [ -n "$rec_size" ]; then
+          actual="$(head -c "$rec_size" "$project_dir/$p" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')"
+        fi
+        if [ -n "$actual" ] && [ "$actual" = "$rec_sha" ]; then
+          appended_mutable+=("$p")
+        else
+          mutable_violations+=("$(jq -nc --arg p "$p" '{path:$p, reason:"not_append_only"}')")
+        fi
+        ;;
       ".harness/branch-gate.json")
         # P0-M3: the Phase 1 branch-baseline gate state is written ONCE by a
         # successful init and is fully DETERMINISTIC (no timestamps — subsequent
@@ -565,6 +582,67 @@ dwm_compare_manifest() {
   # another mutable path sorts after them — the journal append-only and registry
   # gates would be skipped on the target platform. Strip CR from the stream.
   done <<<"$(printf '%s\n' "$result" | jq -r '.changed_mutable[]' | tr -d '\r')"
+
+  # ---- Codex r7: runtime-artifact byte-binding enforcement ----
+  # The frozen recorded fixture pre-dates the latest canonical run, so the
+  # canonical NDJSON + command logs + reviewer verdict would otherwise enter as
+  # `allowed_new` indefinitely and their bytes would never be bound. The
+  # persistent runtime-manifest registry binds the FIRST-SEEN bytes of each
+  # runtime artifact; once the registry exists it is the authoritative binding,
+  # independent of the recorded fixture. A REGISTERED artifact that changed is a
+  # violation even when the fixture never recorded it:
+  #   ndjson/log  → byte-immutable  (runtime_artifact_not_byte_equal)
+  #   verdict     → append-only     (runtime_artifact_not_append_only)
+  # An UNREGISTERED runtime artifact is a first appearance (still governed by
+  # the allowed_new classification above); the bootstrap + writer registration
+  # ensure real artifacts are always bound before the gate runs.
+  if [ -f "$project_dir/.harness/runtime-manifest.jsonl" ]; then
+    local reg_json reg_dup
+    if ! reg_json="$(jq -s '.' "$project_dir/.harness/runtime-manifest.jsonl" 2>/dev/null)"; then
+      # Malformed registry → fail-closed (never silently drop the binding).
+      mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_invalid"}')")
+      reg_json="[]"
+    fi
+    # A duplicate path line would let a later (tampered) line rebind an earlier
+    # registration; reject the registry wholesale.
+    reg_dup="$(printf '%s' "$reg_json" | jq -r '[group_by(.path)[] | select(length > 1) | .[0].path] | length' 2>/dev/null)"
+    if [ "$reg_dup" != "0" ] && [ -n "$reg_dup" ]; then
+      mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_duplicate_path"}')")
+    fi
+
+    local cpath centry ckind csha rsha rsize actual
+    while IFS= read -r cpath; do
+      [ -n "$cpath" ] || continue
+      case "$cpath" in
+        ".harness/logs/runs/"*.ndjson) ckind="ndjson" ;;
+        ".harness/logs/runs/"*.log)    ckind="log" ;;
+        ".harness/reviews/"*.jsonl)    ckind="verdict" ;;
+        *) continue ;;
+      esac
+      centry="$(printf '%s' "$reg_json" | jq -c --arg p "$cpath" 'map(select(.path == $p)) | .[0] // null' 2>/dev/null)"
+      if [ "$centry" = "null" ] || [ -z "$centry" ]; then
+        continue   # unregistered = first appearance, not a violation
+      fi
+      csha="$(jq -r --arg p "$cpath" 'select(.path == $p) | .sha256 // ""' "$cur_file" | head -1)"
+      rsha="$(printf '%s' "$centry" | jq -r '.sha256 // ""')"
+      rsize="$(printf '%s' "$centry" | jq -r '.size // 0')"
+      if [ "$ckind" = "verdict" ]; then
+        # append-only: the registered bytes must remain a PREFIX of current.
+        actual="$(head -c "$rsize" "$project_dir/$cpath" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')"
+        if [ -n "$actual" ] && [ "$actual" = "$rsha" ]; then
+          :
+        else
+          mutable_violations+=("$(jq -nc --arg p "$cpath" '{path:$p, reason:"runtime_artifact_not_append_only"}')")
+        fi
+      else
+        # byte-immutable: current sha must equal the registered first-seen sha.
+        if [ -n "$csha" ] && [ "$csha" != "$rsha" ]; then
+          mutable_violations+=("$(jq -nc --arg p "$cpath" '{path:$p, reason:"runtime_artifact_not_byte_equal"}')")
+        fi
+      fi
+    done <<<"$(jq -r 'select(.type == "file") | .path' "$cur_file" | tr -d '\r')"
+  fi
+
   rm -f "$cur_file"
 
   local final

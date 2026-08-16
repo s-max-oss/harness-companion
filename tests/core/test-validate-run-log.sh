@@ -492,6 +492,49 @@ else
   SKIPPED=$((SKIPPED + 1))
 fi
 
+# 5b: log_artifact containment (real-path, Codex r7 item 2) — a recorded
+# log_artifact MUST resolve inside project_dir after '.'/'..' and symlinks are
+# collapsed. These fixtures all record a CORRECT log_sha256 so only the
+# containment step can reject — proving containment (not a sha mismatch) fires.
+OUTSIDE_ESC="$(mktemp -d)"
+printf 'outside log\n' > "$OUTSIDE_ESC/outside.log"
+OUTSIDE_ESC_SHA="$(sha256sum "$OUTSIDE_ESC/outside.log" | awk '{print $1}')"
+
+# (a) absolute path pointing outside the project dir → rejected
+mkdir -p "$TMPDIR/.harness/logs/runs/esc1"
+cat > "$TMPDIR/.harness/logs/runs/esc1.ndjson" <<EOF
+{"event":"run_started","schema_version":2,"run_id":"esc1","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
+{"event":"command_completed","schema_version":2,"run_id":"esc1","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"$OUTSIDE_ESC/outside.log","log_sha256":"$OUTSIDE_ESC_SHA"}
+{"event":"run_completed","schema_version":2,"run_id":"esc1","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":0}
+EOF
+assert_invalid "5b: absolute log_artifact outside project rejected" "esc1" "log_artifact_outside_project"
+
+# (b) relative '../' escape — walk up out of the project root into a sibling dir
+REL_ESCAPE="../$(basename "$OUTSIDE_ESC")/outside.log"
+mkdir -p "$TMPDIR/.harness/logs/runs/esc2"
+cat > "$TMPDIR/.harness/logs/runs/esc2.ndjson" <<EOF
+{"event":"run_started","schema_version":2,"run_id":"esc2","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
+{"event":"command_completed","schema_version":2,"run_id":"esc2","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"$REL_ESCAPE","log_sha256":"$OUTSIDE_ESC_SHA"}
+{"event":"run_completed","schema_version":2,"run_id":"esc2","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":0}
+EOF
+assert_invalid "5b: '../' escape log_artifact rejected" "esc2" "log_artifact_outside_project"
+
+# (c) parent-directory symlink escape — the artifact's PARENT dir is a symlink
+# pointing outside the project; a string-prefix check would pass but real-path
+# containment must reject. Skipped where ln -s silently copies.
+if ln -s "$OUTSIDE_ESC" "$TMPDIR/.harness/logs/runs/esc3" 2>/dev/null \
+   && [ -L "$TMPDIR/.harness/logs/runs/esc3" ]; then
+  cat > "$TMPDIR/.harness/logs/runs/esc3.ndjson" <<EOF
+{"event":"run_started","schema_version":2,"run_id":"esc3","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
+{"event":"command_completed","schema_version":2,"run_id":"esc3","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":".harness/logs/runs/esc3/outside.log","log_sha256":"$OUTSIDE_ESC_SHA"}
+{"event":"run_completed","schema_version":2,"run_id":"esc3","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":0}
+EOF
+  assert_invalid "5b: parent-directory symlink escape rejected" "esc3" "log_artifact_outside_project"
+else
+  echo "  [SKIP] 5b parent-directory symlink escape — real symlink creation unsupported on this platform"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
 # 5d: forged command array (doesn't match config) → rejected. The command
 # "c1" is not declared in TMPDIR/.harness/config.json so command_not_in_config
 # fires first; use a declared command_id with a forged argv to test the

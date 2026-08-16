@@ -198,10 +198,10 @@ validate_config_schema() {
         return 1
       fi
     fi
-    # Optional: timeout_seconds must be positive integer
+    # Optional: timeout_seconds must be a positive integer <= 7200 (the schema maximum)
     if jq -e ".verification.commands[$i] | has(\"timeout_seconds\")" "$config" >/dev/null 2>&1; then
-      if ! jq -e ".verification.commands[$i].timeout_seconds | type == \"number\" and . > 0" "$config" >/dev/null 2>&1; then
-        echo "validate_config_schema: command[$i] ('$cmd_id') timeout_seconds must be positive number" >&2
+      if ! jq -e ".verification.commands[$i].timeout_seconds | type == \"number\" and . > 0 and . <= 7200" "$config" >/dev/null 2>&1; then
+        echo "validate_config_schema: command[$i] ('$cmd_id') timeout_seconds must be a positive number <= 7200" >&2
         return 1
       fi
     fi

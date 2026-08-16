@@ -40,6 +40,14 @@
 #   Every feature_list.json mutation appends a line; the journal is runtime
 #   state written by harness-feature.sh itself, so including it in the
 #   fingerprint would make every feature status change a staleness breach.
+# .harness/runtime-manifest.jsonl: runtime-artifact byte-binding registry
+#   (Codex r7). Written by runtime_register / runtime_register_run during
+#   verification and review; it binds first-seen bytes of run NDJSON, command
+#   logs, and verdicts so the DWM gate can enforce immutability/append-only.
+#   It is runtime state written by the harness itself AFTER the run's
+#   fingerprint is captured, so including it in the fingerprint would make
+#   every self-registration a staleness breach (the same reason
+#   registry-journal.ndjson and reviews/ are excluded).
 BUILTIN_EXCLUDES=(
   ".harness/logs/"
   ".harness/reviews/"
@@ -47,6 +55,7 @@ BUILTIN_EXCLUDES=(
   ".harness/*.tmp.*"
   ".harness/branch-gate.json"
   ".harness/registry-journal.ndjson"
+  ".harness/runtime-manifest.jsonl"
   "feature_list.json"
   ".harness/config.json"
 )

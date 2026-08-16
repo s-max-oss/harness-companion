@@ -40,6 +40,8 @@ source "$SKILL_DIR/lib/atomic_write.sh"
 source "$SKILL_DIR/lib/lock-registry.sh"
 # shellcheck source=lib/registry-journal.sh
 source "$SKILL_DIR/lib/registry-journal.sh"
+# shellcheck source=lib/runtime-manifest.sh
+source "$SKILL_DIR/lib/runtime-manifest.sh"
 
 # Keep -e off so command failures are captured, not shell-killing
 set +e
@@ -381,11 +383,9 @@ while IFS= read -r -u 3 cmd_id; do
   # Prepare log artifact path
   LOG_FILE="$RUN_DIR/${cmd_id}.log"
 
-  # Resolve timeout (env var HARNESS_VERIFY_TIMEOUT_OVERRIDE can raise cap for slow hosts)
+  # Resolve timeout from the configured contract (no env-var override — the
+  # effective timeout is always written into the run's auditable config_sha256).
   TIMEOUT_SECS="$(printf '%s' "$CMD_JSON" | jq -r '.timeout_seconds // 300')"
-  if [ -n "${HARNESS_VERIFY_TIMEOUT_OVERRIDE:-}" ]; then
-    TIMEOUT_SECS="$HARNESS_VERIFY_TIMEOUT_OVERRIDE"
-  fi
 
   START_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   START_MS="$(date +%s)000"
@@ -556,6 +556,7 @@ if [ "$PLANNED" -eq 0 ]; then
     echo "FATAL: failed to write run_completed (no_checks) terminal event" >&2
     exit 2
   fi
+  runtime_register_run "$PROJECT_DIR" "$RUN_ID" || true
   echo "Result: no_checks (0 verification steps configured)"
   echo "Add verification commands to .harness/config.json to enable passing eligibility."
 elif [ "${#EFFECTIVE_REQUIRED[@]}" -eq 0 ]; then
@@ -599,6 +600,7 @@ elif [ "${#EFFECTIVE_REQUIRED[@]}" -eq 0 ]; then
     echo "FATAL: failed to write run_completed (no_checks) terminal event" >&2
     exit 2
   fi
+  runtime_register_run "$PROJECT_DIR" "$RUN_ID" || true
   if [ "${#REQUIRED_IDS[@]}" -eq 0 ]; then
     echo "Result: no_checks (0 required verification steps — only optional commands configured)"
     echo "Mark at least one command required_for_passing: true to enable passing eligibility."
@@ -645,6 +647,7 @@ elif [ "$FAILED" -gt 0 ]; then
     echo "FATAL: failed to write run_failed terminal event" >&2
     exit 2
   fi
+  runtime_register_run "$PROJECT_DIR" "$RUN_ID" || true
   echo "Result: FAILED ($FAILED command(s) failed)"
   echo "Failed: ${FAILED_IDS[*]}"
 
@@ -691,6 +694,7 @@ else
       exit 2
     fi
     echo "Result: FAILED (required-coverage: ${#MISSING_REQUIRED[@]} required command(s) never executed)"
+    runtime_register_run "$PROJECT_DIR" "$RUN_ID" || true
     exit 1
   fi
 
@@ -714,6 +718,7 @@ else
     echo "FATAL: failed to write run_completed (passed) terminal event" >&2
     exit 2
   fi
+  runtime_register_run "$PROJECT_DIR" "$RUN_ID" || true
 
   # ---- Optionally update feature_list.json ----
   if [ "$WRITE" = "true" ]; then

@@ -64,6 +64,12 @@
 . "$(dirname "${BASH_SOURCE[0]}")/validate-run-log.sh"
 # shellcheck source=workspace-fingerprint.sh
 . "$(dirname "${BASH_SOURCE[0]}")/workspace-fingerprint.sh"
+# Codex r7: register appended verdicts in the runtime-manifest byte-binding
+# registry (writer-side registration; the DWM gate enforces append-only).
+if ! type runtime_register >/dev/null 2>&1; then
+  # shellcheck disable=SC1090
+  . "$(dirname "${BASH_SOURCE[0]}")/runtime-manifest.sh" 2>/dev/null || true
+fi
 
 # ---- helpers ---------------------------------------------------------------
 
@@ -108,7 +114,7 @@ _v_sha256_file() {
 # Fail-closed: if any axis cannot be computed the binding is rejected. The
 # reason string is printed on stderr; exit 0/1.
 _v_require_passed_fresh_run() {
-  local project_dir="$1" run_id="$2" head_sha="$3" expect_fid="${4:-}"
+  local project_dir="$1" run_id="$2" head_sha="$3" expect_fid="${4:-}" fresh="${5:-1}"
   local log_path="$project_dir/.harness/logs/runs/${run_id}.ndjson"
   if [ ! -f "$log_path" ]; then
     echo "run_not_found" >&2
@@ -143,44 +149,53 @@ _v_require_passed_fresh_run() {
     return 1
   fi
 
-  # (b) Axis 1 — workspace fingerprint (matches passing.sh step 6)
-  local verified_fp current_fp
-  verified_fp="$(printf '%s' "$terminal" | jq -r '.workspace_fingerprint_verified // empty')"
-  if [ -z "$verified_fp" ] || [ "$verified_fp" = "null" ]; then
-    echo "run_fingerprint_missing: run $run_id has no workspace_fingerprint_verified" >&2
-    return 1
-  fi
-  current_fp="$(compute_workspace_fingerprint "$project_dir" 2>/dev/null)" || {
-    echo "workspace_fingerprint_compute_failed" >&2
-    return 1
-  }
-  [ -n "$current_fp" ] || { echo "workspace_fingerprint_compute_failed" >&2; return 1; }
-  if [ "$current_fp" != "$verified_fp" ]; then
-    echo "workspace_stale: run $run_id verified '$verified_fp', current '$current_fp'" >&2
-    return 1
+  # (b) Axis 1 — workspace fingerprint (matches passing.sh step 6). FRESHNESS
+  # only: a historical attempt is validated for authenticity (its run passed,
+  # its base/head are real and ancestral) but is NOT required to match the
+  # CURRENT fingerprint — only the latest PASS binds the current state.
+  if [ "$fresh" = "1" ]; then
+    local verified_fp current_fp
+    verified_fp="$(printf '%s' "$terminal" | jq -r '.workspace_fingerprint_verified // empty')"
+    if [ -z "$verified_fp" ] || [ "$verified_fp" = "null" ]; then
+      echo "run_fingerprint_missing: run $run_id has no workspace_fingerprint_verified" >&2
+      return 1
+    fi
+    current_fp="$(compute_workspace_fingerprint "$project_dir" 2>/dev/null)" || {
+      echo "workspace_fingerprint_compute_failed" >&2
+      return 1
+    }
+    [ -n "$current_fp" ] || { echo "workspace_fingerprint_compute_failed" >&2; return 1; }
+    if [ "$current_fp" != "$verified_fp" ]; then
+      echo "workspace_stale: run $run_id verified '$verified_fp', current '$current_fp'" >&2
+      return 1
+    fi
   fi
 
-  # (c) Axis 2 — config SHA-256 (matches passing.sh step 7)
-  local stored_cfg current_cfg
-  stored_cfg="$(printf '%s' "$run_started" | jq -r '.config_sha256 // empty')"
-  if [ -z "$stored_cfg" ] || [ "$stored_cfg" = "null" ]; then
-    echo "run_config_sha_missing: run $run_id has no config_sha256" >&2
-    return 1
-  fi
-  current_cfg="$(_v_sha256_file "$project_dir/.harness/config.json")"
-  if [ -z "$current_cfg" ]; then
-    echo "config_sha_compute_failed" >&2
-    return 1
-  fi
-  if [ "$stored_cfg" != "$current_cfg" ]; then
-    echo "config_stale: run $run_id stored '$stored_cfg', current '$current_cfg'" >&2
-    return 1
+  # (c) Axis 2 — config SHA-256 (matches passing.sh step 7). FRESHNESS only.
+  if [ "$fresh" = "1" ]; then
+    local stored_cfg current_cfg
+    stored_cfg="$(printf '%s' "$run_started" | jq -r '.config_sha256 // empty')"
+    if [ -z "$stored_cfg" ] || [ "$stored_cfg" = "null" ]; then
+      echo "run_config_sha_missing: run $run_id has no config_sha256" >&2
+      return 1
+    fi
+    current_cfg="$(_v_sha256_file "$project_dir/.harness/config.json")"
+    if [ -z "$current_cfg" ]; then
+      echo "config_sha_compute_failed" >&2
+      return 1
+    fi
+    if [ "$stored_cfg" != "$current_cfg" ]; then
+      echo "config_stale: run $run_id stored '$stored_cfg', current '$current_cfg'" >&2
+      return 1
+    fi
   fi
 
   # (d) Axis 3 — VCS revision (matches passing.sh step 8). P0-14: a PASS run in
   # a GIT project must record its vcs_revision — empty/null revision in a git
   # project is vcs_revision_missing (fail-closed), never a silent skip. Non-git
-  # projects are unaffected (there is no revision to record).
+  # projects are unaffected (there is no revision to record). The recorded
+  # revision is required to be non-empty for authenticity ALWAYS; it is required
+  # to equal CURRENT HEAD only under freshness.
   local stored_rev current_rev
   stored_rev="$(printf '%s' "$run_started" | jq -r '.vcs_revision // empty')"
   if [ -z "$stored_rev" ] || [ "$stored_rev" = "null" ]; then
@@ -188,7 +203,7 @@ _v_require_passed_fresh_run() {
       echo "vcs_revision_missing: run $run_id in a git project records no vcs_revision" >&2
       return 1
     fi
-  else
+  elif [ "$fresh" = "1" ]; then
     current_rev="$(git -C "$project_dir" rev-parse --short=12 HEAD 2>/dev/null)" || {
       echo "vcs_check_failed" >&2
       return 1
@@ -199,9 +214,11 @@ _v_require_passed_fresh_run() {
     fi
   fi
 
-  # (e) head-consistent: head_sha == current git HEAD (full OID). Skipped only
-  #     when the project is not a git repo (nothing to compare against).
-  if git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
+  # (e) head-consistent: head_sha == current git HEAD (full OID). FRESHNESS only.
+  # (A historical record's head_sha is a real, ancestor-verified OID via
+  # verdict_validate_record; it is only required to equal CURRENT HEAD for the
+  # latest PASS.)
+  if [ "$fresh" = "1" ] && git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
     local cur_head
     cur_head="$(git -C "$project_dir" rev-parse HEAD 2>/dev/null)" || { echo "vcs_check_failed" >&2; return 1; }
     if [ "$head_sha" != "$cur_head" ]; then
@@ -291,6 +308,12 @@ _v_phase_coverage() {
 verdict_validate_record() {
   local project_dir="$1"
   local rec="$2"
+  # fresh=1 (default): a PASS record must bind the CURRENT head/run/fingerprint.
+  # fresh=0: a HISTORICAL attempt is validated for authenticity only — its
+  # recorded base/head must be real and ancestral and its run must exist and
+  # validate, but it is NOT required to match the current state (only the
+  # latest PASS binds current HEAD).
+  local fresh="${3:-1}"
 
   if ! printf '%s' "$rec" | jq -e '.schema_version == 1' >/dev/null 2>&1; then
     echo "verdict: record schema_version != 1" >&2
@@ -476,9 +499,9 @@ verdict_validate_record() {
   if [ "$verdict" = "PASS" ] && [ -n "$run_id" ]; then
     local pass_reason
     if [ "$kind" = "feature" ] || [ "$kind" = "maintenance" ]; then
-      pass_reason="$( _v_require_passed_fresh_run "$project_dir" "$run_id" "$head" "$fid" 2>&1 )"
+      pass_reason="$( _v_require_passed_fresh_run "$project_dir" "$run_id" "$head" "$fid" "$fresh" 2>&1 )"
     else
-      pass_reason="$( _v_require_passed_fresh_run "$project_dir" "$run_id" "$head" 2>&1 )"
+      pass_reason="$( _v_require_passed_fresh_run "$project_dir" "$run_id" "$head" "" "$fresh" 2>&1 )"
     fi
     if [ $? -ne 0 ]; then
       echo "verdict: PASS run binding rejected — ${pass_reason}" >&2
@@ -547,7 +570,19 @@ verdict_validate_file() {
         '{valid:false, reason:"attempt_gap_or_dup", line:$line, found:$found, expected:$expected}'
       return 1
     fi
-    if ! verdict_validate_record "$project_dir" "$rec" >/dev/null 2>&1; then
+    # Historical attempts (i < n-1) validate authenticity only (fresh=0); the
+    # LATEST record (i == n-1) binds current head/run/fingerprint (fresh=1).
+    # This is what makes the whole maintenance verdict file pass
+    # verdict_validate_file even though only the last attempt's base/head match
+    # the CURRENT repo state — each earlier attempt's base/head are still
+    # real-oid + ancestor-verified inside verdict_validate_record.
+    local rec_fresh
+    if [ "$i" -eq $((n - 1)) ]; then
+      rec_fresh=1
+    else
+      rec_fresh=0
+    fi
+    if ! verdict_validate_record "$project_dir" "$rec" "$rec_fresh" >/dev/null 2>&1; then
       jq -n --argjson line $((i + 1)) '{valid:false, reason:"invalid_record", line:$line}'
       return 1
     fi
@@ -649,6 +684,12 @@ verdict_append_record() {
     echo "verdict: append failed for $path" >&2
     return 1
   }
+  # Codex r7: bind the verdict's first-seen bytes in the runtime-manifest
+  # registry so the DWM gate enforces append-only on later checks (idempotent —
+  # a later append never rewrites the first-seen binding).
+  if type runtime_register >/dev/null 2>&1; then
+    runtime_register "$project_dir" ".harness/reviews/$kind/$id.jsonl" "verdict" || true
+  fi
   printf '%s' "$rec"
   return 0
 }

@@ -235,6 +235,28 @@ _vl_resolve_abs_path() {
   esac
 }
 
+# ---- _vl_canonical_path -----------------------------------------------------
+# Resolve a path to its physical absolute form, collapsing '.'/'..' and
+# following symlinks. This is what closes the parent-directory-symlink and
+# '../' escapes that a naive string-prefix containment check would miss. The
+# caller canonicalizes only the PARENT directory of a log_artifact and appends
+# the basename, so a symlink at the final component is still detected by the
+# separate [ -L ] check rather than being silently followed.
+_vl_canonical_path() {
+  local p="$1"
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$p" 2>/dev/null && return 0
+  fi
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -f "$p" 2>/dev/null && return 0
+  fi
+  # POSIX fallback: cd -P into the (existing) parent to physically resolve it.
+  local base d
+  base="$(basename "$p")"
+  d="$(cd -P "$(dirname "$p")" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/%s' "$d" "$base"
+}
+
 # ---- validate_run_log -------------------------------------------------------
 # The canonical 16-step validation.
 # Args: <run_id> [project_dir]
@@ -403,17 +425,33 @@ validate_run_log() {
               run_id: $run_id, command_id: $cid, project_dir: $project_dir}'
           return 1
         }
+        # Canonicalize to physical paths. This resolves '../' escapes AND
+        # parent-directory symlinks (e.g. a symlinked .harness/logs/runs/run/
+        # that points outside the project). Only the PARENT directory of the
+        # artifact is canonicalized — the final component is left untouched so
+        # a symlink at that component is caught by the [ -L ] check below.
+        local la_dir la_base real_la real_proj
+        la_dir="$(dirname "$abs_la")"
+        la_base="$(basename "$abs_la")"
+        real_proj="$(_vl_canonical_path "$proj_abs")"
+        real_la="$(_vl_canonical_path "$la_dir")/$la_base"
+        if [ -z "$real_proj" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" --arg project_dir "$project_dir" \
+            '{valid: false, reason: "project_dir_resolve_failed",
+              run_id: $run_id, command_id: $cid, project_dir: $project_dir}'
+          return 1
+        fi
         # Normalize both sides via cygpath -m when available (Windows/MSYS
-        # records paths as drive-letter absolute while `cd + pwd` may yield
+        # records paths as drive-letter absolute while realpath yields
         # POSIX-style /c/... — comparing the two as-is would yield a false
         # outside-project on the recorded-but-legitimate Windows path).
         local norm_abs norm_proj
         if command -v cygpath >/dev/null 2>&1; then
-          norm_abs="$(cygpath -m "$abs_la" 2>/dev/null || printf '%s' "$abs_la")"
-          norm_proj="$(cygpath -m "$proj_abs" 2>/dev/null || printf '%s' "$proj_abs")"
+          norm_abs="$(cygpath -m "$real_la" 2>/dev/null || printf '%s' "$real_la")"
+          norm_proj="$(cygpath -m "$real_proj" 2>/dev/null || printf '%s' "$real_proj")"
         else
-          norm_abs="$abs_la"
-          norm_proj="$proj_abs"
+          norm_abs="$real_la"
+          norm_proj="$real_proj"
         fi
         # Case-insensitive startswith on Windows (drive-letter paths are
         # case-insensitive); case-sensitive elsewhere.

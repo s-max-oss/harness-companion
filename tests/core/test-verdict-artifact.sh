@@ -96,6 +96,15 @@ CFG
     rev="null"
   fi
   vfp="$(compute_workspace_fingerprint "$d")"
+  # Codex r6 (blocker ①): the run-log validator now rejects empty log_artifact
+  # + null log_sha256 UNLESS exit_code==127 (the missing-tool sentinel). The
+  # tests' build_passed_run produces exit_code:0, so we MUST write a real log
+  # file for the c1 command and bind its sha256 in the command_completed event.
+  local c1_log_rel c1_log_sha
+  c1_log_rel=".harness/logs/runs/${rid}/c1.log"
+  mkdir -p "$d/.harness/logs/runs/${rid}"
+  printf 'c1 log for %s\n' "$rid" > "$d/$c1_log_rel"
+  c1_log_sha="$(sha256sum "$d/$c1_log_rel" | awk '{print $1}')"
   local r1 r2 r3
   r1="$(jq -cn --arg rid "$rid" --arg csha "$csha" --arg vfp "$vfp" --arg rev "$rev" --arg root "$d" --arg fid "${fid:-}" \
     '{schema_version:2, event:"run_started", run_id:$rid,
@@ -104,11 +113,11 @@ CFG
       vcs_revision:$rev, vcs_revision_source:"git",
       feature_id:($fid | if . == "" then null else . end),
       required_command_ids:["c1"], capability_level:1}')"
-  r2="$(jq -cn --arg rid "$rid" \
+  r2="$(jq -cn --arg rid "$rid" --arg la "$c1_log_rel" --arg lsh "$c1_log_sha" \
     '{schema_version:2, event:"command_completed", run_id:$rid, command_id:"c1",
       command:["true"], command_origin:"configured", confirmation:"not_required",
       exit_code:0, started_at:"2026-08-08T00:00:01Z", duration_ms:1,
-      log_artifact:"", log_sha256:null}')"
+      log_artifact:$la, log_sha256:$lsh}')"
   r3="$(jq -cn --arg rid "$rid" --arg vfp "$vfp" \
     '{schema_version:2, event:"run_completed", run_id:$rid,
       completed_at:"2026-08-08T00:01:00Z", overall_result:"passed",
@@ -425,7 +434,11 @@ HEAD="$BASE"
 REC="$(feature_rec "$D" F-CONV-01 1 PASS run-head "$BASE" "$OID40B")"
 check "T23: PASS with head_sha != current HEAD rejected" 1 "$(rec_valid "$D" "$REC")"
 REASON="$(rec_invalid_reason "$D" "$REC")"
-check "T23b: reason head_mismatch" yes "$(printf '%s' "$REASON" | grep -q 'head_mismatch' && echo yes || echo no)"
+# Codex r6: the new base_sha real+ancestor gate fires FIRST when head_sha is
+# fabricated (merge-base --is-ancestor returns non-zero). The original
+# head_mismatch check in _v_require_passed_fresh_run is now unreachable for
+# this fixture; either rejection is correct. Accept both.
+check "T23b: reason head_mismatch (or ancestor gate)" yes "$(printf '%s' "$REASON" | grep -qE 'head_mismatch|not an ancestor' && echo yes || echo no)"
 
 # ---- P0-4/P0-11/P0-12: phase PASS coverage (PLAN-authoritative) ----
 

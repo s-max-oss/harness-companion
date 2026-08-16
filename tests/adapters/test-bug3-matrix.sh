@@ -934,12 +934,15 @@ import json, os
 target_win = os.environ['C12W']
 with open(os.environ['C12S']) as f:
     d = json.load(f)
+# Codex r6 (block ⑥): canonical install path is adapters/claude-code/hooks/
+# (not scripts/hooks/). The fixture MUST mirror the new canonical path so
+# the idempotency check (canonical_path equivalence) dedups.
 for entry in d.get('hooks',{}).get('SessionStart',[]):
     for h in entry.get('hooks',[]):
-        h['command'] = 'bash \"' + target_win + '\\\\scripts\\\\hooks\\\\session-start.sh\"'
+        h['command'] = 'bash \"' + target_win + '\\\\adapters\\\\claude-code\\\\hooks\\\\session-start.sh\"'
 for entry in d.get('hooks',{}).get('Stop',[]):
     for h in entry.get('hooks',[]):
-        h['command'] = 'bash \"' + target_win + '\\\\scripts\\\\hooks\\\\stop-handoff.sh\"'
+        h['command'] = 'bash \"' + target_win + '\\\\adapters\\\\claude-code\\\\hooks\\\\stop-handoff.sh\"'
 with open(os.environ['C12S'], 'w') as f:
     json.dump(d, f, indent=2)
     f.write('\n')
@@ -1010,12 +1013,15 @@ if [ "$IS_WINDOWS" -eq 1 ] && command -v cygpath >/dev/null 2>&1 && [ -f "$C13_S
 import json, os
 with open(os.environ['C13S']) as f:
     d = json.load(f)
+# Codex r6 (block ⑥): canonical hook install path moved from scripts/hooks/
+# to adapters/claude-code/hooks/. The BUG-3 fixtures must use the new
+# canonical path so the idempotency check sees an EXACT match and dedups.
 for entry in d.get('hooks',{}).get('SessionStart',[]):
     for h in entry.get('hooks',[]):
-        h['command'] = 'bash \"' + os.environ['C13W'] + '/scripts/hooks/session-start.sh\"'
+        h['command'] = 'bash \"' + os.environ['C13W'] + '/adapters/claude-code/hooks/session-start.sh\"'
 for entry in d.get('hooks',{}).get('Stop',[]):
     for h in entry.get('hooks',[]):
-        h['command'] = 'bash \"' + os.environ['C13W'] + '/scripts/hooks/stop-handoff.sh\"'
+        h['command'] = 'bash \"' + os.environ['C13W'] + '/adapters/claude-code/hooks/stop-handoff.sh\"'
 with open(os.environ['C13S'], 'w') as f:
     json.dump(d, f, indent=2)
     f.write('\n')
@@ -1161,10 +1167,12 @@ JQEOF
 import json, os
 with open(os.environ['C15S']) as f:
     d = json.load(f)
-# Rewrite SS hook command to backslash form
+# Codex r6: rewrite SS hook command to backslash form using the NEW
+# canonical path adapters/claude-code/hooks/, so the bash idempotency
+# check (canonical_path equivalence) dedups.
 for entry in d.get('hooks',{}).get('SessionStart',[]):
     for h in entry.get('hooks',[]):
-        h['command'] = 'bash \"' + os.environ['C15W'] + '\\\\scripts\\\\hooks\\\\session-start.sh\"'
+        h['command'] = 'bash \"' + os.environ['C15W'] + '\\\\adapters\\\\claude-code\\\\hooks\\\\session-start.sh\"'
 # DELETE Stop entirely (simulating a state where only SS with backslash exists)
 if 'Stop' in d.get('hooks',{}):
     del d['hooks']['Stop']
@@ -1278,10 +1286,11 @@ JQEOF
 import json, os
 with open(os.environ['C16S']) as f:
     d = json.load(f)
-# Rewrite Stop hook command to C:/ form
+# Rewrite Stop hook command to C:/ form (Codex r6: canonical path is
+# adapters/claude-code/hooks/, not scripts/hooks/ — see install.sh).
 for entry in d.get('hooks',{}).get('Stop',[]):
     for h in entry.get('hooks',[]):
-        h['command'] = 'bash \"' + os.environ['C16W'] + '/scripts/hooks/stop-handoff.sh\"'
+        h['command'] = 'bash \"' + os.environ['C16W'] + '/adapters/claude-code/hooks/stop-handoff.sh\"'
 # DELETE SessionStart entirely (simulating a state where only Stop with C:/ exists)
 if 'SessionStart' in d.get('hooks',{}):
     del d['hooks']['SessionStart']

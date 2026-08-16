@@ -135,8 +135,8 @@ if [ -f "$SETTINGS_FILE" ]; then
     echo "ERROR: $SETTINGS_FILE exists but cannot be safely parsed as JSON." >&2
     echo "       The file will NOT be modified. Manual hook cleanup required." >&2
     echo "       Remove any SessionStart/Stop entries referencing:" >&2
-    echo "         $TARGET/scripts/hooks/session-start.sh" >&2
-    echo "         $TARGET/scripts/hooks/stop-handoff.sh" >&2
+    echo "         $TARGET/adapters/claude-code/hooks/session-start.sh" >&2
+    echo "         $TARGET/adapters/claude-code/hooks/stop-handoff.sh" >&2
     exit 1
   fi
 
@@ -145,8 +145,8 @@ if [ -f "$SETTINGS_FILE" ]; then
   # MSYS paths (/c/Users) to Windows form (C:/Users) on Git Bash, breaking
   # contains() comparisons.  "harness-companion/scripts/hooks/<script>" is
   # invariant across all path formats (~, MSYS, Windows, Linux).
-  SS_KEY="harness-companion/scripts/hooks/session-start.sh"
-  STOP_KEY="harness-companion/scripts/hooks/stop-handoff.sh"
+  SS_KEY="harness-companion/adapters/claude-code/hooks/session-start.sh"
+  STOP_KEY="harness-companion/adapters/claude-code/hooks/stop-handoff.sh"
 
   HAS_OUR_HOOKS=0
   if command -v jq >/dev/null 2>&1; then

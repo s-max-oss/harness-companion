@@ -183,6 +183,14 @@ make_run_log() {
     failed_ids_field=",\"failed_command_ids\":${failed_ids_json}"
   fi
 
+  # Codex r6 (blocker ①): validate_run_log now requires a real log_artifact +
+  # log_sha256 for any command_completed with exit_code != 127. Build a per-
+  # command log file under .harness/logs/runs/<run_id>/<cmd_id>.log, write
+  # bytes, and embed the relative path + sha into the NDJSON event. Failed
+  # commands (exit_code:1) keep the same contract — the test is asserting the
+  # failing-command eligibility hint, not the log-artifact binding.
+  mkdir -p "$dir/.harness/logs/runs/${run_id}"
+
   # run_started event
   jq -nc \
     --arg run_id "$run_id" \
@@ -220,12 +228,19 @@ make_run_log() {
     else
       cmd_argv='["x"]'
     fi
+    # Write a real log file for this command and bind its sha (r6 block ①).
+    local log_rel log_sha
+    log_rel=".harness/logs/runs/${run_id}/${cmd_id}.log"
+    printf '%s\n' "log for ${run_id}/${cmd_id} exit=${exit_code}" > "$dir/$log_rel"
+    log_sha="$(sha256sum "$dir/$log_rel" | awk '{print $1}')"
     jq -nc \
       --arg run_id "$run_id" \
       --arg cmd_id "$cmd_id" \
       --argjson exit_code "$exit_code" \
       --argjson cmd_argv "$cmd_argv" \
-      '{event:"command_completed",schema_version:2,run_id:$run_id,command_id:$cmd_id,command:$cmd_argv,command_origin:"configured",confirmation:"not_required",exit_code:$exit_code,started_at:"2026-07-31T15:13:00Z",duration_ms:100,log_artifact:"",log_sha256:null}' \
+      --arg la "$log_rel" \
+      --arg lsh "$log_sha" \
+      '{event:"command_completed",schema_version:2,run_id:$run_id,command_id:$cmd_id,command:$cmd_argv,command_origin:"configured",confirmation:"not_required",exit_code:$exit_code,started_at:"2026-07-31T15:13:00Z",duration_ms:100,log_artifact:$la,log_sha256:$lsh}' \
       >> "$log"
   done <<< "$cmd_ids"
 
@@ -417,8 +432,13 @@ LOG="$T7/.harness/logs/runs/20260731T-optional.ndjson"
 jq -nc --arg rid "20260731T-optional" --arg csha "$T7_CONFIG_SHA" --arg vfp "$T7_VERIFIED_FP" \
   '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:[],capability_level:1,feature_id:"feat-opt"}' \
   > "$LOG"
-jq -nc --arg rid "20260731T-optional" \
-  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:"optional-lint",command:["echo","ok"],command_origin:"detected",confirmation:"confirmed",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:"",log_sha256:null}' \
+# Codex r6 (block ①): bind a real log_artifact + log_sha256 (exit_code:0).
+LOG_REL=".harness/logs/runs/20260731T-optional/optional-lint.log"
+mkdir -p "$T7/.harness/logs/runs/20260731T-optional"
+printf 'log for 20260731T-optional/optional-lint\n' > "$T7/$LOG_REL"
+LOG_SHA="$(sha256sum "$T7/$LOG_REL" | awk '{print $1}')"
+jq -nc --arg rid "20260731T-optional" --arg la "$LOG_REL" --arg lsh "$LOG_SHA" \
+  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:"optional-lint",command:["echo","ok"],command_origin:"detected",confirmation:"confirmed",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:$la,log_sha256:$lsh}' \
   >> "$LOG"
 jq -nc --arg rid "20260731T-optional" --arg vfp "$T7_VERIFIED_FP" \
   '{event:"run_completed",schema_version:2,run_id:$rid,completed_at:"2026-07-31T15:13:12Z",overall_result:"passed",workspace_fingerprint_verified:$vfp,planned_commands:1,executed_commands:1,passed_commands:1,failed_commands:0,skipped_commands:0}' \
@@ -447,8 +467,13 @@ jq -nc --arg rid "20260731T-inconsistent" --arg csha "$T8_CONFIG_SHA" --arg vfp 
   --argjson req '["c1"]' \
   '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:$req,capability_level:1,feature_id:"feat-incon"}' \
   > "$LOG"
-jq -nc --arg rid "20260731T-inconsistent" \
-  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:"c1",command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:"",log_sha256:null}' \
+# Codex r6 (block ①): bind real log_artifact + log_sha256 (exit_code:0).
+LOG8_REL=".harness/logs/runs/20260731T-inconsistent/c1.log"
+mkdir -p "$T8/.harness/logs/runs/20260731T-inconsistent"
+printf 'log for 20260731T-inconsistent/c1\n' > "$T8/$LOG8_REL"
+LOG8_SHA="$(sha256sum "$T8/$LOG8_REL" | awk '{print $1}')"
+jq -nc --arg rid "20260731T-inconsistent" --arg la "$LOG8_REL" --arg lsh "$LOG8_SHA" \
+  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:"c1",command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:$la,log_sha256:$lsh}' \
   >> "$LOG"
 jq -nc --arg rid "20260731T-inconsistent" --arg vfp "$T8_VERIFIED_FP" \
   '{event:"run_completed",schema_version:2,run_id:$rid,completed_at:"2026-07-31T15:13:12Z",overall_result:"passed",workspace_fingerprint_verified:$vfp,planned_commands:1,executed_commands:1,passed_commands:0,failed_commands:1,skipped_commands:0}' \
@@ -609,12 +634,16 @@ jq -nc --arg rid "20260731T-zeroeff" --arg csha "$T15_CONFIG_SHA" --arg vfp "$T1
   --argjson req '["c1","c2"]' \
   '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:$req,capability_level:1,feature_id:"feat-zeroeff"}' \
   > "$LOG"
-jq -nc --arg rid "20260731T-zeroeff" --arg cid "c1" \
-  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:$cid,command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:"",log_sha256:null}' \
-  >> "$LOG"
-jq -nc --arg rid "20260731T-zeroeff" --arg cid "c2" \
-  '{event:"command_completed",schema_version:2,run_id:$rid,command_id:$cid,command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:01Z",duration_ms:50,log_artifact:"",log_sha256:null}' \
-  >> "$LOG"
+# Codex r6 (block ①): bind real log_artifact + log_sha256 (exit_code:0).
+mkdir -p "$T15/.harness/logs/runs/20260731T-zeroeff"
+for cid in c1 c2; do
+  LOG15_REL=".harness/logs/runs/20260731T-zeroeff/${cid}.log"
+  printf 'log for 20260731T-zeroeff/%s\n' "$cid" > "$T15/$LOG15_REL"
+  LOG15_SHA="$(sha256sum "$T15/$LOG15_REL" | awk '{print $1}')"
+  jq -nc --arg rid "20260731T-zeroeff" --arg cid "$cid" --arg la "$LOG15_REL" --arg lsh "$LOG15_SHA" \
+    '{event:"command_completed",schema_version:2,run_id:$rid,command_id:$cid,command:["x"],command_origin:"configured",confirmation:"not_required",exit_code:0,started_at:"2026-07-31T15:13:00Z",duration_ms:50,log_artifact:$la,log_sha256:$lsh}' \
+    >> "$LOG"
+done
 jq -nc --arg rid "20260731T-zeroeff" --arg vfp "$T15_VERIFIED_FP" \
   --argjson na '["c1","c2"]' \
   '{event:"run_completed",schema_version:2,run_id:$rid,completed_at:"2026-07-31T15:13:12Z",overall_result:"passed",workspace_fingerprint_verified:$vfp,planned_commands:2,executed_commands:2,passed_commands:2,failed_commands:0,skipped_commands:0,not_applicable_command_ids:$na}' \

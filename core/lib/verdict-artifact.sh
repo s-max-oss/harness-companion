@@ -425,6 +425,26 @@ verdict_validate_record() {
     echo "verdict: head_sha must be a 40- or 64-hex Git OID" >&2
     return 1
   fi
+  # Codex r6 fix: base_sha is not only a FORMAT-validated hex string — it MUST
+  # also be a REAL git commit object AND an ancestor of head_sha (the recorded
+  # baseline must prove the diff from base→head). Without this check, a hand-
+  # crafted verdict can name a fabricated base (e.g. 40-zero OID) and pass
+  # validation; the diff is then unverifiable, and the review's claimed
+  # coverage window is whatever the record says it is. This mirrors the
+  # `_dwm_validate_branch_gate_first_add` real-oid + ancestor-of-HEAD pattern
+  # (see core/lib/dirty-worktree-manifest.sh). Skipped when the project is
+  # not a git repo (no OID semantics to verify).
+  if command -v git >/dev/null 2>&1 && git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
+    if ! git -C "$project_dir" cat-file -e "$base^{commit}" 2>/dev/null \
+       && ! git -C "$project_dir" cat-file -e "$base" 2>/dev/null; then
+      echo "verdict: base_sha $base is not a real git object in $project_dir" >&2
+      return 1
+    fi
+    if ! git -C "$project_dir" merge-base --is-ancestor "$base" "$head" 2>/dev/null; then
+      echo "verdict: base_sha $base is not an ancestor of head_sha $head" >&2
+      return 1
+    fi
+  fi
   # PASS MUST bind a non-empty verification run_id
   local run_id
   run_id="$(printf '%s' "$rec" | jq -r '.run_id // ""')"

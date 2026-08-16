@@ -441,7 +441,9 @@ fi
 SS_PATH="$(jq -r '.hooks.SessionStart[0].hooks[0].command // empty' "$INSTALL_SETTINGS" 2>/dev/null)"
 STOP_PATH="$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$INSTALL_SETTINGS" 2>/dev/null)"
 case "$SS_PATH" in
-  *"harness-companion/scripts/hooks/session-start.sh"*)
+  # Codex r6 (block ⑥): canonical hook install path moved from
+  # scripts/hooks/ to adapters/claude-code/hooks/ — see install.sh HOOK_SS_CMD.
+  *"harness-companion/adapters/claude-code/hooks/session-start.sh"*)
     PASSED=$((PASSED+1))
     printf '  [PASS] G9.3 SessionStart hook command path points inside installed target\n' ;;
   *)
@@ -449,7 +451,7 @@ case "$SS_PATH" in
     printf '  [FAIL] G9.3 SessionStart hook path wrong: %s\n' "$SS_PATH" ;;
 esac
 case "$STOP_PATH" in
-  *"harness-companion/scripts/hooks/stop-handoff.sh"*)
+  *"harness-companion/adapters/claude-code/hooks/stop-handoff.sh"*)
     PASSED=$((PASSED+1))
     printf '  [PASS] G9.3 Stop hook command path points inside installed target\n' ;;
   *)
@@ -458,8 +460,8 @@ case "$STOP_PATH" in
 esac
 
 # G9.4: installed hooks can actually be invoked
-SS_HOOK="$INSTALL_TARGET/scripts/hooks/session-start.sh"
-STOP_HOOK="$INSTALL_TARGET/scripts/hooks/stop-handoff.sh"
+SS_HOOK="$INSTALL_TARGET/adapters/claude-code/hooks/session-start.sh"
+STOP_HOOK="$INSTALL_TARGET/adapters/claude-code/hooks/stop-handoff.sh"
 printf '{"session_id":"test","cwd":"%s","hook_event_name":"SessionStart"}\n' "$INSTALL_SANDBOX" \
   | bash "$SS_HOOK" >/dev/null 2>&1
 assert "G9.4 invoke installed session-start.sh exit 0" "0" "$?"

@@ -366,9 +366,27 @@ dwm_emit_manifest() {
 # Removals always violate (append-only). Any extra args are self-reference
 # exclude paths forwarded to the internal emit (the recorded manifest and the
 # snapshot tool must never enumerate themselves).
+#
+# Codex r6 fix — runtime-artifact PAIRED-REWRITE detection: an attacker could
+# pair a brand-new run NDJSON with a brand-new full-suite.log AND a brand-new
+# reviewer verdict — every entry shows up as `allowed_new` (legitimate) when
+# considered alone, but together they constitute a co-ordinated rewrite of
+# the recorded evidence. The recorded fixture pre-dates the latest canonical
+# run, so a TRULY new run-id legitimately enters as `allowed_new`; the
+# distinguishing signal is whether ANY recorded file in the runtime-artifact
+# namespace has been modified (`changed_mutable` is non-empty). If both a
+# modification and a new-file appearance happen at the same time, the new
+# file is rejected with reason "runtime_paired_rewrite" — there is no
+# legitimate way to add a new run log AND modify an existing one between two
+# DWM snapshots (a re-run always adds the NEW file but never rewrites the
+# previous one, since runs are append-only one-shot files). This is the
+# code-only fix the user-required "no baseline re-shoot" constraint demands:
+# the gate becomes sensitive to paired-rewrites without enumerating them in
+# the recorded fixture.
 # Output: JSON {valid, violations, allowed_new, new_non_mutable,
 #               appended_mutable, feature_revision_advanced,
-#               content_changed_mutable}. Exit 0 if valid, 1 otherwise.
+#               content_changed_mutable, runtime_paired_rewrite}.
+# Exit 0 if valid, 1 otherwise.
 dwm_compare_manifest() {
   local project_dir="$1" recorded="$2"
   shift 2
@@ -381,6 +399,9 @@ dwm_compare_manifest() {
     # NOTE: the element must be captured into a variable ($e) before use —
     # `$p | startswith(.)` would rebind `.` to $p and always match.
     . as $p | any($m[]; . as $e | if ($e | endswith("/")) then ($p | startswith($e)) else ($p == $e) end);
+  # runtime-artifact namespace: a NEW file here paired with ANY recorded-file
+  # modification in the same namespace is a paired rewrite (see header).
+  def is_runtime_artifact: startswith(".harness/logs/runs/") or startswith(".harness/reviews/");
 
   ($r | map({key:.path, value:.}) | from_entries) as $rm |
   ($c | map({key:.path, value:.}) | from_entries) as $cm |
@@ -402,7 +423,19 @@ dwm_compare_manifest() {
     new_non_mutable: [ $c[] | select((( .path | in_mutable($mutable)) | not) and ($rm[.path] | not)) | .path ],
     changed_mutable: [ $r[] | select((.path | in_mutable($mutable)) and (.type == "file") and ($cm[.path] and $cm[.path].sha256 != .sha256)) | .path ]
   }) as $res
-  | $res'
+  # Codex r6 paired-rewrite guard: if ANY recorded runtime-artifact file was
+  # modified AND any new file appeared in the same namespace in the same gate
+  # pass, the new file is rejected as `runtime_paired_rewrite` — a single
+  # legitimate canonical re-run adds ONE new file and modifies ZERO recorded
+  # files. The recorded fixture pre-dates the canonical run; the canonical
+  # run NDJSON is the ONLY legitimate `allowed_new` in the runtime-artifact
+  # namespace, and it never co-occurs with a recorded-file modification.
+  | (if ([$res.changed_mutable[] | select(is_runtime_artifact)] | length) > 0
+     then [$res.allowed_new[] | select(is_runtime_artifact)] | map({path:., reason:"runtime_paired_rewrite"})
+     else []
+     end) as $paired_violations
+  | $res + {runtime_paired_rewrite: ($paired_violations | map(.path)),
+            paired_rewrite_violations: $paired_violations}'
   if ! dwm_emit_manifest "$project_dir" "$cur_file" "${excludes[@]}"; then
     rm -f "$cur_file"
     jq -n --arg d "$project_dir" '{valid:false, reason:"emit_failed", project_dir:$d}'
@@ -414,6 +447,15 @@ dwm_compare_manifest() {
     rm -f "$cur_file"
     jq -n '{valid:false, reason:"compare_failed"}'
     return 1
+  fi
+
+  # ---- Codex r6: paired-rewrite violation promotion ----
+  # The jq prog computes `paired_rewrite_violations`; promote them into the
+  # main violations array (so .valid==false when any paired rewrite occurs).
+  local paired_count
+  paired_count="$(printf '%s' "$result" | jq '.paired_rewrite_violations | length')"
+  if [ "$paired_count" != "0" ]; then
+    result="$(printf '%s' "$result" | jq -c '.violations += .paired_rewrite_violations')"
   fi
 
   # ---- P0-5: classify each content-changed mutable path (needs disk reads) ----

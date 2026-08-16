@@ -371,8 +371,75 @@ validate_run_log() {
     IFS=$'\x1f' read -r cid la sha co recorded_cmd <<< "$fields"
     if [ -n "$cid" ]; then
       # 5b: log_artifact path (symlink, then existence)
+      #
+      # Codex r6 fix: the previous implementation treated an empty log_artifact
+      # (or a null log_sha256) as a SILENT skip whenever exit_code != 127. A
+      # hand-crafted NDJSON could therefore record any non-executed command
+      # with log_artifact="" + log_sha256=null + exit_code=0 (or any non-127
+      # code) and pass validation. The ONLY legitimate missing-tool sentinel is
+      # harness-verify's own emission (line ~308): log_artifact="" + log_sha256
+      # =null + exit_code=127 — a command whose argv[0] is not on PATH.
+      # For any other case the recorded evidence MUST be a real file under
+      # the project with a real, recomputable 64-hex sha256.
+      #
+      # The exit_code is extracted from the same per-event field list (added
+      # below) so this check can distinguish the structural sentinel from
+      # fabricated gaps. A recorded command with exit_code != 127 must always
+      # carry a non-empty log_artifact that resolves to a real regular file
+      # AND a non-null 64-hex log_sha256.
+      local ec
+      ec="$(printf '%s' "$ev" | jq -r '.exit_code // empty')"
       if [ -n "$la" ]; then
         abs_la="$(_vl_resolve_abs_path "$la" "$project_dir")"
+        # Reject artifacts whose resolved path escapes the project dir
+        # (absolute paths in the recorded log_artifact MUST live inside
+        # project_dir; relative paths are joined with project_dir). Without
+        # this guard a hand-crafted run can point recorded evidence at any
+        # file on the filesystem — including /etc/passwd.
+        local proj_abs
+        proj_abs="$(cd "$project_dir" 2>/dev/null && pwd)" || {
+          jq -n --arg run_id "$run_id" --arg cid "$cid" --arg project_dir "$project_dir" \
+            '{valid: false, reason: "project_dir_resolve_failed",
+              run_id: $run_id, command_id: $cid, project_dir: $project_dir}'
+          return 1
+        }
+        # Normalize both sides via cygpath -m when available (Windows/MSYS
+        # records paths as drive-letter absolute while `cd + pwd` may yield
+        # POSIX-style /c/... — comparing the two as-is would yield a false
+        # outside-project on the recorded-but-legitimate Windows path).
+        local norm_abs norm_proj
+        if command -v cygpath >/dev/null 2>&1; then
+          norm_abs="$(cygpath -m "$abs_la" 2>/dev/null || printf '%s' "$abs_la")"
+          norm_proj="$(cygpath -m "$proj_abs" 2>/dev/null || printf '%s' "$proj_abs")"
+        else
+          norm_abs="$abs_la"
+          norm_proj="$proj_abs"
+        fi
+        # Case-insensitive startswith on Windows (drive-letter paths are
+        # case-insensitive); case-sensitive elsewhere.
+        local in_project="false"
+        case "$norm_abs" in
+          "$norm_proj"/*) in_project="true" ;;
+          "$norm_proj")   in_project="true" ;;
+          *)
+            # Try case-insensitive prefix when one side carries a drive letter
+            # (Windows). shopt is unavailable in #!/bin/bash on every POSIX
+            # variant, so use a portable tr-upper comparison instead.
+            local up_abs up_proj
+            up_abs="$(printf '%s' "$norm_abs" | tr '[:upper:]' '[:lower:]')"
+            up_proj="$(printf '%s' "$norm_proj" | tr '[:upper:]' '[:lower:]')"
+            case "$up_abs" in
+              "$up_proj"/*) in_project="true" ;;
+              "$up_proj")   in_project="true" ;;
+            esac
+            ;;
+        esac
+        if [ "$in_project" != "true" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" --arg path "$la" --arg resolved "$abs_la" --arg project_dir "$proj_abs" \
+            '{valid: false, reason: "log_artifact_outside_project",
+              run_id: $run_id, command_id: $cid, path: $path, resolved: $resolved, project_dir: $project_dir}'
+          return 1
+        fi
         if [ -L "$abs_la" ]; then
           jq -n --arg run_id "$run_id" --arg cid "$cid" --arg path "$la" \
             '{valid: false, reason: "log_artifact_symlink",
@@ -385,9 +452,31 @@ validate_run_log() {
               run_id: $run_id, command_id: $cid, path: $path}'
           return 1
         fi
-        # 5c: log_sha256 recompute (only when a non-empty artifact was claimed)
-        if [ "$sha" != "null" ] && [ -n "$sha" ]; then
+        # 5c: log_sha256 — for any command with exit_code != 127 the recorded
+        # log_sha256 MUST be a non-null 64-hex string that matches a fresh
+        # recomputation. The exit_code==127 (missing-tool) sentinel is the
+        # ONLY path that may carry log_artifact="" + log_sha256=null — see
+        # the comment block above.
+        if [ -z "$ec" ] || [ "$ec" != "127" ]; then
+          if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+            jq -n --arg run_id "$run_id" --arg cid "$cid" --arg ec "$ec" --arg path "$la" \
+              '{valid: false, reason: "log_sha256_missing",
+                run_id: $run_id, command_id: $cid, exit_code: $ec, path: $path}'
+            return 1
+          fi
+          if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{64}$'; then
+            jq -n --arg run_id "$run_id" --arg cid "$cid" --arg ec "$ec" --arg sha "$sha" \
+              '{valid: false, reason: "log_sha256_not_64hex",
+                run_id: $run_id, command_id: $cid, exit_code: $ec, log_sha256: $sha}'
+            return 1
+          fi
           actual_sha="$(sha256sum "$abs_la" 2>/dev/null | awk '{print $1}')"
+          if [ -z "$actual_sha" ]; then
+            jq -n --arg run_id "$run_id" --arg cid "$cid" --arg path "$la" \
+              '{valid: false, reason: "log_sha256_recompute_failed",
+                run_id: $run_id, command_id: $cid, path: $path}'
+            return 1
+          fi
           if [ "$actual_sha" != "$sha" ]; then
             jq -n --arg run_id "$run_id" --arg cid "$cid" \
               --arg expected "$sha" --arg actual "$actual_sha" --arg path "$la" \
@@ -396,6 +485,16 @@ validate_run_log() {
                 expected_sha256: $expected, actual_sha256: $actual, path: $path}'
             return 1
           fi
+        fi
+      else
+        # log_artifact is empty. The ONLY legitimate empty case is the
+        # structural missing-tool sentinel (exit_code=127). Any other
+        # exit_code must carry a real artifact path.
+        if [ -z "$ec" ] || [ "$ec" != "127" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" --arg ec "$ec" \
+            '{valid: false, reason: "log_artifact_missing",
+              run_id: $run_id, command_id: $cid, exit_code: $ec}'
+          return 1
         fi
       fi
       # 5d: command array vs config anchor

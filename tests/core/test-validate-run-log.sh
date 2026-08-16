@@ -98,6 +98,37 @@ install_golden() {
   cp "$GOLDEN_DIR/$golden_name" "$TMPDIR/.harness/logs/runs/${run_id}.ndjson"
 }
 
+# Codex r6: structural tests (Steps 12-15) build hand-crafted fixtures whose
+# command_completed events previously used the empty log_artifact + null
+# log_sha256 sentinel. Under the new fail-closed validator (an exit_code != 127
+# must carry a real artifact), those fixtures must declare a real artifact
+# on disk so they can exercise their OWN invariant (terminal counts,
+# command_id uniqueness, etc.) instead of being rejected at the artifact
+# check first. The helpers below materialize the per-command log file and
+# emit a single command_completed JSON line with the matching sha256.
+#
+# _mk_cmd_log <run_id> <cmd_id> [<content>]
+#   Writes "$TMPDIR/.harness/logs/runs/<run_id>/<cmd_id>.log" with the given
+#   content (default: "log for <run_id>/<cmd_id>\n") and echoes the
+#   project-relative path (POSIX-style — validator prefixes with project_dir).
+_mk_cmd_log() {
+  local run_id="$1" cmd_id="$2" content="${3:-log for ${run_id}/${cmd_id}\n}"
+  mkdir -p "$TMPDIR/.harness/logs/runs/${run_id}"
+  printf '%s' "$content" > "$TMPDIR/.harness/logs/runs/${run_id}/${cmd_id}.log"
+  printf '.harness/logs/runs/%s/%s.log' "$run_id" "$cmd_id"
+}
+
+# _cmd_completed <run_id> <cmd_id> <command_json> <command_origin> <confirmation> <exit_code> [<duration_ms>]
+#   Emits a single command_completed JSON line with a real log_artifact and
+#   matching log_sha256 derived from _mk_cmd_log above.
+_cmd_completed() {
+  local run_id="$1" cmd_id="$2" command_json="$3" origin="$4" confirmation="$5" exit_code="$6" duration="${7:-100}"
+  local rel; rel="$(_mk_cmd_log "$run_id" "$cmd_id")"
+  local sha; sha="$(sha256sum "$TMPDIR/$rel" | awk '{print $1}')"
+  printf '{"event":"command_completed","schema_version":2,"run_id":"%s","command_id":"%s","command":%s,"command_origin":"%s","confirmation":"%s","exit_code":%s,"started_at":"2026-01-01T00:00:00Z","duration_ms":%s,"log_artifact":"%s","log_sha256":"%s"}\n' \
+    "$run_id" "$cmd_id" "$command_json" "$origin" "$confirmation" "$exit_code" "$duration" "$rel" "$sha"
+}
+
 # ============================================================================
 # Positive: Golden valid log
 # ============================================================================
@@ -232,8 +263,8 @@ assert_invalid "run_id mismatch between events" "t08" "run_id_mismatch"
 echo ""
 echo "=== Step 9: run_started ordering ==="
 
-cat > "$TMPDIR/.harness/logs/runs/t09.ndjson" <<'EOF'
-{"event":"command_completed","schema_version":2,"run_id":"t09","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
+cat > "$TMPDIR/.harness/logs/runs/t09.ndjson" <<EOF
+$(_cmd_completed t09 c1 '["echo"]' configured not_required 0)
 {"event":"run_started","schema_version":2,"run_id":"t09","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
 {"event":"run_completed","schema_version":2,"run_id":"t09","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":0}
 EOF
@@ -265,9 +296,9 @@ assert_invalid "duplicate required_command_ids rejected" "t11" "duplicate_requir
 echo ""
 echo "=== Step 11: Terminal event rules ==="
 
-cat > "$TMPDIR/.harness/logs/runs/t12.ndjson" <<'EOF'
+cat > "$TMPDIR/.harness/logs/runs/t12.ndjson" <<EOF
 {"event":"run_started","schema_version":2,"run_id":"t12","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
-{"event":"command_completed","schema_version":2,"run_id":"t12","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
+$(_cmd_completed t12 c1 '["echo"]' configured not_required 0)
 EOF
 assert_invalid "last event not terminal" "t12" "last_event_not_terminal"
 
@@ -285,11 +316,11 @@ assert_invalid "multiple terminal events rejected" "t13" "terminal_event_count"
 echo ""
 echo "=== Step 12: command_id uniqueness ==="
 
-cat > "$TMPDIR/.harness/logs/runs/t14.ndjson" <<'EOF'
+cat > "$TMPDIR/.harness/logs/runs/t14.ndjson" <<EOF
 {"event":"run_started","schema_version":2,"run_id":"t14","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["dupcmd","dupcmd","other"],"capability_level":1,"feature_id":null}
-{"event":"command_completed","schema_version":2,"run_id":"t14","command_id":"dupcmd","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
-{"event":"command_completed","schema_version":2,"run_id":"t14","command_id":"dupcmd","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
-{"event":"command_completed","schema_version":2,"run_id":"t14","command_id":"other","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
+$(_cmd_completed t14 dupcmd '["echo"]' configured not_required 0)
+$(_cmd_completed t14 dupcmd '["echo"]' configured not_required 0)
+$(_cmd_completed t14 other  '["echo"]' configured not_required 0)
 {"event":"run_completed","schema_version":2,"run_id":"t14","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":3,"executed_commands":3,"passed_commands":3,"failed_commands":0,"skipped_commands":0}
 EOF
 assert_invalid "duplicate command_id in command_completed events" "t14" "duplicate_required_command_id"
@@ -300,9 +331,9 @@ assert_invalid "duplicate command_id in command_completed events" "t14" "duplica
 echo ""
 echo "=== Step 13: Required command coverage ==="
 
-cat > "$TMPDIR/.harness/logs/runs/t15.ndjson" <<'EOF'
+cat > "$TMPDIR/.harness/logs/runs/t15.ndjson" <<EOF
 {"event":"run_started","schema_version":2,"run_id":"t15","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1","c2"],"capability_level":1,"feature_id":null}
-{"event":"command_completed","schema_version":2,"run_id":"t15","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
+$(_cmd_completed t15 c1 '["echo"]' configured not_required 0)
 {"event":"run_completed","schema_version":2,"run_id":"t15","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":2,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":1}
 EOF
 assert_invalid "missing required command coverage" "t15" "missing_required_command"
@@ -314,17 +345,17 @@ echo ""
 echo "=== Step 14: Terminal count invariants ==="
 
 # 14a: executed != passed + failed
-cat > "$TMPDIR/.harness/logs/runs/t16.ndjson" <<'EOF'
+cat > "$TMPDIR/.harness/logs/runs/t16.ndjson" <<EOF
 {"event":"run_started","schema_version":2,"run_id":"t16","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
-{"event":"command_completed","schema_version":2,"run_id":"t16","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
+$(_cmd_completed t16 c1 '["echo"]' configured not_required 0)
 {"event":"run_completed","schema_version":2,"run_id":"t16","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":5,"passed_commands":1,"failed_commands":1,"skipped_commands":0}
 EOF
 assert_invalid "executed != passed + failed" "t16" "executed_count_invariant"
 
 # 14b: planned != executed + skipped
-cat > "$TMPDIR/.harness/logs/runs/t17.ndjson" <<'EOF'
+cat > "$TMPDIR/.harness/logs/runs/t17.ndjson" <<EOF
 {"event":"run_started","schema_version":2,"run_id":"t17","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
-{"event":"command_completed","schema_version":2,"run_id":"t17","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
+$(_cmd_completed t17 c1 '["echo"]' configured not_required 0)
 {"event":"run_completed","schema_version":2,"run_id":"t17","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":99,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":0}
 EOF
 assert_invalid "planned != executed + skipped" "t17" "planned_count_invariant"
@@ -333,20 +364,20 @@ assert_invalid "planned != executed + skipped" "t17" "planned_count_invariant"
 # required=["c1","c2"] (length=2), all required completed + 1 optional (c3),
 # terminal says planned=3 (because optional command exists), executed=2, passed=1, failed=1, skipped=1
 # v2 fix: required_command_ids is a subset of planned — planned >= required is OK.
-cat > "$TMPDIR/.harness/logs/runs/t18.ndjson" <<'EOF'
+cat > "$TMPDIR/.harness/logs/runs/t18.ndjson" <<EOF
 {"event":"run_started","schema_version":2,"run_id":"t18","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1","c2"],"capability_level":1,"feature_id":null}
-{"event":"command_completed","schema_version":2,"run_id":"t18","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":1,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
-{"event":"command_completed","schema_version":2,"run_id":"t18","command_id":"c2","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
+$(_cmd_completed t18 c1 '["echo"]' configured not_required 1)
+$(_cmd_completed t18 c2 '["echo"]' configured not_required 0)
 {"event":"run_completed","schema_version":2,"run_id":"t18","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":3,"executed_commands":2,"passed_commands":1,"failed_commands":1,"skipped_commands":1}
 EOF
 assert_valid "planned > required (optional commands) is valid" "t18"
 
 # 14d: command_completed events != executed
 # required=["c1","c2"], both completed (2 events), but terminal says executed=1
-cat > "$TMPDIR/.harness/logs/runs/t19.ndjson" <<'EOF'
+cat > "$TMPDIR/.harness/logs/runs/t19.ndjson" <<EOF
 {"event":"run_started","schema_version":2,"run_id":"t19","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1","c2"],"capability_level":1,"feature_id":null}
-{"event":"command_completed","schema_version":2,"run_id":"t19","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
-{"event":"command_completed","schema_version":2,"run_id":"t19","command_id":"c2","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
+$(_cmd_completed t19 c1 '["echo"]' configured not_required 0)
+$(_cmd_completed t19 c2 '["echo"]' configured not_required 0)
 {"event":"run_completed","schema_version":2,"run_id":"t19","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":2,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":1}
 EOF
 assert_invalid "command_completed count != executed" "t19" "command_event_count_mismatch"
@@ -358,17 +389,17 @@ echo ""
 echo "=== Step 15: Origin–confirmation invariants ==="
 
 # configured with non-not_required confirmation
-cat > "$TMPDIR/.harness/logs/runs/t20.ndjson" <<'EOF'
+cat > "$TMPDIR/.harness/logs/runs/t20.ndjson" <<EOF
 {"event":"run_started","schema_version":2,"run_id":"t20","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
-{"event":"command_completed","schema_version":2,"run_id":"t20","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"confirmed","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
+$(_cmd_completed t20 c1 '["echo"]' configured confirmed 0)
 {"event":"run_completed","schema_version":2,"run_id":"t20","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":0}
 EOF
 assert_invalid "configured command with confirmed (not not_required)" "t20" "origin_confirmation_invariant"
 
 # detected with non-confirmed confirmation
-cat > "$TMPDIR/.harness/logs/runs/t21.ndjson" <<'EOF'
+cat > "$TMPDIR/.harness/logs/runs/t21.ndjson" <<EOF
 {"event":"run_started","schema_version":2,"run_id":"t21","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
-{"event":"command_completed","schema_version":2,"run_id":"t21","command_id":"c1","command":["echo"],"command_origin":"detected","confirmation":"pending","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"","log_sha256":null}
+$(_cmd_completed t21 c1 '["echo"]' detected pending 0)
 {"event":"run_completed","schema_version":2,"run_id":"t21","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":0}
 EOF
 assert_invalid "detected command with pending (not confirmed)" "t21" "origin_confirmation_invariant"

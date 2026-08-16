@@ -98,6 +98,29 @@ publish_from_temp() {
       rm -rf "$src_fix/.harness/logs/runs/$(basename "$d")" 2>/dev/null || true
       cp -R "$d" "$src_fix/.harness/logs/runs/" 2>/dev/null || true
     done
+    # Rewrite log_artifact paths inside published NDJSONs from $tmp_work's
+    # absolute prefix to $src_fix's absolute prefix. Without this, the
+    # NDJSONs reference the throwaway temp dir (which is deleted by the
+    # EXIT trap), so any validator reading them gets log_artifact_missing
+    # or log_artifact_outside_project. project_root is left as-is because
+    # some fixtures assert exact field values, but log_artifact MUST
+    # resolve to a real file inside $src_fix after publish.
+    local tmp_norm src_norm
+    if command -v cygpath >/dev/null 2>&1; then
+      tmp_norm="$(cygpath -m "$tmp_work" 2>/dev/null || printf '%s' "$tmp_work")"
+      src_norm="$(cygpath -m "$src_fix" 2>/dev/null || printf '%s' "$src_fix")"
+    else
+      tmp_norm="$tmp_work"
+      src_norm="$src_fix"
+    fi
+    # Normalize both sides to forward slashes for sed replacement
+    local tmp_esc src_esc
+    tmp_esc="$(printf '%s' "$tmp_norm" | sed 's/[\/&]/\\&/g')"
+    src_esc="$(printf '%s' "$src_norm" | sed 's/[\/&]/\\&/g')"
+    for nd in "$src_fix/.harness/logs/runs/"*.ndjson; do
+      [ -f "$nd" ] || continue
+      sed -i "s|$tmp_esc|$src_esc|g" "$nd" 2>/dev/null || true
+    done
   fi
   # Publish feature_list.json so run_ids stay in sync with the NDJSONs written
   if [ -f "$tmp_work/feature_list.json" ]; then

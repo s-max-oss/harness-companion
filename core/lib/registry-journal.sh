@@ -524,6 +524,34 @@ journal_migrate_legacy() {
     echo "journal-migrate: cannot install migrated journal" >&2
     return 1
   fi
+
+  # 5) Durability flush BEFORE removing the legacy backup (Codex r6 fix).
+  #    The previous order (sync AFTER rm legacy) violated fail-atomic: if
+  #    sync failed we had already changed the canonical journal AND deleted
+  #    the only on-disk backup of the pre-migration state — the caller
+  #    sees rc=1 but the journal is already migrated, with no recovery
+  #    route that doesn't read the broken state. Flushing first means a
+  #    sync failure can roll the journal back to its snapshot: the
+  #    legacy file is still present, the canonical journal is unchanged,
+  #    and the caller's view of "both files exactly as they were" still
+  #    holds (best-effort platform guard: MSYS provides sync as a no-op
+  #    that still returns 0; if a real sync exists and fails, fail closed).
+  if command -v sync >/dev/null 2>&1; then
+    if ! sync 2>/dev/null; then
+      # Roll the canonical journal back to its pre-migration bytes; the
+      # legacy file is still present so the caller's view of "both files
+      # untouched on failure" holds.
+      if ! mv -f "$jp_snapshot" "$jp" 2>/dev/null; then
+        echo "journal-migrate: FATAL — sync failed AND rollback failed ($legacy still present, journal migrated)" >&2
+        rm -f "$jp_snapshot"
+        return 1
+      fi
+      rm -f "$jp_snapshot"
+      echo "journal-migrate: sync failed after migration; rolled back journal" >&2
+      return 1
+    fi
+  fi
+
   if ! rm -f "$legacy"; then
     # Legacy file could not be removed — roll back the canonical journal to
     # its pre-migration bytes so the caller's view of "both files untouched
@@ -543,14 +571,6 @@ journal_migrate_legacy() {
   fi
   rm -f "$jp_snapshot"
 
-  # 5) Durability flush (best-effort platform guard: MSYS provides sync as a
-  #    no-op that still returns 0; if a real sync exists and fails, fail closed).
-  if command -v sync >/dev/null 2>&1; then
-    if ! sync 2>/dev/null; then
-      echo "journal-migrate: sync failed after migration" >&2
-      return 1
-    fi
-  fi
   return 0
 }
 

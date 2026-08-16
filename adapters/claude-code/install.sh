@@ -581,8 +581,17 @@ else
   mkdir -p "$(dirname "$SETTINGS_FILE")" 2>/dev/null || true
 fi
 
-HOOK_SS_CMD="bash \"$TARGET/scripts/hooks/session-start.sh\""
-HOOK_STOP_CMD="bash \"$TARGET/scripts/hooks/stop-handoff.sh\""
+HOOK_SS_CMD="bash \"$TARGET/adapters/claude-code/hooks/session-start.sh\""
+HOOK_STOP_CMD="bash \"$TARGET/adapters/claude-code/hooks/stop-handoff.sh\""
+
+# Codex r6 fix — stop-hook install path: register the REAL adapter hook
+# scripts (under adapters/claude-code/hooks/), matching the canonical hooks.json
+# layout. The v1 wrappers under scripts/hooks/ still exist for callers that
+# point at the OLD installed path; the canonical install must point at the
+# REAL hooks so a fresh install lands the correct path the FIRST time and
+# the install/hooks.json paths agree. Idempotency matching handles the
+# migration: an existing settings.json still pointing at scripts/hooks/* is
+# rewritten to the canonical adapter path.
 
 # Pre-compute canonical hook script paths
 HOOK_SS_SCRIPT_PATH="$(extract_script_path "$HOOK_SS_CMD")"

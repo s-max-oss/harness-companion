@@ -1,0 +1,51 @@
+{
+  "migration_id": "2026-08-17-rc6-final-contract-migration",
+  "authorized_scope": "ONE-TIME ONLY — no further applications of this migration record are permitted; the new hashes below re-freeze the fixture and any further drift is a violation",
+  "reason": "rc6 final remediation applies path (b) timeout cap 3600→7200 and tightens the runtime-manifest trust anchor (Codex r7 + r6 final blocker ①+②). The previous DWM fixture recorded the pre-path(b) state; the new fixture reflects the post-path(b) state and adds the genesis-anchored runtime-manifest. The three changed lines are the only paths the migration may alter; any other drift is a hard violation.",
+  "applied_by": "Codex r6 final remediation, 2026-08-17",
+  "applied_in_commit": "0f68dc2529d7b30a3c103ea7d7ffd38081894ba4",
+  "from_base": "9108c864388f5e79a93f5202d65105c1972f29dc",
+  "to_head": "0f68dc2529d7b30a3c103ea7d7ffd38081894ba4",
+  "changes": [
+    {
+      "path": ".harness/config.json",
+      "semantic_change": "verification.commands[0].timeout_seconds 3600 → 7200 (path (b) cap raise per Codex r6 final)",
+      "old_sha256": "6f34581cbfabad4c653e45cd5f3bf58e6bcddc2fa510666adb011f9044cadfbc",
+      "old_size": 386,
+      "new_sha256": "8ace63957d822f1a0b530ad3aa83619682cc48155d75c4746286d8f0574a49a6",
+      "new_size": 386
+    },
+    {
+      "path": ".harness/.template-snapshot.json",
+      "semantic_change": "template snapshot regenerated to reflect the path (b) timeout contract; no field-level content change beyond the contract mirror",
+      "old_sha256": "9a50ac4bf27509256ba015d800fef66006306bb7138506f0f6a64fd27419b556",
+      "old_size": 1143,
+      "new_sha256": "8fa5eba39e8d3278dc7b651c5f50eeb47dee5a2739a72cbb798f65312f375f17",
+      "new_size": 1143
+    },
+    {
+      "path": ".harness/PROJECT_BRIEF.json",
+      "semantic_change": "project brief digest regenerated to reflect the path (b) timeout contract",
+      "old_sha256": "07b3ee7738887bc38bac58ee8a452a84b208255e3d8f97099afbdbcd93c3d842",
+      "old_size": 6585,
+      "new_sha256": "2ba3a46a6a2e48d8473049930c74686ecd3a4fa465f7bcf4f5dc53ac6da9b8ce",
+      "new_size": 6585
+    }
+  ],
+  "concurrent_changes": [
+    {
+      "kind": "runtime-manifest genesis anchor",
+      "file": ".harness/runtime-manifest.jsonl",
+      "description": "rc6 final adds a genesis anchor (line 0) carrying the HEAD OID that authorized the registry. This is NOT a fixture hash change (runtime-manifest is untracked runtime state); it is a structural hardening of the trust chain recorded separately in code review."
+    }
+  ],
+  "exclusion_clause": "No path other than the three listed above may change as part of applying this migration. Any additional drift is a hard violation and the migration is rejected.",
+  "single_application_marker": "applied=true",
+  "test_anchors": {
+    "positive_exact": "All three old→new pairs match exactly AND no other fixture line drifts",
+    "negative_extra_path": "An unauthorized path change fails the apply gate",
+    "negative_mismatch": "Any old→new sha mismatch fails the apply gate",
+    "negative_reapply": "A second application of this migration (after applied=true) fails the reapply gate",
+    "negative_post_migration_drift": "Modifying any of the three paths after migration apply produces a DWM violation"
+  }
+}

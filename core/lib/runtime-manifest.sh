@@ -1,11 +1,13 @@
 #!/bin/bash
 # runtime-manifest.sh — persistent runtime-artifact byte-binding registry
 #
-# Codex r7 fix (item 3). The frozen dirty-worktree fixture pre-dates the latest
-# canonical run, so the canonical run's NDJSON + command logs + reviewer verdict
-# enter the DWM gate as `allowed_new` indefinitely — their bytes are never bound
-# and a later tamper is invisible. This registry closes that hole by binding the
-# FIRST-SEEN bytes of every runtime artifact in the mutable namespace:
+# Codex r7 fix (item 3, hardened by rc6 final remediation).
+#
+# The frozen dirty-worktree fixture pre-dates the latest canonical run, so the
+# canonical run's NDJSON + command logs + reviewer verdict enter the DWM gate as
+# `allowed_new` indefinitely — their bytes are never bound and a later tamper
+# is invisible. This registry closes that hole by binding the FIRST-SEEN bytes
+# of every runtime artifact in the mutable namespace:
 #
 #   .harness/logs/runs/<run_id>.ndjson      kind=ndjson  → byte-immutable
 #   .harness/logs/runs/<run_id>/<cmd>.log   kind=log     → byte-immutable
@@ -13,70 +15,234 @@
 #                                             registered bytes must remain a
 #                                             PREFIX of the current file)
 #
-# The registry lives at <project_dir>/.harness/runtime-manifest.jsonl (one
-# compact JSON object per line, appended-only). Writers register an artifact
-# immediately after creating it; the DWM gate (dirty-worktree-manifest.sh)
-# reads the registry and enforces the per-kind rule against current bytes.
+# The registry lives at <project_dir>/.harness/runtime-manifest.jsonl and is
+# protected by:
+#   1. A genesis anchor (line 0): when the registry is first created, the
+#      caller's RUNTIME_MANIFEST_GENESIS environment variable (the HEAD OID
+#      that authorized this registry's creation) is written as the FIRST line.
+#      The DWM gate validates this prefix byte-for-byte against
+#      `git rev-parse HEAD:<registry path>` BEFORE trusting any subsequent
+#      entry. A tampered genesis anchor (or a registry rewritten to drop it)
+#      fails the gate wholesale (runtime_manifest_genesis_mismatch).
+#   2. Strict append-only writes via mkdir atomic lock (acquire_lock /
+#      release_lock from lock-registry.sh) — no in-place mutation, no `|| true`
+#      swallowing.
+#   3. Hard failure on missing file, missing hash tool, or append error — all
+#      runtime_register paths return non-zero. Callers MUST propagate.
 #
 # Functions:
 #   runtime_manifest_path <project_dir>              → registry path
-#   runtime_register <project_dir> <rel_path> <kind> → idempotent append
+#   runtime_manifest_genesis_value <project_dir>    → genesis string (HEAD OID)
+#   runtime_register <project_dir> <rel_path> <kind> → idempotent append (rc≠0 on fail)
 #   runtime_register_run <project_dir> <run_id>      → register run NDJSON + logs
-#
-# `runtime_register` is idempotent: a path is recorded ONCE (its first-seen
-# bytes); re-registering the same path is a no-op so a verdict that later grows
-# by append keeps its first-seen binding intact.
 
 # ---- runtime_manifest_path --------------------------------------------------
 runtime_manifest_path() {
   printf '%s/.harness/runtime-manifest.jsonl' "$1"
 }
 
+# ---- runtime_manifest_genesis_value -----------------------------------------
+# The HEAD OID that authorized this registry's creation. DWM compares this
+# value byte-for-byte against the committed genesis line. If unset in the
+# environment, fall back to `git rev-parse HEAD` (the canonical review-time
+# anchor). Callers MUST set RUNTIME_MANIFEST_GENESIS to make the intent
+# explicit; the fallback is for reviewer convenience only.
+runtime_manifest_genesis_value() {
+  local project_dir="$1"
+  if [ -n "${RUNTIME_MANIFEST_GENESIS:-}" ]; then
+    printf '%s' "$RUNTIME_MANIFEST_GENESIS"
+    return 0
+  fi
+  if command -v git >/dev/null 2>&1 && \
+     git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
+    git -C "$project_dir" rev-parse HEAD 2>/dev/null
+    return 0
+  fi
+  return 1
+}
+
 # ---- _runtime_file_sha256 ----------------------------------------------------
-# Canonical SHA-256 of a file's bytes, or "null" when unavailable.
+# Canonical SHA-256 of a file's bytes. Returns non-zero on failure; the caller
+# must propagate. (Previously this returned "null" on missing tools, which
+# silently dropped the binding — fail-closed.)
 _runtime_file_sha256() {
   local f="$1"
+  if [ ! -f "$f" ]; then
+    return 1
+  fi
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$f" 2>/dev/null | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$f" 2>/dev/null | awk '{print $1}'
-  else
-    printf 'null'
+    return $?
   fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$f" 2>/dev/null | awk '{print $1}'
+    return $?
+  fi
+  return 1
+}
+
+# ---- _runtime_lock_dir ------------------------------------------------------
+runtime_lock_dir() {
+  local project_dir="$1"
+  printf '%s/.harness/.registry.lock/runtime-manifest' "$project_dir"
+}
+
+# ---- _runtime_acquire / _runtime_release -----------------------------------
+# Use the project's lock-registry.sh when sourced. The caller MUST source
+# lock-registry.sh before calling runtime_register / runtime_register_run.
+#
+# Lock topology: the LEAF for this lock is <project_dir>/.harness/.registry.lock
+# /runtime-manifest. The PARENT (.harness/.registry.lock) is ALSO the leaf for
+# the registry-write lock held by core/harness-verify.sh / harness-feature.sh
+# during feature_list mutations. Both locks share the same parent so that
+# concurrent runtime register vs verify-write serialize through the SAME
+# parent. The mkdir-acquire backend treats a leaf as "held" if the leaf
+# directory exists; an empty parent (no metadata) is NOT a valid held state
+# — it is an orphaned bootstrap half-step that blocks the OTHER holder's
+# mkdir-acquire with no stale-recovery path. Therefore:
+#   - Pre-create the parent ONLY if it does not already exist. If it exists
+#     but is empty (no metadata files), it must be a leftover from a crashed
+#     prior holder — remove it so the OTHER holder can claim via mkdir-acquire.
+#   - Same empty-leaf recovery for the runtime-manifest leaf itself.
+#   - acquire_lock's stdout prints the lock token (callers can pass it to
+#     release_lock without a subshell). runtime-manifest must NOT leak that
+#     token into callers' stdout. Redirect to /dev/null and rely on
+#     $LOCK_REGISTRY_TOKEN (set by acquire_lock into the env) for release.
+_runtime_acquire() {
+  local project_dir="$1"
+  local lockdir parent
+  lockdir="$(runtime_lock_dir "$project_dir")"
+  parent="$(dirname "$lockdir")"
+  # Same-host orphan recovery: an empty parent or leaf with no metadata files
+  # is a leftover bootstrap half-step from a crashed prior holder. Remove it
+  # so this caller (or the OTHER holder with the same parent) can claim the
+  # leaf via mkdir-acquire. Safe because empty = no other holder can exist:
+  # any holder would have left metadata inside.
+  if [ -d "$parent" ] && [ -z "$(ls -A "$parent" 2>/dev/null)" ]; then
+    rmdir "$parent" 2>/dev/null || true
+  fi
+  if [ ! -d "$parent" ]; then
+    mkdir -p "$parent"
+  fi
+  if [ -d "$lockdir" ] && [ -z "$(ls -A "$lockdir" 2>/dev/null)" ]; then
+    rmdir "$lockdir" 2>/dev/null || true
+  fi
+  acquire_lock "$lockdir" 10 >/dev/null
+  return $?
+}
+_runtime_release() {
+  local project_dir="$1"
+  release_lock "$(runtime_lock_dir "$project_dir")" "${LOCK_REGISTRY_TOKEN:-}"
+  return $?
+}
+
+# ---- _runtime_init_registry -------------------------------------------------
+# Create the registry file (with genesis anchor) under lock. Idempotent:
+# existing registry is left untouched. Returns 0 on first-create success, 1 on
+# any failure, and 2 if the registry already exists (no-op).
+_runtime_init_registry() {
+  local project_dir="$1" mf="$2"
+  if [ -f "$mf" ]; then
+    return 2
+  fi
+  local genesis
+  if ! genesis="$(runtime_manifest_genesis_value "$project_dir")"; then
+    echo "runtime-manifest: cannot determine genesis anchor (no RUNTIME_MANIFEST_GENESIS and not a git repo)" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$mf")"
+  # tmp + mv = atomic creation; partial writes leave no observable state.
+  local tmp="${mf}.tmp.$$"
+  if ! jq -cn --arg g "$genesis" '{genesis:$g}' > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv "$tmp" "$mf" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  return 0
 }
 
 # ---- runtime_register -------------------------------------------------------
 # Bind the first-seen bytes of <rel_path> (relative to <project_dir>) under
-# <kind>. Skips silently for missing files / missing hash tooling. Idempotent:
-# an already-registered path is never rewritten.
+# <kind>. Hard-fails on missing file, missing hash tool, or append error.
+# Idempotent: an already-registered path is a no-op. Caller MUST propagate
+# the return code (no `|| true`).
 runtime_register() {
   local project_dir="$1" rel="$2" kind="$3"
-  local f="$project_dir/$rel" mf h sz
-  [ -f "$f" ] || return 0
-  mf="$(runtime_manifest_path "$project_dir")"
-  # Idempotency: skip if this exact path is already bound.
-  if [ -f "$mf" ] && jq -e -s --arg p "$rel" 'any(.[]; .path == $p)' "$mf" >/dev/null 2>&1; then
-    return 0
+  local f="$project_dir/$rel" mf
+  # ---- Hard fail on missing file ----
+  if [ ! -f "$f" ]; then
+    echo "runtime-manifest: refusing to register missing file: $rel" >&2
+    return 1
   fi
-  h="$(_runtime_file_sha256 "$f")"
-  { [ -z "$h" ] || [ "$h" = "null" ]; } && return 0
-  sz="$(wc -c < "$f" 2>/dev/null | tr -d ' \t\r')"
-  [ -z "$sz" ] && sz=0
+  mf="$(runtime_manifest_path "$project_dir")"
   mkdir -p "$(dirname "$mf")"
-  jq -cn --arg p "$rel" --arg k "$kind" --arg h "$h" --argjson s "$sz" \
-    '{path:$p, kind:$k, sha256:$h, size:$s}' >> "$mf" 2>/dev/null || true
-  return 0
+  # Acquire lock for the registry-init + idempotency-check + append window.
+  _runtime_acquire "$project_dir" || {
+    echo "runtime-manifest: failed to acquire registry lock" >&2
+    return 1
+  }
+  local lock_rc=0
+  {
+    # Bootstrap registry (genesis) if absent.
+    if [ ! -f "$mf" ]; then
+      if ! _runtime_init_registry "$project_dir" "$mf"; then
+        lock_rc=1
+      fi
+    fi
+    if [ "$lock_rc" -eq 0 ]; then
+      # Idempotency: skip if this exact path is already bound.
+      if jq -e -s --arg p "$rel" 'any(.[]; select(.path == $p))' "$mf" >/dev/null 2>&1; then
+        lock_rc=0
+      else
+        local h sz
+        if ! h="$(_runtime_file_sha256 "$f")"; then
+          echo "runtime-manifest: sha256 unavailable for $rel (sha256sum/shasum missing or unreadable)" >&2
+          lock_rc=1
+        else
+          sz="$(wc -c < "$f" 2>/dev/null | tr -d ' \t\r')"
+          [ -n "$sz" ] || sz=0
+          local tmp="${mf}.tmp.$$"
+          if ! jq -cn --arg p "$rel" --arg k "$kind" --arg h "$h" --argjson s "$sz" \
+              '{path:$p, kind:$k, sha256:$h, size:$s}' > "$tmp" 2>/dev/null; then
+            rm -f "$tmp"
+            echo "runtime-manifest: failed to build entry for $rel" >&2
+            lock_rc=1
+          elif ! (cat "$mf" 2>/dev/null; cat "$tmp") > "${mf}.new.$$" 2>/dev/null; then
+            rm -f "$tmp" "${mf}.new.$$"
+            echo "runtime-manifest: failed to assemble registry for $rel" >&2
+            lock_rc=1
+          elif ! mv "${mf}.new.$$" "$mf" 2>/dev/null; then
+            rm -f "$tmp" "${mf}.new.$$"
+            echo "runtime-manifest: atomic append failed for $rel" >&2
+            lock_rc=1
+          else
+            rm -f "$tmp"
+          fi
+        fi
+      fi
+    fi
+  } || lock_rc=1
+  _runtime_release "$project_dir" || true
+  return "$lock_rc"
 }
 
 # ---- runtime_register_run ---------------------------------------------------
 # Register a completed run's NDJSON and every per-command log under its run dir.
+# Hard-fails if any single registration fails (caller MUST propagate).
 runtime_register_run() {
   local project_dir="$1" run_id="$2"
-  runtime_register "$project_dir" ".harness/logs/runs/${run_id}.ndjson" "ndjson" || true
-  local logf
-  for logf in "$project_dir/.harness/logs/runs/${run_id}"/*.log; do
-    [ -f "$logf" ] || continue
-    runtime_register "$project_dir" ".harness/logs/runs/${run_id}/$(basename "$logf")" "log" || true
-  done
-  return 0
+  local rc=0
+  runtime_register "$project_dir" ".harness/logs/runs/${run_id}.ndjson" "ndjson" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    local logf
+    for logf in "$project_dir/.harness/logs/runs/${run_id}"/*.log; do
+      [ -f "$logf" ] || continue
+      runtime_register "$project_dir" ".harness/logs/runs/${run_id}/$(basename "$logf")" "log" || rc=$?
+      [ "$rc" -eq 0 ] || break
+    done
+  fi
+  return "$rc"
 }

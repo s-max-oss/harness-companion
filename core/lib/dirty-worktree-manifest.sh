@@ -583,21 +583,32 @@ dwm_compare_manifest() {
   # gates would be skipped on the target platform. Strip CR from the stream.
   done <<<"$(printf '%s\n' "$result" | jq -r '.changed_mutable[]' | tr -d '\r')"
 
-  # ---- Codex r7: runtime-artifact byte-binding enforcement ----
+  # ---- Codex r7 + rc6 final remediation: runtime-artifact byte-binding ----
   # The frozen recorded fixture pre-dates the latest canonical run, so the
   # canonical NDJSON + command logs + reviewer verdict would otherwise enter as
   # `allowed_new` indefinitely and their bytes would never be bound. The
   # persistent runtime-manifest registry binds the FIRST-SEEN bytes of each
   # runtime artifact; once the registry exists it is the authoritative binding,
-  # independent of the recorded fixture. A REGISTERED artifact that changed is a
-  # violation even when the fixture never recorded it:
-  #   ndjson/log  → byte-immutable  (runtime_artifact_not_byte_equal)
-  #   verdict     → append-only     (runtime_artifact_not_append_only)
-  # An UNREGISTERED runtime artifact is a first appearance (still governed by
-  # the allowed_new classification above); the bootstrap + writer registration
-  # ensure real artifacts are always bound before the gate runs.
+  # independent of the recorded fixture.
+  #
+  # Protection layers (rc6 final):
+  #   1. Genesis anchor (line 0 of the registry) MUST equal the HEAD OID that
+  #      authorized this registry's creation. The DWM gate compares the
+  #      committed `git rev-parse HEAD:<registry path>` (or the explicit
+  #      RUNTIME_MANIFEST_GENESIS env var, if set) byte-for-byte against the
+  #      in-tree genesis line. Any drift = fail-closed.
+  #   2. A REGISTERED artifact that changed is a violation:
+  #        ndjson/log → runtime_artifact_not_byte_equal
+  #        verdict    → runtime_artifact_not_append_only
+  #   3. An UNREGISTERED runtime artifact (NDJSON/log/verdict path appearing in
+  #      the current tree but missing from the registry) is a HARD violation
+  #      (rc6 final: previously skipped via `continue`, which let an attacker
+  #      silently introduce a new forged artifact). The writer path must
+  #      register before the gate runs.
+  #   4. Malformed registry / duplicate path lines / missing genesis line all
+  #      fail-closed (no silent `reg_json="[]"` fallback).
   if [ -f "$project_dir/.harness/runtime-manifest.jsonl" ]; then
-    local reg_json reg_dup
+    local reg_json reg_dup reg_genesis reg_genesis_expected reg_entry_count
     if ! reg_json="$(jq -s '.' "$project_dir/.harness/runtime-manifest.jsonl" 2>/dev/null)"; then
       # Malformed registry → fail-closed (never silently drop the binding).
       mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_invalid"}')")
@@ -608,6 +619,28 @@ dwm_compare_manifest() {
     reg_dup="$(printf '%s' "$reg_json" | jq -r '[group_by(.path)[] | select(length > 1) | .[0].path] | length' 2>/dev/null)"
     if [ "$reg_dup" != "0" ] && [ -n "$reg_dup" ]; then
       mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_duplicate_path"}')")
+    fi
+
+    # ---- Genesis anchor validation -------------------------------------------
+    # Expected anchor (in priority order):
+    #   (a) explicit RUNTIME_MANIFEST_GENESIS env var (set by DWM callers and
+    #       canonical Reviewer), else
+    #   (b) `git rev-parse HEAD` (the current working-tree HEAD).
+    # The committed tree's genesis is the first line of the registry itself
+    # (`{genesis: "<OID>"}`); if the in-tree line does not equal the expected
+    # anchor, the registry has been tampered with.
+    reg_genesis_expected="${RUNTIME_MANIFEST_GENESIS:-}"
+    if [ -z "$reg_genesis_expected" ] && command -v git >/dev/null 2>&1 \
+       && git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
+      reg_genesis_expected="$(git -C "$project_dir" rev-parse HEAD 2>/dev/null)"
+    fi
+    reg_genesis="$(printf '%s' "$reg_json" | jq -r '.[0].genesis // empty' 2>/dev/null)"
+    reg_entry_count="$(printf '%s' "$reg_json" | jq -r 'length' 2>/dev/null)"
+    if [ -z "$reg_genesis" ]; then
+      mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_genesis_missing"}')")
+    elif [ -n "$reg_genesis_expected" ] && [ "$reg_genesis" != "$reg_genesis_expected" ]; then
+      mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" --arg e "$reg_genesis_expected" --arg a "$reg_genesis" \
+        '{path:$p, reason:"runtime_manifest_genesis_mismatch", expected:$e, actual:$a}')")
     fi
 
     local cpath centry ckind csha rsha rsize actual
@@ -621,7 +654,13 @@ dwm_compare_manifest() {
       esac
       centry="$(printf '%s' "$reg_json" | jq -c --arg p "$cpath" 'map(select(.path == $p)) | .[0] // null' 2>/dev/null)"
       if [ "$centry" = "null" ] || [ -z "$centry" ]; then
-        continue   # unregistered = first appearance, not a violation
+        # rc6 final: unregistered runtime artifact = hard violation (previously
+        # silently skipped, which let attackers introduce forged artifacts).
+        # The genesis anchor + hard-failing register ensure this never fires
+        # in a healthy run.
+        mutable_violations+=("$(jq -nc --arg p "$cpath" --arg k "$ckind" \
+          '{path:$p, reason:"runtime_artifact_unregistered", kind:$k}')")
+        continue
       fi
       csha="$(jq -r --arg p "$cpath" 'select(.path == $p) | .sha256 // ""' "$cur_file" | head -1)"
       rsha="$(printf '%s' "$centry" | jq -r '.sha256 // ""')"

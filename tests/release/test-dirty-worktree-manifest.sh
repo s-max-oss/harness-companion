@@ -45,7 +45,10 @@ source "$ROOT_DIR/core/lib/dirty-worktree-manifest.sh"
 # append-only mutation journal exactly like the CLI's two-phase commit.
 # shellcheck source=../../core/lib/registry-journal.sh
 source "$ROOT_DIR/core/lib/registry-journal.sh"
-# Codex r7: the runtime-artifact byte-binding registry (writer-side register).
+# rc6 final: runtime-manifest atomic writes need lock-registry.sh sourced.
+# shellcheck source=../../core/lib/lock-registry.sh
+source "$ROOT_DIR/core/lib/lock-registry.sh"
+# Codex r7 + rc6 final: the runtime-artifact byte-binding registry.
 # shellcheck source=../../core/lib/runtime-manifest.sh
 source "$ROOT_DIR/core/lib/runtime-manifest.sh"
 
@@ -1072,11 +1075,121 @@ D="$(mktemp -d "$TMPDIR/t41-XXXX")"
 setup_repo "$D"
 OUT="$(mf "$D" t41)"
 dwm_emit_manifest "$D" "$OUT"
+# rc6 final: also register setup_repo's run-1.ndjson (a runtime artifact) so
+# it doesn't trigger an "unregistered" violation and pollute the assertion.
+runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson"
 runtime_register "$D" ".harness/reviews/feature/F-CONV-01.jsonl" "verdict"
 printf 'verdict-1-APPENDED\n' >> "$D/.harness/reviews/feature/F-CONV-01.jsonl"
 RES="$(dwm_compare_manifest "$D" "$OUT")"
 check "T41a: registered verdict append still valid" true "$(printf '%s' "$RES" | jq -r '.valid')"
 check "T41b: no runtime_artifact violations" 0 "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason | startswith("runtime_artifact"))] | length')"
+
+# ---- T42 (Codex rc6 final blocker ①): unregistered runtime artifact rejected ---
+# A new NDJSON appears under .harness/logs/runs/ without ever being registered
+# in .harness/runtime-manifest.jsonl. The gate MUST reject (rc6 final: the
+# previous `continue` allowed an attacker to introduce a forged artifact by
+# editing only the file bytes — no manifest entry required).
+D="$(mktemp -d "$TMPDIR/t42-XXXX")"
+setup_repo "$D"
+# Initialize the registry WITH a genesis anchor + register the existing run-1
+# artifact, so the runtime-artifact code path is active. THEN introduce a new
+# NDJSON that is NOT registered → the gate must reject.
+HEAD_SHA_T42="$(git -C "$D" rev-parse HEAD)"
+printf '{"genesis":"%s"}\n' "$HEAD_SHA_T42" > "$D/.harness/runtime-manifest.jsonl"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA_T42" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
+# Now introduce the unregistered artifact.
+mkdir -p "$D/.harness/logs/runs/run-unreg"
+printf '{"event":"run_started","schema_version":2,"run_id":"run-unreg","started_at":"2026-01-01T00:00:00Z","project_root":"%s","vcs_revision":"%s","vcs_revision_source":"git","workspace_fingerprint_initial":"sha256:%s","config_sha256":"sha256:%s","required_command_ids":["c1"],"capability_level":2,"feature_id":"F-MAINT-01"}\n' \
+  "$D" "$HEAD_SHA_T42" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" > "$D/.harness/logs/runs/run-unreg.ndjson"
+OUT="$(mf "$D" t42)"
+dwm_emit_manifest "$D" "$OUT"
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T42a: unregistered runtime artifact invalid" false "$(printf '%s' "$RES" | jq -r '.valid')"
+check "T42b: violation runtime_artifact_unregistered" "1" "$(printf '%s' "$RES" | jq -r '[.violations[] | select(.path == ".harness/logs/runs/run-unreg.ndjson" and .reason == "runtime_artifact_unregistered")] | length')"
+
+# ---- T43 (Codex rc6 final blocker ①+②): joint tamper of registry+artifact ----
+# Attacker changes the NDJSON AND the registry's recorded sha/size in lockstep.
+# The previous code trusted the registry as authoritative, so this passed.
+# rc6 final: the registry is genesis-anchored to HEAD, so tampering with the
+# registry itself shifts the genesis anchor (or breaks the byte prefix) and
+# fails the gate.
+D="$(mktemp -d "$TMPDIR/t43-XXXX")"
+setup_repo "$D"
+mkdir -p "$D/.harness/logs/runs/run-tamper"
+# Use a fixed captured sha256/size as the "registered" first-seen state.
+ORIG_BYTES='{"event":"run_started","schema_version":2,"run_id":"run-tamper","started_at":"2026-01-01T00:00:00Z"}'
+printf '%s\n' "$ORIG_BYTES" > "$D/.harness/logs/runs/run-tamper.ndjson"
+ORIG_SHA="$(sha256sum "$D/.harness/logs/runs/run-tamper.ndjson" | awk '{print $1}')"
+ORIG_SZ="$(wc -c < "$D/.harness/logs/runs/run-tamper.ndjson")"
+# Pre-create the registry with a genesis anchor + a binding for run-tamper.ndjson.
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+printf '{"genesis":"%s"}\n' "$HEAD_SHA" > "$D/.harness/runtime-manifest.jsonl"
+# Register ALL existing runtime artifacts (the ones setup_repo creates), so
+# the runtime-artifact code path doesn't fire on legitimate fixtures.
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/reviews/feature/F-CONV-01.jsonl" "verdict" >/dev/null 2>&1
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-tamper.ndjson" "ndjson" >/dev/null 2>&1
+# First capture manifest while clean → should be valid.
+OUT="$(mf "$D" t43-baseline)"
+dwm_emit_manifest "$D" "$OUT"
+RES_BASE="$(dwm_compare_manifest "$D" "$OUT")"
+check "T43a: clean state with genesis valid" true "$(printf '%s' "$RES_BASE" | jq -r '.valid')"
+# Now: rewrite BOTH the artifact (tampered bytes) AND the registry line
+# (matching new sha/size, but appending a duplicate path → registry wholesale
+# rejection). The duplicate-path guard plus the genesis anchor make this
+# fail. The attacker bypasses runtime_register's idempotency by editing the
+# file directly — the duplicate guard in dwm_compare_manifest catches the
+# forged second binding.
+printf '%s\n' "${ORIG_BYTES}TAMPERED" > "$D/.harness/logs/runs/run-tamper.ndjson"
+NEW_SHA="$(sha256sum "$D/.harness/logs/runs/run-tamper.ndjson" | awk '{print $1}')"
+NEW_SZ="$(wc -c < "$D/.harness/logs/runs/run-tamper.ndjson")"
+# Append a SECOND binding for the same path with the tampered hash (bypassing
+# runtime_register, which would otherwise dedup).
+printf '{"path":".harness/logs/runs/run-tamper.ndjson","kind":"ndjson","sha256":"%s","size":%s}\n' "$NEW_SHA" "$NEW_SZ" >> "$D/.harness/runtime-manifest.jsonl"
+OUT2="$(mf "$D" t43-tamper)"
+dwm_emit_manifest "$D" "$OUT2"
+RES_TAMPER="$(dwm_compare_manifest "$D" "$OUT2")"
+check "T43b: registry duplicate path → invalid" false "$(printf '%s' "$RES_TAMPER" | jq -r '.valid')"
+check "T43c: violation runtime_manifest_duplicate_path" "1" "$(printf '%s' "$RES_TAMPER" | jq '[.violations[] | select(.reason == "runtime_manifest_duplicate_path")] | length')"
+
+# ---- T44 (Codex rc6 final): genesis anchor mismatch ---------------------------
+# Set RUNTIME_MANIFEST_GENESIS to a value different from the in-tree genesis
+# line. The gate MUST reject (rc6 final: previously the registry was trusted
+# as-is, allowing a tampered genesis to silently pass).
+D="$(mktemp -d "$TMPDIR/t44-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+# In-tree genesis says HEAD; env override says a DIFFERENT OID. Register the
+# setup_repo runtime artifacts so the test fails on the genesis mismatch
+# (not on a chain of unregistered violations).
+printf '{"genesis":"%s"}\n' "$HEAD_SHA" > "$D/.harness/runtime-manifest.jsonl"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/reviews/feature/F-CONV-01.jsonl" "verdict" >/dev/null 2>&1
+OUT="$(mf "$D" t44)"
+dwm_emit_manifest "$D" "$OUT"
+# Run with a different expected genesis.
+RES="$(RUNTIME_MANIFEST_GENESIS="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" dwm_compare_manifest "$D" "$OUT")"
+check "T44a: genesis env override mismatch invalid" false "$(printf '%s' "$RES" | jq -r '.valid')"
+check "T44b: violation runtime_manifest_genesis_mismatch" "1" "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_manifest_genesis_mismatch")] | length')"
+
+# ---- T45 (Codex rc6 final): missing genesis anchor ----------------------------
+D="$(mktemp -d "$TMPDIR/t45-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+# Registry exists but its first line is NOT a genesis line (attacker dropped it).
+# Register the existing runtime artifacts first, then drop the genesis line so
+# the gate fires on the missing-genesis reason (not unregistered chain).
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/reviews/feature/F-CONV-01.jsonl" "verdict" >/dev/null 2>&1
+# Now read the existing registry and rewrite it WITHOUT the genesis anchor.
+existing_lines="$(tail -n +2 "$D/.harness/runtime-manifest.jsonl")"
+printf '%s\n' "$existing_lines" > "$D/.harness/runtime-manifest.jsonl"
+OUT="$(mf "$D" t45)"
+dwm_emit_manifest "$D" "$OUT"
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T45a: missing genesis line invalid" false "$(printf '%s' "$RES" | jq -r '.valid')"
+check "T45b: violation runtime_manifest_genesis_missing" "1" "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_manifest_genesis_missing")] | length')"
 
 # ---- D12 (Codex r4): symlink PLAN.json is rejected, not followed ------------
 # `[ -f ]` follows symlinks, so without the explicit symlink guard a symlink →

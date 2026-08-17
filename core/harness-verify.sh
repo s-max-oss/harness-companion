@@ -556,7 +556,7 @@ if [ "$PLANNED" -eq 0 ]; then
     echo "FATAL: failed to write run_completed (no_checks) terminal event" >&2
     exit 2
   fi
-  runtime_register_run "$PROJECT_DIR" "$RUN_ID" || true
+  runtime_register_run "$PROJECT_DIR" "$RUN_ID"
   echo "Result: no_checks (0 verification steps configured)"
   echo "Add verification commands to .harness/config.json to enable passing eligibility."
 elif [ "${#EFFECTIVE_REQUIRED[@]}" -eq 0 ]; then
@@ -600,7 +600,7 @@ elif [ "${#EFFECTIVE_REQUIRED[@]}" -eq 0 ]; then
     echo "FATAL: failed to write run_completed (no_checks) terminal event" >&2
     exit 2
   fi
-  runtime_register_run "$PROJECT_DIR" "$RUN_ID" || true
+  runtime_register_run "$PROJECT_DIR" "$RUN_ID"
   if [ "${#REQUIRED_IDS[@]}" -eq 0 ]; then
     echo "Result: no_checks (0 required verification steps — only optional commands configured)"
     echo "Mark at least one command required_for_passing: true to enable passing eligibility."
@@ -694,7 +694,7 @@ else
       exit 2
     fi
     echo "Result: FAILED (required-coverage: ${#MISSING_REQUIRED[@]} required command(s) never executed)"
-    runtime_register_run "$PROJECT_DIR" "$RUN_ID" || true
+    runtime_register_run "$PROJECT_DIR" "$RUN_ID"
     exit 1
   fi
 
@@ -718,7 +718,7 @@ else
     echo "FATAL: failed to write run_completed (passed) terminal event" >&2
     exit 2
   fi
-  runtime_register_run "$PROJECT_DIR" "$RUN_ID" || true
+  runtime_register_run "$PROJECT_DIR" "$RUN_ID"
 
   # ---- Optionally update feature_list.json ----
   if [ "$WRITE" = "true" ]; then
@@ -741,12 +741,23 @@ else
     # Parent .harness/ is guaranteed to exist at this point (logs dir was
     # created above). The lock primitive uses plain mkdir for POSIX-atomic
     # mutual exclusion, so the parent must pre-exist.
+    # IMPORTANT: a sibling lock (runtime-manifest) holds a sub-leaf under
+    # this same parent. If that sibling recently released while holding the
+    # leaf, the leaf is gone — but it may have left the PARENT empty if
+    # nothing else was inside. The mkdir-acquire backend treats an empty
+    # leaf as "locked by unknown owner" (no metadata → stale-recovery
+    # can't evaluate), and the 10s timeout burns down. Detect that case
+    # (parent exists but empty) and rmdir it so the backend can claim it
+    # cleanly. Safe: empty parent = no other holder can exist on any path.
+    if [ -d "$LOCK_DIR" ] && [ -z "$(ls -A "$LOCK_DIR" 2>/dev/null)" ]; then
+      rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
     # IMPORTANT: do NOT wrap acquire_lock in $(...) — for the flock backend,
     # the FD that holds the kernel lock must outlive the subshell. Calling
     # acquire_lock directly keeps FD 9 open in this shell; the token is
     # exposed via $LOCK_REGISTRY_TOKEN. release_lock reads from env (or 2nd
     # arg).
-    acquire_lock "$LOCK_DIR" 10 || {
+    acquire_lock "$LOCK_DIR" 10 >/dev/null || {
       rc=$?
       echo "verify: lock_timeout — could not acquire registry lock after 10s" >&2
       exit "$rc"

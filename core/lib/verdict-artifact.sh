@@ -684,11 +684,14 @@ verdict_append_record() {
     echo "verdict: append failed for $path" >&2
     return 1
   }
-  # Codex r7: bind the verdict's first-seen bytes in the runtime-manifest
-  # registry so the DWM gate enforces append-only on later checks (idempotent —
-  # a later append never rewrites the first-seen binding).
+  # Codex r7 + rc6 final remediation: bind the verdict's first-seen bytes in
+  # the runtime-manifest registry so the DWM gate enforces append-only on
+  # later checks (idempotent — a later append never rewrites the first-seen
+  # binding). All registration failures are HARD failures (rc6 final: the
+  # previous `|| true` swallowed registry-write errors and produced a silent
+  # trust gap).
   if type runtime_register >/dev/null 2>&1; then
-    runtime_register "$project_dir" ".harness/reviews/$kind/$id.jsonl" "verdict" || true
+    runtime_register "$project_dir" ".harness/reviews/$kind/$id.jsonl" "verdict"
   fi
   printf '%s' "$rec"
   return 0

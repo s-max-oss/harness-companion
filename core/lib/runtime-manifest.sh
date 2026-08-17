@@ -164,6 +164,41 @@ _runtime_init_registry() {
   return 0
 }
 
+# ---- _runtime_prepend_genesis -----------------------------------------------
+# One-shot migration helper for legacy registries written before the rc6
+# final genesis anchor requirement: the file exists but line 0 is a regular
+# path entry, not `{genesis: "..."}`. Atomic prepend under lock: builds a
+# tmp file `{genesis}\n<existing>`, replaces atomically. Returns 0 on
+# success, 1 on any failure (caller MUST propagate). On a registry that
+# already has a genesis line, returns 2 (no-op, no error).
+_runtime_prepend_genesis() {
+  local project_dir="$1" mf="$2"
+  # Re-check under lock to avoid races.
+  if head -1 "$mf" 2>/dev/null | jq -e 'has("genesis")' >/dev/null 2>&1; then
+    return 2
+  fi
+  local genesis
+  if ! genesis="$(runtime_manifest_genesis_value "$project_dir")"; then
+    echo "runtime-manifest: cannot determine genesis anchor for prepend (no RUNTIME_MANIFEST_GENESIS and not a git repo)" >&2
+    return 1
+  fi
+  local tmp="${mf}.prepend.$$"
+  if ! jq -cn --arg g "$genesis" '{genesis:$g}' > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! (cat "$tmp"; cat "$mf") > "${mf}.new.$$" 2>/dev/null; then
+    rm -f "$tmp" "${mf}.new.$$"
+    return 1
+  fi
+  if ! mv "${mf}.new.$$" "$mf" 2>/dev/null; then
+    rm -f "$tmp" "${mf}.new.$$"
+    return 1
+  fi
+  rm -f "$tmp"
+  return 0
+}
+
 # ---- runtime_register -------------------------------------------------------
 # Bind the first-seen bytes of <rel_path> (relative to <project_dir>) under
 # <kind>. Hard-fails on missing file, missing hash tool, or append error.
@@ -186,9 +221,21 @@ runtime_register() {
   }
   local lock_rc=0
   {
-    # Bootstrap registry (genesis) if absent.
+    # Bootstrap registry (genesis) if absent, OR prepend genesis to an
+    # existing legacy registry that was written before the rc6 final genesis
+    # anchor requirement. The legacy file is untracked runtime state, so this
+    # one-shot prepend is the tracked-work migration specified in
+    # docs/migrations/2026-08-17-rc6-final-contract-migration.json
+    # (concurrent_changes.runtime-manifest genesis anchor). After this runs
+    # once, the genesis line is in place and the rc6 DWM gate accepts the
+    # registry. Safe under the lock because no concurrent register sees the
+    # in-between state.
     if [ ! -f "$mf" ]; then
       if ! _runtime_init_registry "$project_dir" "$mf"; then
+        lock_rc=1
+      fi
+    elif ! head -1 "$mf" 2>/dev/null | jq -e 'has("genesis")' >/dev/null 2>&1; then
+      if ! _runtime_prepend_genesis "$project_dir" "$mf"; then
         lock_rc=1
       fi
     fi

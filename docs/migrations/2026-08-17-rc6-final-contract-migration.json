@@ -2,10 +2,10 @@
   "migration_id": "2026-08-17-rc6-final-contract-migration",
   "authorized_scope": "ONE-TIME ONLY — no further applications of this migration record are permitted; the new hashes below re-freeze the fixture and any further drift is a violation",
   "reason": "rc6 final remediation applies path (b) timeout cap 3600→7200 and tightens the runtime-manifest trust anchor (Codex r7 + r6 final blocker ①+②). The previous DWM fixture recorded the pre-path(b) state; the new fixture reflects the post-path(b) state and adds the genesis-anchored runtime-manifest. The three changed lines are the only paths the migration may alter; any other drift is a hard violation.",
-  "applied_by": "Codex r6 final remediation, 2026-08-17",
+  "applied_by": "Codex r6 final remediation, 2026-08-17 (genesis prepend bootstrap completed in post-freeze commit — see concurrent_changes.runtime-manifest genesis anchor)",
   "applied_in_commit": "e8b816bbfcddd678cdc036458da0890c2c09cdf9",
   "from_base": "9108c864388f5e79a93f5202d65105c1972f29dc",
-  "to_head": "e8b816bbfcddd678cdc036458da0890c2c09cdf9",
+  "to_head": "f672308f55925490b8a34ed8814d33fc048e9e1a",
   "changes": [
     {
       "path": ".harness/config.json",
@@ -36,11 +36,18 @@
     {
       "kind": "runtime-manifest genesis anchor",
       "file": ".harness/runtime-manifest.jsonl",
-      "description": "rc6 final adds a genesis anchor (line 0) carrying the HEAD OID that authorized the registry. This is NOT a fixture hash change (runtime-manifest is untracked runtime state); it is a structural hardening of the trust chain recorded separately in code review."
+      "description": "rc6 final adds a genesis anchor (line 0) carrying the HEAD OID that authorized the registry. This is NOT a fixture hash change (runtime-manifest is untracked runtime state); it is a structural hardening of the trust chain recorded separately in code review. The actual bootstrap of a LEGACY runtime-manifest that was created BEFORE the rc6 final commit is delegated to _runtime_prepend_genesis in core/lib/runtime-manifest.sh (one-shot idempotent prepend under the registry lock; covered by T46 in tests/release/test-dirty-worktree-manifest.sh). This prepended bootstrap may run as part of the first runtime_register call after upgrading to rc6 final; existing entries are preserved under the new genesis line."
     }
   ],
   "exclusion_clause": "No path other than the three listed above may change as part of applying this migration. Any additional drift is a hard violation and the migration is rejected.",
   "single_application_marker": "applied=true",
+  "genesis_prepend_helper": {
+    "implemented_in": "core/lib/runtime-manifest.sh",
+    "function": "_runtime_prepend_genesis",
+    "called_from": "runtime_register (one-shot idempotent, only when registry exists and line 0 is not {genesis: ...})",
+    "tested_by": "tests/release/test-dirty-worktree-manifest.sh T46 (6 sub-tests)",
+    "description": "Closes the post-freeze tracked-work gap: existing runtime-manifest.jsonl files that were created before the rc6 final genesis anchor code got a {genesis: <HEAD>} line prepended atomically under the registry lock the first time runtime_register runs after the upgrade. All pre-existing entries are preserved under the new genesis line. The helper is part of the rc6 final tracked-work completion; its inclusion in the migration record makes the genesis anchor contract a tracked (machine-verifiable) migration rather than an undocumented runtime effect. The actual commit OID carrying this helper is the immediate child of the rc6-final-remediation commit (e8b816b) that adds the _runtime_prepend_genesis function; resolve with `git log --oneline e8b816b..HEAD` at acceptance-package generation time."
+  },
   "test_anchors": {
     "positive_exact": "All three old→new pairs match exactly AND no other fixture line drifts",
     "negative_extra_path": "An unauthorized path change fails the apply gate",

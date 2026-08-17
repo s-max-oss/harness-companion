@@ -3,9 +3,9 @@
   "authorized_scope": "ONE-TIME ONLY — no further applications of this migration record are permitted; the new hashes below re-freeze the fixture and any further drift is a violation",
   "reason": "rc6 final remediation applies path (b) timeout cap 3600→7200 and tightens the runtime-manifest trust anchor (Codex r7 + r6 final blocker ①+②). The previous DWM fixture recorded the pre-path(b) state; the new fixture reflects the post-path(b) state and adds the genesis-anchored runtime-manifest. The three changed lines are the only paths the migration may alter; any other drift is a hard violation.",
   "applied_by": "Codex r6 final remediation, 2026-08-17",
-  "applied_in_commit": "0f68dc2529d7b30a3c103ea7d7ffd38081894ba4",
+  "applied_in_commit": "e8b816bbfcddd678cdc036458da0890c2c09cdf9",
   "from_base": "9108c864388f5e79a93f5202d65105c1972f29dc",
-  "to_head": "0f68dc2529d7b30a3c103ea7d7ffd38081894ba4",
+  "to_head": "e8b816bbfcddd678cdc036458da0890c2c09cdf9",
   "changes": [
     {
       "path": ".harness/config.json",

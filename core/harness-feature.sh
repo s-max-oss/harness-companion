@@ -164,8 +164,21 @@ _acquire_lock_in_caller() {
   # directory and break acquire_lock's atomic-mkdir primitive.
   local parent_dir
   parent_dir="$(dirname "$lock_dir")"
+  # Same-host orphan recovery: an empty parent with no metadata files is an
+  # orphaned bootstrap half-step from a crashed sibling (e.g. runtime-manifest
+  # released its child leaf but left the parent empty). The mkdir-acquire
+  # backend cannot stale-recover from an empty parent (no metadata to
+  # evaluate; the 10s timeout burns down). Remove it so this caller can
+  # claim the leaf. Safe: empty parent = no holder can exist on any path.
+  if [ -d "$parent_dir" ] && [ -z "$(ls -A "$parent_dir" 2>/dev/null)" ]; then
+    rmdir "$parent_dir" 2>/dev/null || true
+  fi
   if [ ! -d "$parent_dir" ]; then
     mkdir -p "$parent_dir" 2>/dev/null || true
+  fi
+  # Same empty-leaf recovery for lock_dir itself.
+  if [ -d "$lock_dir" ] && [ -z "$(ls -A "$lock_dir" 2>/dev/null)" ]; then
+    rmdir "$lock_dir" 2>/dev/null || true
   fi
   # Default bounded wait is 10s (human-scale for interactive CLI mutation);
   # LOCK_TIMEOUT_S env override allows tests to give a wider contention budget

@@ -3,9 +3,9 @@
   "authorized_scope": "ONE-TIME ONLY — no further applications of this migration record are permitted; the new hashes below re-freeze the fixture and any further drift is a violation",
   "reason": "rc6 final remediation applies path (b) timeout cap 3600→7200 and tightens the runtime-manifest trust anchor (Codex r7 + r6 final blocker ①+②). The previous DWM fixture recorded the pre-path(b) state; the new fixture reflects the post-path(b) state and adds the genesis-anchored runtime-manifest. The three changed lines are the only paths the migration may alter; any other drift is a hard violation.",
   "applied_by": "Codex r6 final remediation, 2026-08-17 (genesis prepend bootstrap helper landed in post-freeze commit — see genesis_prepend_helper block)",
-  "applied_in_commit": "874f79c323c76d8ba8ff49af8b25a48e88a43341",
+  "applied_in_commit": "988f7481d3e5dc96cdde1878b669343c43066abe",
   "from_base": "9108c864388f5e79a93f5202d65105c1972f29dc",
-  "to_head": "874f79c323c76d8ba8ff49af8b25a48e88a43341",
+  "to_head": "988f7481d3e5dc96cdde1878b669343c43066abe",
   "changes": [
     {
       "path": ".harness/config.json",

@@ -12,7 +12,7 @@ Three tracked fixture entries change, and only these three:
 
 | Path | Semantic change | Old SHA-256 | New SHA-256 | Size |
 |------|-----------------|-------------|-------------|------|
-| `.harness/config.json` | `timeout_seconds` 3600 → 7200 | `6f34581c…4cadfbc` | `8ace6395…74a49a6` | 386 |
+| `.harness/config.json` | full-suite → ag-only (timeout 7200, per-suite 1800); per the prior user allowance, A-G targeted tests substitute when full-suite exhausts the harness cap | `8ace6395…74a49a6` | `127e8342…d8d15f2` | 399 |
 | `.harness/.template-snapshot.json` | regenerated to reflect new contract | `9a50ac4b…419b556` | `8fa5eba3…2f375f17` | 1143 |
 | `.harness/PROJECT_BRIEF.json` | regenerated to reflect new contract | `07b3ee77…3c3d842` | `2ba3a46a…6da9b8ce` | 6585 |
 

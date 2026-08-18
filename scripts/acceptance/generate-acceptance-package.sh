@@ -21,7 +21,11 @@
 #   EFFECTIVE_TIMEOUT       — integer seconds recorded in NDJSON command_completed
 #   CONFIG_SHA256           — sha256:<64hex> (full 64 hex chars required)
 #   CANONICAL_NDJSON        — absolute path to canonical .ndjson (must end
-#                              in run_passed with overall_result=passed)
+#                              in run_completed with overall_result=passed;
+#                              validate-run-log.sh accepts run_completed/#
+#                              run_failed/run_aborted as terminal events;
+#                              run_completed overall_result=passed is the
+#                              canonical passing terminal for a clean run)
 #   FULL_SUITE_LOG          — absolute path to canonical full-suite.log
 #   MAINTENANCE_VERDICT     — absolute path to .harness/reviews/maintenance/F-MAINT-01.jsonl
 #   MIGRATION_RECORD        — absolute path to docs/migrations/2026-08-17-rc6-final-contract-migration.json
@@ -100,23 +104,36 @@ done
 
 # ---- Fail-closed check 6: canonical NDJSON must record a successful run ----
 # The canonical NDJSON must contain a run_started event whose run_id matches
-# RUN_ID, AND a final terminal event (run_passed or run_failed) with
-# overall_result=passed. Using a failed run as passing evidence is a hard
-# violation.
+# RUN_ID, AND a final terminal event (run_completed overall_result=passed,
+# or run_failed) with overall_result=passed. Using a failed run as passing
+# evidence is a hard violation. The canonical passing terminal is
+# run_completed with overall_result=passed; the legacy names run_passed and
+# run_failed are accepted by validate-run-log.sh but no harness-verify.sh
+# currently emits run_passed (run_completed is the live event).
 if ! grep -q "\"run_id\":\"$RUN_ID\"" "$CANONICAL_NDJSON" 2>/dev/null; then
   echo "generate-acceptance-package: RUN_ID $RUN_ID not found in canonical NDJSON" >&2
   exit 1
 fi
-FINAL_EVENT="$(grep -E '"event":"run_(passed|failed)"' "$CANONICAL_NDJSON" | tail -1)"
+FINAL_EVENT="$(grep -E '"event":"run_(passed|completed|failed)"' "$CANONICAL_NDJSON" | tail -1)"
 if [ -z "$FINAL_EVENT" ]; then
-  echo "generate-acceptance-package: canonical NDJSON has no terminal run_passed/run_failed event" >&2
+  echo "generate-acceptance-package: canonical NDJSON has no terminal run_completed/run_failed event" >&2
   exit 1
 fi
 FINAL_EVENT_KIND="$(printf '%s' "$FINAL_EVENT" | jq -r '.event // empty')"
 FINAL_OVERALL="$(printf '%s' "$FINAL_EVENT" | jq -r '.overall_result // empty')"
 FINAL_RUN_ID_IN_EVT="$(printf '%s' "$FINAL_EVENT" | jq -r '.run_id // empty')"
-if [ "$FINAL_EVENT_KIND" != "run_passed" ] || [ "$FINAL_OVERALL" != "passed" ] || [ "$FINAL_RUN_ID_IN_EVT" != "$RUN_ID" ]; then
-  echo "generate-acceptance-package: canonical NDJSON terminal is not run_passed for RUN_ID" >&2
+# Canonical passing terminal: run_completed overall_result=passed with this
+# RUN_ID (the current harness-verify emits run_completed; legacy
+# run_passed/run_failed are also recognized by validate-run-log.sh). Any
+# other terminal kind / overall_result / run_id is a hard violation.
+PASS_TERMINAL_OK=0
+if [ "$FINAL_EVENT_KIND" = "run_completed" ] && [ "$FINAL_OVERALL" = "passed" ] && [ "$FINAL_RUN_ID_IN_EVT" = "$RUN_ID" ]; then
+  PASS_TERMINAL_OK=1
+elif [ "$FINAL_EVENT_KIND" = "run_passed" ] && [ "$FINAL_OVERALL" = "passed" ] && [ "$FINAL_RUN_ID_IN_EVT" = "$RUN_ID" ]; then
+  PASS_TERMINAL_OK=1
+fi
+if [ "$PASS_TERMINAL_OK" != "1" ]; then
+  echo "generate-acceptance-package: canonical NDJSON terminal is not a passing terminal for RUN_ID" >&2
   echo "  final event: $FINAL_EVENT_KIND" >&2
   echo "  overall_result: $FINAL_OVERALL" >&2
   echo "  final run_id: $FINAL_RUN_ID_IN_EVT (expected $RUN_ID)" >&2

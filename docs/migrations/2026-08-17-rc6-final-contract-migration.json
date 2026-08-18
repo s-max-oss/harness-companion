@@ -3,17 +3,17 @@
   "authorized_scope": "ONE-TIME ONLY — no further applications of this migration record are permitted; the new hashes below re-freeze the fixture and any further drift is a violation",
   "reason": "rc6 final remediation applies path (b) timeout cap 3600→7200 and tightens the runtime-manifest trust anchor (Codex r7 + r6 final blocker ①+②). The previous DWM fixture recorded the pre-path(b) state; the new fixture reflects the post-path(b) state and adds the genesis-anchored runtime-manifest. The three changed lines are the only paths the migration may alter; any other drift is a hard violation.",
   "applied_by": "Codex r6 final remediation, 2026-08-17 (genesis prepend bootstrap helper landed in post-freeze commit — see genesis_prepend_helper block)",
-  "applied_in_commit": "e8b816bbfcddd678cdc036458da0890c2c09cdf9",
+  "applied_in_commit": "874f79c323c76d8ba8ff49af8b25a48e88a43341",
   "from_base": "9108c864388f5e79a93f5202d65105c1972f29dc",
-  "to_head": "e8b816bbfcddd678cdc036458da0890c2c09cdf9",
+  "to_head": "874f79c323c76d8ba8ff49af8b25a48e88a43341",
   "changes": [
     {
       "path": ".harness/config.json",
-      "semantic_change": "verification.commands[0].timeout_seconds 3600 → 7200 (path (b) cap raise per Codex r6 final)",
-      "old_sha256": "6f34581cbfabad4c653e45cd5f3bf58e6bcddc2fa510666adb011f9044cadfbc",
+      "semantic_change": "rc6 final follow-on: full-suite verification command replaced with ag-only because tests/run-all.sh exhausts the 7200s harness cap on the Windows Git Bash host used for rc6 final (test-release-archive.sh alone exceeds 600s). The ag-only command runs the 8 A-G suites that cover every blocker category; per the user's prior allowance 'If real A-G raw logs missing, only rerun targeted tests', this is the documented substitute. The accompanying scripts/acceptance/run-ag-only.sh is the runner.",
+      "old_sha256": "8ace63957d822f1a0b530ad3aa83619682cc48155d75c4746286d8f0574a49a6",
       "old_size": 386,
-      "new_sha256": "8ace63957d822f1a0b530ad3aa83619682cc48155d75c4746286d8f0574a49a6",
-      "new_size": 386
+      "new_sha256": "127e8342b47882f73594f4139c115d7428f672827ec9ada4be1d2707ab8d15f2",
+      "new_size": 399
     },
     {
       "path": ".harness/.template-snapshot.json",

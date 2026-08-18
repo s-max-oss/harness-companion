@@ -19,7 +19,9 @@
 #   effective_timeout    integer >= 1
 #   config_sha256        sha256:<64hex> AND matches current .harness/config.json
 #   canonical_ndjson     { path, sha256 } where sha256 == sha256(<path>)
-#                        AND file tail is run_passed with overall_result=passed
+#                        AND file tail is run_completed with overall_result=passed
+#                        (the current harness-verify emits run_completed; the
+#                        legacy run_passed name is also accepted)
 #   full_suite_log       { path, sha256 } where sha256 == sha256(<path>)
 #   maintenance_verdict  { path, sha256 } where sha256 == sha256(<path>)
 #   reviewer_verdict     { path, sha256 } where sha256 == sha256(<path>)
@@ -151,18 +153,24 @@ if [ -f "$NDJSON_PATH" ]; then
   else
     fail "RUN_ID $RUN_ID_RECORDED not found in canonical NDJSON"
   fi
-  FINAL_EVENT="$(grep -E '"event":"run_(passed|failed)"' "$NDJSON_PATH" | tail -1)"
+  FINAL_EVENT="$(grep -E '"event":"run_(passed|completed|failed)"' "$NDJSON_PATH" | tail -1)"
   if [ -n "$FINAL_EVENT" ]; then
     FINAL_KIND="$(printf '%s' "$FINAL_EVENT" | jq -r '.event // empty')"
     FINAL_OVERALL="$(printf '%s' "$FINAL_EVENT" | jq -r '.overall_result // empty')"
     FINAL_FAILED="$(printf '%s' "$FINAL_EVENT" | jq -r '.failed_commands // 1')"
-    if [ "$FINAL_KIND" = "run_passed" ] && [ "$FINAL_OVERALL" = "passed" ] && [ "$FINAL_FAILED" = "0" ]; then
-      pass "canonical NDJSON terminal is run_passed with 0 failed commands"
+    PASS_OK=0
+    if [ "$FINAL_KIND" = "run_completed" ] && [ "$FINAL_OVERALL" = "passed" ] && [ "$FINAL_FAILED" = "0" ]; then
+      PASS_OK=1
+    elif [ "$FINAL_KIND" = "run_passed" ] && [ "$FINAL_OVERALL" = "passed" ] && [ "$FINAL_FAILED" = "0" ]; then
+      PASS_OK=1
+    fi
+    if [ "$PASS_OK" = "1" ]; then
+      pass "canonical NDJSON terminal is a passing terminal (kind=$FINAL_KIND) with 0 failed commands"
     else
-      fail "canonical NDJSON terminal is not run_passed (kind=$FINAL_KIND overall=$FINAL_OVERALL failed=$FINAL_FAILED)"
+      fail "canonical NDJSON terminal is not a passing terminal (kind=$FINAL_KIND overall=$FINAL_OVERALL failed=$FINAL_FAILED)"
     fi
   else
-    fail "canonical NDJSON has no terminal run_passed/run_failed event"
+    fail "canonical NDJSON has no terminal run_completed/run_failed event"
   fi
 fi
 

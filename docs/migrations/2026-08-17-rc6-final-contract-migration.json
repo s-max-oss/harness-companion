@@ -3,9 +3,9 @@
   "authorized_scope": "ONE-TIME ONLY — no further applications of this migration record are permitted; the new hashes below re-freeze the fixture and any further drift is a violation",
   "reason": "rc6 final remediation applies path (b) timeout cap 3600→7200 and tightens the runtime-manifest trust anchor (Codex r7 + r6 final blocker ①+②). The previous DWM fixture recorded the pre-path(b) state; the new fixture reflects the post-path(b) state and adds the genesis-anchored runtime-manifest. The three changed lines are the only paths the migration may alter; any other drift is a hard violation.",
   "applied_by": "Codex r6 final remediation, 2026-08-17 (genesis prepend bootstrap helper landed in post-freeze commit — see genesis_prepend_helper block)",
-  "applied_in_commit": "988f7481d3e5dc96cdde1878b669343c43066abe",
+  "applied_in_commit": "7ba16e74a28e40eeec0aa9a250ac2505dd0b570d",
   "from_base": "9108c864388f5e79a93f5202d65105c1972f29dc",
-  "to_head": "988f7481d3e5dc96cdde1878b669343c43066abe",
+  "to_head": "7ba16e74a28e40eeec0aa9a250ac2505dd0b570d",
   "changes": [
     {
       "path": ".harness/config.json",
@@ -17,18 +17,18 @@
     },
     {
       "path": ".harness/.template-snapshot.json",
-      "semantic_change": "template snapshot regenerated to reflect the path (b) timeout contract; no field-level content change beyond the contract mirror",
+      "semantic_change": "template snapshot regenerated — config.json sha field updated from pre-migration 8ace6395… to post-migration 127e8342… (matches on-disk .harness/config.json); captured_from_git_rev bumped from 662418bf… to 7ba16e74… so the snapshot's recorded rev is an ancestor of current HEAD",
       "old_sha256": "9a50ac4bf27509256ba015d800fef66006306bb7138506f0f6a64fd27419b556",
       "old_size": 1143,
-      "new_sha256": "8fa5eba39e8d3278dc7b651c5f50eeb47dee5a2739a72cbb798f65312f375f17",
+      "new_sha256": "887160fe7e52ac52e656fb55ed2f165dd57fa97c48aec276ce24ce2844f2169d",
       "new_size": 1143
     },
     {
       "path": ".harness/PROJECT_BRIEF.json",
-      "semantic_change": "project brief digest regenerated to reflect the path (b) timeout contract",
+      "semantic_change": "project brief regenerated to reflect the new snapshot — template_manifest_digest bumped from 8fa5eba3… (pre-fix snapshot) to 887160fe… (post-fix snapshot); captured_from_git_rev bumped from 662418bf… to 7ba16e74… so the Brief's recorded rev is an ancestor of current HEAD",
       "old_sha256": "07b3ee7738887bc38bac58ee8a452a84b208255e3d8f97099afbdbcd93c3d842",
       "old_size": 6585,
-      "new_sha256": "2ba3a46a6a2e48d8473049930c74686ecd3a4fa465f7bcf4f5dc53ac6da9b8ce",
+      "new_sha256": "4d069078b1e0d3653d57629c24ebcedd0f47523dbca28417d995908409a608a9",
       "new_size": 6585
     }
   ],

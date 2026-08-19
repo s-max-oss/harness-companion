@@ -2,7 +2,7 @@
 {"path":".harness/.template-snapshot.json","type":"file","sha256":"973d1efb4f8c5777fd923247876cd7a702f9b4468897c5a7c8141335d2c9597e","size":1141,"mode":"644","symlink_target":null,"git_status":"??"}
 {"path":".harness/PLAN.json","type":"file","sha256":"f465d7876229c5bc876bf1059b84aaa0c86b78c56e633f78a4540b08f4ba57b0","size":14760,"mode":"644","symlink_target":null,"git_status":"??"}
 {"path":".harness/PROJECT_BRIEF.json","type":"file","sha256":"81046bebc003cd76ab449a6efc6ba04e10fbdc84af1aa661d8b59be65c53f351","size":6583,"mode":"644","symlink_target":null,"git_status":"??"}
-{"path":".harness/PROJECT_BRIEF.md","type":"file","sha256":"7f5fa64dbbb54dd88e8a5d9fb7a3d9b0422a872210a36dd729d4ed9f2380f695","size":4668,"mode":"644","symlink_target":null,"git_status":"??"}
+{"path":".harness/PROJECT_BRIEF.md","type":"file","sha256":"b750e252342e36a0523d334bea8899be0901ded066cfb51adc6465839452aff6","size":4668,"mode":"644","symlink_target":null,"git_status":"??"}
 {"path":".harness/config.json","type":"file","sha256":"8ace63957d822f1a0b530ad3aa83619682cc48155d75c4746286d8f0574a49a6","size":386,"mode":"644","symlink_target":null,"git_status":"??"}
 {"path":".harness/logs/runs/20260808T122953Z-1590-19528.ndjson","type":"file","sha256":"1502f2dfb247cb6e82b98ecc82e431bcddcc75b0d8dab1556deffc3ba844262f","size":1511,"mode":"644","symlink_target":null,"git_status":"!!"}
 {"path":".harness/logs/runs/20260808T194059Z-2006-24984.ndjson","type":"file","sha256":"15701bf557c6ea381f82a0e305784f5d9035490d25bfec207cffbd0d1c013a76","size":1540,"mode":"644","symlink_target":null,"git_status":"!!"}

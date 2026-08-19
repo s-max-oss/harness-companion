@@ -1293,6 +1293,25 @@ else
 fi
 rm -rf "$TMP_CFG"
 
+# ---- T47: acceptance artifacts are mutable only when registry-bound --------
+D="$(mktemp -d "$TMPDIR/t47-XXXX")"
+setup_repo "$D"
+OUT="$(mf "$D" t47)"
+dwm_emit_manifest "$D" "$OUT"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/reviews/feature/F-CONV-01.jsonl" verdict
+mkdir -p "$D/.harness/acceptance/$HEAD_SHA"
+printf '%s\n' '{"schema_version":1}' > "$D/.harness/acceptance/$HEAD_SHA/acceptance.json"
+printf '%s\n' 'A-G evidence' > "$D/.harness/acceptance/$HEAD_SHA/A-G.log"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/acceptance/$HEAD_SHA/acceptance.json" acceptance
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/acceptance/$HEAD_SHA/A-G.log" log
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T47a: registered acceptance artifacts accepted" true "$(printf '%s' "$RES" | jq -r '.valid')"
+printf '%s\n' 'unregistered' > "$D/.harness/acceptance/$HEAD_SHA/unregistered.log"
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T47b: unregistered acceptance artifact rejected" 1 "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_artifact_unregistered")] | length')"
+
 echo ""
 echo "Dirty-Worktree-Manifest Results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

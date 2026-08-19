@@ -51,6 +51,7 @@
 BUILTIN_EXCLUDES=(
   ".harness/logs/"
   ".harness/reviews/"
+  ".harness/acceptance/"
   ".harness/.registry.lock/"
   ".harness/*.tmp.*"
   ".harness/branch-gate.json"

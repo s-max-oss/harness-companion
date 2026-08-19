@@ -518,13 +518,12 @@ runtime_replace() {
       fi
     fi
     # Strip any existing entries for this path (preserve genesis + everything else).
-    # IMPORTANT: use `jq -c '.[]'` to FLATTEN the input back to NDJSON (one
-    # object per line). The previous `jq -s` slurps the entire file into a
-    # single JSON array and writes it back as a multi-line array, which
-    # breaks the NDJSON structure of the registry.
+    # jq reads each NDJSON object as a separate input.  Filter the input
+    # object itself; `.[]` would instead emit that object's scalar values and
+    # corrupt the registry into a sequence of strings/numbers.
     if [ "$lock_rc" -eq 0 ]; then
       local tmp="${mf}.replace.$$"
-      if ! jq -c --arg p "$rel" '.[] | select((.path? // "") != $p)' "$mf" > "$tmp" 2>/dev/null; then
+      if ! jq -c --arg p "$rel" 'select((.path? // "") != $p)' "$mf" > "$tmp" 2>/dev/null; then
         rm -f "$tmp"
         lock_rc=1
       elif ! mv "$tmp" "$mf" 2>/dev/null; then
@@ -555,7 +554,7 @@ runtime_replace() {
 }
 
 RUNTIME_MANIFEST_GENESIS="$HEAD_OID" \
-  runtime_replace ".harness/acceptance/$HEAD_OID/acceptance.json" "log" || {
+  runtime_replace ".harness/acceptance/$HEAD_OID/acceptance.json" "acceptance" || {
     echo "generate-acceptance-package: runtime_replace failed for acceptance.json" >&2
     rm -rf "$PKG_DIR"
     exit 1

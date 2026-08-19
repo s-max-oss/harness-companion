@@ -63,6 +63,7 @@ fi
 DWM_MUTABLE=(
   ".harness/logs/runs/"
   ".harness/reviews/"
+  ".harness/acceptance/"
   ".harness/registry-journal.ndjson"
   ".harness/runtime-manifest.jsonl"
   ".harness/.registry.lock/"
@@ -402,7 +403,7 @@ dwm_compare_manifest() {
     . as $p | any($m[]; . as $e | if ($e | endswith("/")) then ($p | startswith($e)) else ($p == $e) end);
   # runtime-artifact namespace: a NEW file here paired with ANY recorded-file
   # modification in the same namespace is a paired rewrite (see header).
-  def is_runtime_artifact: startswith(".harness/logs/runs/") or startswith(".harness/reviews/");
+  def is_runtime_artifact: startswith(".harness/logs/runs/") or startswith(".harness/reviews/") or startswith(".harness/acceptance/");
 
   ($r | map({key:.path, value:.}) | from_entries) as $rm |
   ($c | map({key:.path, value:.}) | from_entries) as $cm |
@@ -650,6 +651,10 @@ dwm_compare_manifest() {
         ".harness/logs/runs/"*.ndjson) ckind="ndjson" ;;
         ".harness/logs/runs/"*.log)    ckind="log" ;;
         ".harness/reviews/"*.jsonl)    ckind="verdict" ;;
+        ".harness/acceptance/"*/acceptance.json) ckind="acceptance" ;;
+        ".harness/acceptance/"*/A-G.log)          ckind="log" ;;
+        ".harness/acceptance/.lock/"*)            continue ;;
+        ".harness/acceptance/"*)                  ckind="acceptance" ;;
         *) continue ;;
       esac
       centry="$(printf '%s' "$reg_json" | jq -c --arg p "$cpath" 'map(select(.path == $p)) | .[0] // null' 2>/dev/null)"

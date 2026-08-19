@@ -221,6 +221,16 @@ rm -rf "$WORKSPACE_TMP/.harness/.registry.lock" "$WORKSPACE_TMP/.harness/stuff.t
 FP6_after="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals ".harness lock and temp files excluded" "$FP6_before" "$FP6_after"
 
+# Acceptance packages are post-verification runtime evidence. Creating or
+# locking one must not invalidate the run whose fingerprint it records.
+mkdir -p "$WORKSPACE_TMP/.harness/acceptance/deadbeef/.lock"
+FP6A_before="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
+echo '{}' > "$WORKSPACE_TMP/.harness/acceptance/deadbeef/acceptance.json"
+echo 'evidence' > "$WORKSPACE_TMP/.harness/acceptance/deadbeef/A-G.log"
+echo 'lock' > "$WORKSPACE_TMP/.harness/acceptance/deadbeef/.lock/token"
+FP6A_after="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
+assert_fp_equals ".harness acceptance package is fingerprint-excluded" "$FP6A_before" "$FP6A_after"
+
 # ============================================================================
 # Test 7: NUL temp file location
 # ============================================================================

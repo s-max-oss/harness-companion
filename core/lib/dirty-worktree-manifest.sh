@@ -83,6 +83,7 @@ dwm_is_mutable() {
   for m in "${DWM_MUTABLE[@]}"; do
     case "$m" in
       */)
+        [ "$p" = "${m%/}" ] && return 0
         case "$p" in "$m"*) return 0 ;; esac ;;
       *)
         [ "$p" = "$m" ] && return 0 ;;
@@ -400,7 +401,7 @@ dwm_compare_manifest() {
   prog='def in_mutable($m):
     # NOTE: the element must be captured into a variable ($e) before use —
     # `$p | startswith(.)` would rebind `.` to $p and always match.
-    . as $p | any($m[]; . as $e | if ($e | endswith("/")) then ($p | startswith($e)) else ($p == $e) end);
+    . as $p | any($m[]; . as $e | if ($e | endswith("/")) then (($p == ($e | rtrimstr("/"))) or ($p | startswith($e))) else ($p == $e) end);
   # runtime-artifact namespace: a NEW file here paired with ANY recorded-file
   # modification in the same namespace is a paired rewrite (see header).
   def is_runtime_artifact: startswith(".harness/logs/runs/") or startswith(".harness/reviews/") or startswith(".harness/acceptance/");

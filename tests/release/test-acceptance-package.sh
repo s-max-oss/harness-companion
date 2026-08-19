@@ -115,17 +115,15 @@ else
 fi
 
 # Integer fields: jq -r returns null for non-numeric; filter out and re-check.
-dur_ok="$(jq -r '.duration_ms | type' "$acc_json")"
-if [ "$dur_ok" = "number" ]; then
-  pass "duration_ms is number"
+if jq -e '.duration_ms | type == "number" and floor == . and . > 0' "$acc_json" >/dev/null 2>&1; then
+  pass "duration_ms is a positive integer"
 else
-  fail "duration_ms must be number (got type $dur_ok)"
+  fail "duration_ms must be a positive integer"
 fi
-to_ok="$(jq -r '.effective_timeout | type' "$acc_json")"
-if [ "$to_ok" = "number" ]; then
-  pass "effective_timeout is number"
+if jq -e '.effective_timeout | type == "number" and floor == . and . >= 1' "$acc_json" >/dev/null 2>&1; then
+  pass "effective_timeout is an integer >= 1"
 else
-  fail "effective_timeout must be number (got type $to_ok)"
+  fail "effective_timeout must be an integer >= 1"
 fi
 
 # Bound SHA-256 fields must match on-disk bytes.
@@ -152,6 +150,12 @@ done
 NDJSON_PATH="$(jq -r '.canonical_ndjson.path' "$acc_json")"
 if [ -f "$NDJSON_PATH" ]; then
   RUN_ID_RECORDED="$(jq -r '.run_id' "$acc_json")"
+  EXPECTED_NDJSON="$ROOT_DIR/.harness/logs/runs/$RUN_ID_RECORDED.ndjson"
+  if [ "$NDJSON_PATH" = "$EXPECTED_NDJSON" ] && [ ! -L "$NDJSON_PATH" ]; then
+    pass "canonical NDJSON path is authoritative for run_id"
+  else
+    fail "canonical NDJSON path is not authoritative (got=$NDJSON_PATH expected=$EXPECTED_NDJSON)"
+  fi
   # Use the production validator, then require the exact immutable canonical
   # command rather than accepting any passing terminal.
   # shellcheck source=../../core/lib/validate-run-log.sh

@@ -82,6 +82,15 @@ if [ -z "$RUN_ID" ]; then
   exit 1
 fi
 
+# The supplied artifact must be the one authoritative path that
+# validate_run_log() resolves for this run_id. This prevents a crafted second
+# file from borrowing validation from a legitimate run with the same ID.
+EXPECTED_NDJSON="$ROOT_DIR/.harness/logs/runs/$RUN_ID.ndjson"
+if [ "$CANONICAL_NDJSON" != "$EXPECTED_NDJSON" ] || [ -L "$CANONICAL_NDJSON" ]; then
+  echo "generate-acceptance-package: CANONICAL_NDJSON must equal authoritative run path: $EXPECTED_NDJSON" >&2
+  exit 1
+fi
+
 # The acceptance package may only bind a run produced by the repository's
 # canonical validator. Manual/partial/synthetic NDJSON is never evidence.
 VALIDATION="$(validate_run_log "$RUN_ID" "$ROOT_DIR" 2>/dev/null)" || {
@@ -191,6 +200,10 @@ if [ -z "$EFFECTIVE_TIMEOUT" ]; then
 fi
 if ! printf '%s' "$EFFECTIVE_TIMEOUT" | grep -qE '^[0-9]+$'; then
   echo "generate-acceptance-package: timeout_seconds must be integer: $EFFECTIVE_TIMEOUT" >&2
+  exit 1
+fi
+if [ "$EFFECTIVE_TIMEOUT" -lt 1 ]; then
+  echo "generate-acceptance-package: timeout_seconds must be >= 1" >&2
   exit 1
 fi
 

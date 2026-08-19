@@ -54,6 +54,8 @@ PKG_LOCK_DIR="$ROOT_DIR/.harness/acceptance/.lock/pkg-write"
 . "$ROOT_DIR/core/lib/lock-registry.sh"
 # shellcheck source=../../core/lib/runtime-manifest.sh
 . "$ROOT_DIR/core/lib/runtime-manifest.sh"
+# shellcheck source=../../core/lib/validate-run-log.sh
+. "$ROOT_DIR/core/lib/validate-run-log.sh"
 
 # ---- Single required input ----
 : "${CANONICAL_NDJSON:?CANONICAL_NDJSON is required (absolute path to canonical NDJSON)}"
@@ -77,6 +79,18 @@ fi
 RUN_ID="$(printf '%s' "$NDJSON_RUN_STARTED" | jq -r '.run_id // empty')"
 if [ -z "$RUN_ID" ]; then
   echo "generate-acceptance-package: canonical NDJSON run_started missing run_id" >&2
+  exit 1
+fi
+
+# The acceptance package may only bind a run produced by the repository's
+# canonical validator. Manual/partial/synthetic NDJSON is never evidence.
+VALIDATION="$(validate_run_log "$RUN_ID" "$ROOT_DIR" 2>/dev/null)" || {
+  echo "generate-acceptance-package: canonical NDJSON failed validate_run_log" >&2
+  exit 1
+}
+if ! printf '%s' "$VALIDATION" | jq -e '.valid == true' >/dev/null 2>&1; then
+  echo "generate-acceptance-package: canonical NDJSON is invalid" >&2
+  printf '%s\n' "$VALIDATION" >&2
   exit 1
 fi
 # Format check
@@ -159,8 +173,7 @@ fi
 # ---- Fail-closed check 5: EFFECTIVE_TIMEOUT read from .harness/config.json ----
 # The on-disk schema (per core/lib/config-validate.sh) places timeout_seconds
 # inside each verification command: `.verification.commands[$i].timeout_seconds`.
-# The canonical run uses ONE command (the ag-only / ag-only-7of8 runner), so
-# we look it up at that path. An empty value fails the check.
+# The release contract has exactly one canonical command.
 EFFECTIVE_TIMEOUT="$(jq -r '
   if has("verification") and (.verification | type == "object")
      and (.verification | has("commands")) and (.verification.commands | type == "array")
@@ -191,15 +204,36 @@ if [ -z "$LAST_CMD_EVENT" ]; then
   echo "generate-acceptance-package: canonical NDJSON has no command_completed event" >&2
   exit 1
 fi
+CMD_EVENT_COUNT="$(grep -cE '"event":"command_completed"' "$CANONICAL_NDJSON" || true)"
+if [ "$CMD_EVENT_COUNT" != "1" ]; then
+  echo "generate-acceptance-package: canonical run must contain exactly one command_completed event" >&2
+  exit 1
+fi
 DURATION_MS="$(printf '%s' "$LAST_CMD_EVENT" | jq -r '.duration_ms // empty')"
 if [ -z "$DURATION_MS" ] || ! printf '%s' "$DURATION_MS" | grep -qE '^[0-9]+$'; then
   echo "generate-acceptance-package: command_completed duration_ms must be integer: '$DURATION_MS'" >&2
+  exit 1
+fi
+if [ "$DURATION_MS" -le 0 ]; then
+  echo "generate-acceptance-package: command_completed duration_ms must be > 0" >&2
   exit 1
 fi
 # Full command: join the JSON array as a single string for evidence clarity.
 COMMAND="$(printf '%s' "$LAST_CMD_EVENT" | jq -r '.command | join(" ")')"
 if [ -z "$COMMAND" ]; then
   echo "generate-acceptance-package: command_completed command must be a non-empty array" >&2
+  exit 1
+fi
+CONFIG_COMMAND="$(jq -c '.verification.commands[0].command' "$ROOT_DIR/.harness/config.json")"
+EVENT_COMMAND="$(printf '%s' "$LAST_CMD_EVENT" | jq -c '.command')"
+CONFIG_ID="$(jq -r '.verification.commands[0].id' "$ROOT_DIR/.harness/config.json")"
+EVENT_ID="$(printf '%s' "$LAST_CMD_EVENT" | jq -r '.command_id // empty')"
+if [ "$CONFIG_COMMAND" != '["bash","tests/run-all.sh"]' ] || [ "$CONFIG_ID" != "full-suite" ]; then
+  echo "generate-acceptance-package: configured canonical contract must be full-suite: bash tests/run-all.sh" >&2
+  exit 1
+fi
+if [ "$EVENT_COMMAND" != "$CONFIG_COMMAND" ] || [ "$EVENT_ID" != "$CONFIG_ID" ]; then
+  echo "generate-acceptance-package: command event does not exactly match canonical config" >&2
   exit 1
 fi
 LOG_ARTIFACT="$(printf '%s' "$LAST_CMD_EVENT" | jq -r '.log_artifact // empty')"
@@ -221,8 +255,7 @@ if [ "$NDJSON_LOG_SHA256_RECORDED" != "$ACTUAL_LOG_SHA256" ]; then
 fi
 
 # FULL_SUITE_LOG is the canonical command's log_artifact (the canonical
-# harness-verify run wrote it; for ag-only runs this is ag-only.log which
-# contains the A-G suite output). Its sha256 is bound both in the NDJSON
+# harness-verify run wrote it. Its sha256 is bound both in the NDJSON
 # command_completed event AND in acceptance.json as full_suite_log.sha256.
 FULL_SUITE_LOG="$LOG_ARTIFACT"
 FULL_SUITE_LOG_SHA="$ACTUAL_LOG_SHA256"
@@ -308,9 +341,9 @@ trap 'release_lock "$PKG_LOCK_DIR" "${LOCK_REGISTRY_TOKEN:-}" >/dev/null 2>&1 ||
 
 # ---- Idempotency: existing package at this HEAD is left untouched ----
 PKG_DIR="$ACCEPT_BASE/$HEAD_OID"
-if [ -d "$PKG_DIR" ] && [ -f "$PKG_DIR/acceptance.json" ] && [ -f "$PKG_DIR/A-G.log" ]; then
-  echo "generate-acceptance-package: package already exists at $PKG_DIR — leaving untouched" >&2
-  exit 0
+if [ -e "$PKG_DIR" ]; then
+  echo "generate-acceptance-package: package already exists; refusing ambiguous overwrite: $PKG_DIR" >&2
+  exit 1
 fi
 
 mkdir -p "$PKG_DIR"
@@ -324,7 +357,7 @@ MIGRATION_SHA="$(sha256_of "$MIGRATION_RECORD")"
 A_G_LOG="$PKG_DIR/A-G.log"
 ACCEPT_JSON="$PKG_DIR/acceptance.json"
 
-# ---- Build A-G.log: copy the canonical FULL_SUITE_LOG (ag-only.log) and
+# ---- Build A-G.log: copy the canonical FULL_SUITE_LOG and
 # prepend a header recording every binding for human inspection. The
 # canonical FULL_SUITE_LOG's sha256 IS bound both in the NDJSON
 # command_completed event AND in acceptance.json.full_suite_log.sha256 —
@@ -353,17 +386,17 @@ ACCEPT_JSON="$PKG_DIR/acceptance.json"
   echo "Generated at:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "============================================================"
   echo ""
-  echo "----- BEGIN canonical full-suite / ag-only.log -----"
+  echo "----- BEGIN canonical full-suite log -----"
 } > "$A_G_LOG"
 cat "$FULL_SUITE_LOG" >> "$A_G_LOG"
 echo "" >> "$A_G_LOG"
-echo "----- END canonical full-suite / ag-only.log -----" >> "$A_G_LOG"
+echo "----- END canonical full-suite log -----" >> "$A_G_LOG"
 
 A_G_SHA="$(sha256_of "$A_G_LOG")"
 
 # ---- Build acceptance.json ----------------------------------------------------
 jq -n \
-  --arg schema_version "1" \
+  --argjson schema_version 1 \
   --arg head_oid "$HEAD_OID" \
   --arg run_id "$RUN_ID" \
   --argjson duration_ms "$DURATION_MS" \

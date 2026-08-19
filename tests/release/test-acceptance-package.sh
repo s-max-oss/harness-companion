@@ -87,7 +87,11 @@ field_assert() {
 }
 
 # Field-level asserts
-field_assert "$acc_json" '.schema_version' '^[0-9]+$'                  "schema_version integer"
+if jq -e '(.schema_version | type) == "number" and .schema_version == 1' "$acc_json" >/dev/null 2>&1; then
+  pass "schema_version is integer 1"
+else
+  fail "schema_version must be integer 1"
+fi
 field_assert "$acc_json" '.head_oid'         '^[0-9a-f]{40}$'            "head_oid 40-hex"
 field_assert "$acc_json" '.run_id'           '^[0-9TZ]+-[0-9]+-[0-9]+$'   "run_id canonical format"
 field_assert "$acc_json" '.config_sha256'    '^sha256:[0-9a-f]{64}$'      "config_sha256 sha256:<64hex>"
@@ -148,6 +152,24 @@ done
 NDJSON_PATH="$(jq -r '.canonical_ndjson.path' "$acc_json")"
 if [ -f "$NDJSON_PATH" ]; then
   RUN_ID_RECORDED="$(jq -r '.run_id' "$acc_json")"
+  # Use the production validator, then require the exact immutable canonical
+  # command rather than accepting any passing terminal.
+  # shellcheck source=../../core/lib/validate-run-log.sh
+  . "$ROOT_DIR/core/lib/validate-run-log.sh"
+  VALIDATION="$(validate_run_log "$RUN_ID_RECORDED" "$ROOT_DIR" 2>/dev/null)" || VALIDATION='{"valid":false}'
+  if printf '%s' "$VALIDATION" | jq -e '.valid == true' >/dev/null 2>&1; then
+    pass "canonical NDJSON passes validate_run_log"
+  else
+    fail "canonical NDJSON fails validate_run_log"
+  fi
+  CMD_COUNT="$(grep -cE '"event":"command_completed"' "$NDJSON_PATH" || true)"
+  CMD_JSON="$(grep -E '"event":"command_completed"' "$NDJSON_PATH" | tail -1 | jq -c '.command')"
+  CMD_ID="$(grep -E '"event":"command_completed"' "$NDJSON_PATH" | tail -1 | jq -r '.command_id // empty')"
+  if [ "$CMD_COUNT" = "1" ] && [ "$CMD_ID" = "full-suite" ] && [ "$CMD_JSON" = '["bash","tests/run-all.sh"]' ]; then
+    pass "canonical command is exact bash tests/run-all.sh"
+  else
+    fail "canonical command mismatch/count (count=$CMD_COUNT id=$CMD_ID argv=$CMD_JSON)"
+  fi
   if grep -q "\"run_id\":\"$RUN_ID_RECORDED\"" "$NDJSON_PATH" 2>/dev/null; then
     pass "RUN_ID found in canonical NDJSON"
   else

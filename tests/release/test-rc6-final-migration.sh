@@ -8,8 +8,12 @@
 #   1. SCHEMA — every migration JSON parses, has required fields, has a
 #      changes array. Applies to EVERY record (active + historical).
 #
-#   2. BINDING — exactly ONE record is the ACTIVE migration: its to_head
-#      equals current git HEAD AND single_application_marker == applied=true.
+#   2. BINDING — exactly ONE record is the ACTIVE migration. ACTIVE is
+#      defined by CONTENT, not by to_head: it is the migration whose
+#      new_sha256 values currently match the in-tree runtime artifacts
+#      for all paths it declares to change. This is robust against HEAD
+#      churn (subsequent code/test commits may not touch runtime state
+#      and therefore do not invalidate the binding).
 #      For the ACTIVE record only:
 #        - the three expected paths are listed in changes
 #        - each new_sha256 matches the recorded sha in the DWM fixture
@@ -105,24 +109,43 @@ for mig in "${MIG_FILES[@]}"; do
     fail "$base single_application_marker should be 'applied=true', got '$marker'"
   fi
 
-  # Identify ACTIVE: to_head == current HEAD.
-  mig_to_head="$(jq -r '.to_head' "$mig")"
-  if [ "$mig_to_head" = "$CURRENT_HEAD" ]; then
+  # Identify ACTIVE: the migration whose new_sha256 values currently match
+  # the in-tree runtime artifacts for ALL paths it declares to change.
+  # This is robust against HEAD churn: subsequent code/test commits that do
+  # not touch the runtime state do not invalidate the binding. to_head is
+  # treated as a historical marker (where the migration was applied) but is
+  # NOT used to determine current applicability.
+  mig_active=0
+  mig_n_changes="$(jq '.changes | length' "$mig" 2>/dev/null)"
+  if [ "$mig_n_changes" -gt 0 ] 2>/dev/null; then
+    mig_active=1
+    for ci in $(seq 0 $((mig_n_changes - 1))); do
+      ci_path="$(jq -r ".changes[$ci].path" "$mig")"
+      ci_new="$(jq -r ".changes[$ci].new_sha256" "$mig")"
+      ci_actual="$(sha256sum "$ROOT_DIR/$ci_path" 2>/dev/null | awk '{print $1}')"
+      if [ "$ci_new" != "$ci_actual" ]; then
+        mig_active=0
+        break
+      fi
+    done
+  fi
+  if [ "$mig_active" = "1" ]; then
     if [ "$ACTIVE_FOUND" = "1" ]; then
-      fail "multiple active migrations with to_head=$CURRENT_HEAD ($ACTIVE_FILE and $base)"
+      fail "multiple active migrations (both $ACTIVE_FILE and $base bind to current in-tree)"
     else
       ACTIVE_FILE="$mig"
       ACTIVE_FOUND=1
-      pass "$base is the ACTIVE migration (to_head == current HEAD)"
+      pass "$base is the ACTIVE migration (new_sha256 matches in-tree for all paths)"
     fi
   else
     HISTORICAL_COUNT=$((HISTORICAL_COUNT + 1))
-    pass "$base is historical (to_head=$mig_to_head != current HEAD)"
+    mig_to_head="$(jq -r '.to_head // empty' "$mig")"
+    pass "$base is historical (to_head=$mig_to_head, new_sha256 does not bind to current in-tree)"
   fi
 done
 
 if [ "$ACTIVE_FOUND" != "1" ]; then
-  fail "no migration record with to_head == current HEAD ($CURRENT_HEAD) — ACTIVE migration missing"
+  fail "no migration record whose new_sha256 currently binds to in-tree runtime artifacts — ACTIVE migration missing"
   echo "=== Migration Test Results: $PASS passed, $FAIL failed ==="
   exit 1
 fi

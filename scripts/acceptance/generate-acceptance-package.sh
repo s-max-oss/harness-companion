@@ -157,9 +157,23 @@ if [ "$ACTUAL_CONFIG_SHA" != "$EXPECTED_CONFIG_SHA" ]; then
 fi
 
 # ---- Fail-closed check 5: EFFECTIVE_TIMEOUT read from .harness/config.json ----
-EFFECTIVE_TIMEOUT="$(jq -r '.timeout_seconds // empty' "$ROOT_DIR/.harness/config.json")"
+# The on-disk schema (per core/lib/config-validate.sh) places timeout_seconds
+# inside each verification command: `.verification.commands[$i].timeout_seconds`.
+# The canonical run uses ONE command (the ag-only / ag-only-7of8 runner), so
+# we look it up at that path. An empty value fails the check.
+EFFECTIVE_TIMEOUT="$(jq -r '
+  if has("verification") and (.verification | type == "object")
+     and (.verification | has("commands")) and (.verification.commands | type == "array")
+     and (.verification.commands | length > 0)
+     and (.verification.commands[0] | has("timeout_seconds"))
+  then .verification.commands[0].timeout_seconds
+  elif has("timeout_seconds")
+  then .timeout_seconds
+  else empty
+  end
+' "$ROOT_DIR/.harness/config.json")"
 if [ -z "$EFFECTIVE_TIMEOUT" ]; then
-  echo "generate-acceptance-package: .harness/config.json missing timeout_seconds" >&2
+  echo "generate-acceptance-package: .harness/config.json missing timeout_seconds at .verification.commands[0].timeout_seconds (or top-level .timeout_seconds)" >&2
   exit 1
 fi
 if ! printf '%s' "$EFFECTIVE_TIMEOUT" | grep -qE '^[0-9]+$'; then
@@ -426,10 +440,14 @@ runtime_replace() {
         lock_rc=1
       fi
     fi
-    # Strip any existing entries for this path (preserve genesis + everything else)
+    # Strip any existing entries for this path (preserve genesis + everything else).
+    # IMPORTANT: use `jq -c '.[]'` to FLATTEN the input back to NDJSON (one
+    # object per line). The previous `jq -s` slurps the entire file into a
+    # single JSON array and writes it back as a multi-line array, which
+    # breaks the NDJSON structure of the registry.
     if [ "$lock_rc" -eq 0 ]; then
       local tmp="${mf}.replace.$$"
-      if ! jq -s --arg p "$rel" '[.[] | select((.path? // "") != $p)]' "$mf" > "$tmp" 2>/dev/null; then
+      if ! jq -c --arg p "$rel" '.[] | select((.path? // "") != $p)' "$mf" > "$tmp" 2>/dev/null; then
         rm -f "$tmp"
         lock_rc=1
       elif ! mv "$tmp" "$mf" 2>/dev/null; then

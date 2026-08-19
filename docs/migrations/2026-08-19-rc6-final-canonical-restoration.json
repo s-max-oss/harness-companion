@@ -1,0 +1,56 @@
+{
+  "migration_id": "2026-08-19-rc6-final-canonical-restoration",
+  "authorized_scope": "ONE-TIME ONLY — no further applications of this migration record are permitted; the new hashes below re-freeze the DWM fixture to the canonical restored state and any further drift is a hard violation",
+  "reason": "After the canonical run 20260819T063453Z-21246-28844 at HEAD 6007c453f56af816636560567e14a28e7137da4c revealed the rc6-final canonical-contract defects, this migration record restores the runtime artifacts to the canonical (pre-path(b)) state and re-binds the DWM fixture to that state. The full-suite verification command (bash tests/run-all.sh) is the canonical evidence — no ag-only substitution, no targeted replacement, no synthesized NDJSON. The acceptance package generator remains HEAD-scoped and is run OUTSIDE tests/run-all.sh (scripts/acceptance/check-current-head-package.sh) after a real passing run is captured.",
+  "applied_by": "rc6-final canonical-restoration, 2026-08-19",
+  "applied_in_commit": "8d363c4",
+  "from_base": "7ba16e74a28e40eeec0aa9a250ac2505dd0b570d",
+  "to_head": "6007c453f56af816636560567e14a28e7137da4c",
+  "supersedes": {
+    "migration_id": "2026-08-17-rc6-final-contract-migration",
+    "preserved_as": "Historical record only. The 2026-08-17 record documents the earlier ag-only substitution at 7ba16e74; its claimed new_sha256 values reflected the post-path(b) state which was subsequently reverted by commits 8d363c4 / e794483 / 6007c45. The 2026-08-17 file is retained in docs/migrations/ verbatim — its applied=true marker and recorded new_sha256 values are not modified, and historical truth is preserved exactly. Tests treat it as historical (schema-only validation) and bind only the ACTIVE migration (this one, to_head == current HEAD) against the current DWM fixture."
+  },
+  "changes": [
+    {
+      "path": ".harness/config.json",
+      "semantic_change": "Restored to canonical full-suite verification command (bash tests/run-all.sh, capability_level=2) with the rc6-final evidence chain. The ag-only substitution recorded by the 2026-08-17 migration (verification command 'bash scripts/acceptance/run-ag-only.sh') is replaced by the canonical full-suite command. Runtime timeout (config schema path .verification.commands[0].timeout_seconds) reverts to the pre-path(b) value so the harness cap accommodates the full suite on the canonical CI runner.",
+      "old_sha256": "127e8342b47882f73594f4139c115d7428f672827ec9ada4be1d2707ab8d15f2",
+      "old_size": 399,
+      "new_sha256": "8ace63957d822f1a0b530ad3aa83619682cc48155d75c4746286d8f0574a49a6",
+      "new_size": 386
+    },
+    {
+      "path": ".harness/.template-snapshot.json",
+      "semantic_change": "Snapshot regenerated so the recorded config.json sha and captured_from_git_rev match the restored canonical state (config.json sha 8ace6395…, captured_from_git_rev an ancestor of 6007c453). This re-binds the snapshot to the canonical evidence chain rather than to the ag-only substituted state.",
+      "old_sha256": "8fa5eba39e8d3278dc7b651c5f50eeb47dee5a2739a72cbb798f65312f375f17",
+      "old_size": 1143,
+      "new_sha256": "973d1efb4f8c5777fd923247876cd7a702f9b4468897c5a7c8141335d2c9597e",
+      "new_size": 1141
+    },
+    {
+      "path": ".harness/PROJECT_BRIEF.json",
+      "semantic_change": "Brief regenerated so the template_manifest_digest and captured_from_git_rev match the restored snapshot (digest 973d1efb…, captured_from_git_rev an ancestor of 6007c453). The advisory Brief now describes the canonical full-suite verification contract.",
+      "old_sha256": "2ba3a46a6a2e48d8473049930c74686ecd3a4fa465f7bcf4f5dc53ac6da9b8ce",
+      "old_size": 6585,
+      "new_sha256": "81046bebc003cd76ab449a6efc6ba04e10fbdc84af1aa661d8b59be65c53f351",
+      "new_size": 6583
+    }
+  ],
+  "dwm_fixture_binding": {
+    "fixture_path": "tests/fixtures/dirty-worktree-manifest.jsonl",
+    "note": "The DWM fixture's recorded sha256 for each of the three paths above MUST equal the new_sha256 in this migration. Post-migration drift (modifying any of the three paths after apply) MUST produce a DWM not_byte_equal violation."
+  },
+  "exclusion_clause": "No path other than the three listed above may change as part of applying this migration. Any additional drift is a hard violation and the migration is rejected. The historical 2026-08-17 record at docs/migrations/2026-08-17-rc6-final-contract-migration.json is preserved verbatim and is NOT covered by this clause — historical files are exempt from the exclusion rule by design.",
+  "single_application_marker": "applied=true",
+  "test_anchors": {
+    "positive_exact": "All three old→new pairs match exactly AND no other fixture line drifts",
+    "negative_extra_path": "An unauthorized path change fails the apply gate",
+    "negative_mismatch": "Any old→new sha mismatch fails the apply gate",
+    "negative_reapply": "A second application of this migration (after applied=true) fails the reapply gate",
+    "negative_post_migration_drift": "Modifying any of the three paths after migration apply produces a DWM violation"
+  },
+  "test_discipline": {
+    "tests_in_run_all": "tests/release/test-rc6-final-migration.sh and tests/release/test-acceptance-package.sh are in tests/run-all.sh. The acceptance-package test uses fixed synthetic fixtures (mktemp-based) and does NOT require the current-HEAD final package to pre-exist. The migration test discovers ALL *.json files in docs/migrations/, validates schema on each, and binds only the ACTIVE migration (to_head == current HEAD, applied=true) against the current DWM fixture + on-disk files. Historical migrations get schema-only validation.",
+    "current_head_gate_outside_run_all": "scripts/acceptance/check-current-head-package.sh runs OUTSIDE tests/run-all.sh and is the only place that requires the final acceptance package to exist for the current HEAD. It runs only after a real canonical run has produced a passing full-suite NDJSON. This split eliminates the circular dependency where the full suite required its own evidence to exist before running."
+  }
+}

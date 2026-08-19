@@ -273,20 +273,36 @@ fi
 FULL_SUITE_LOG="$LOG_ARTIFACT"
 FULL_SUITE_LOG_SHA="$ACTUAL_LOG_SHA256"
 
-# ---- Fail-closed check 7: locate maintenance + migration record + Reviewer verdict ----
+# ---- Fail-closed check 7: locate maintenance + ACTIVE migration record + Reviewer verdict ----
 # These three paths are derived from convention (no env vars). The Reviewer
 # verdict file must be the freshest line whose head_sha == HEAD_OID and
-# whose recorded_at is within the last 24h.
+# whose recorded_at is within the last 24h. The migration record is the
+# ACTIVE one (to_head == HEAD_OID, single_application_marker == applied=true)
+# discovered in docs/migrations/*.json; historical records are skipped.
 MAINTENANCE_VERDICT="$ROOT_DIR/.harness/reviews/maintenance/F-MAINT-01.jsonl"
 if [ ! -f "$MAINTENANCE_VERDICT" ]; then
   echo "generate-acceptance-package: maintenance verdict file missing: $MAINTENANCE_VERDICT" >&2
   exit 1
 fi
-MIGRATION_RECORD="$ROOT_DIR/docs/migrations/2026-08-17-rc6-final-contract-migration.json"
-if [ ! -f "$MIGRATION_RECORD" ]; then
-  echo "generate-acceptance-package: migration record missing: $MIGRATION_RECORD" >&2
+# Discover the ACTIVE migration record (to_head == HEAD_OID, applied=true).
+# Multiple *.json files may co-exist in docs/migrations/ — historical ones
+# are preserved verbatim and must NOT be bound by the acceptance package.
+shopt -s nullglob
+ACTIVE_MIG=""
+for mig in "$ROOT_DIR"/docs/migrations/*.json; do
+  mig_to_head="$(jq -r '.to_head // empty' "$mig" 2>/dev/null)"
+  mig_marker="$(jq -r '.single_application_marker // empty' "$mig" 2>/dev/null)"
+  if [ "$mig_to_head" = "$HEAD_OID" ] && [ "$mig_marker" = "applied=true" ]; then
+    ACTIVE_MIG="$mig"
+    break
+  fi
+done
+shopt -u nullglob
+if [ -z "$ACTIVE_MIG" ]; then
+  echo "generate-acceptance-package: no ACTIVE migration record found in docs/migrations/ with to_head=$HEAD_OID and single_application_marker=applied=true" >&2
   exit 1
 fi
+MIGRATION_RECORD="$ACTIVE_MIG"
 REVIEWER_VERDICT="$ROOT_DIR/.harness/reviews/reviewer/F-MAINT-01.jsonl"
 if [ ! -f "$REVIEWER_VERDICT" ]; then
   echo "generate-acceptance-package: reviewer verdict file missing: $REVIEWER_VERDICT" >&2

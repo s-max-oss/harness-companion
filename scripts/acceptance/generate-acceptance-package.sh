@@ -284,22 +284,37 @@ if [ ! -f "$MAINTENANCE_VERDICT" ]; then
   echo "generate-acceptance-package: maintenance verdict file missing: $MAINTENANCE_VERDICT" >&2
   exit 1
 fi
-# Discover the ACTIVE migration record (to_head == HEAD_OID, applied=true).
-# Multiple *.json files may co-exist in docs/migrations/ — historical ones
-# are preserved verbatim and must NOT be bound by the acceptance package.
+# Discover the ACTIVE migration record. ACTIVE is defined by CONTENT (its
+# new_sha256 values currently match the in-tree runtime artifacts for all
+# paths it declares to change), NOT by to_head. to_head is treated as a
+# historical marker — HEAD churn since the migration's to_head was recorded
+# does not invalidate the binding. Multiple *.json files may co-exist in
+# docs/migrations/ — historical ones are preserved verbatim and must NOT
+# be bound by the acceptance package.
 shopt -s nullglob
 ACTIVE_MIG=""
 for mig in "$ROOT_DIR"/docs/migrations/*.json; do
-  mig_to_head="$(jq -r '.to_head // empty' "$mig" 2>/dev/null)"
   mig_marker="$(jq -r '.single_application_marker // empty' "$mig" 2>/dev/null)"
-  if [ "$mig_to_head" = "$HEAD_OID" ] && [ "$mig_marker" = "applied=true" ]; then
+  [ "$mig_marker" = "applied=true" ] || continue
+  mig_n="$(jq '.changes | length' "$mig" 2>/dev/null)" || continue
+  mig_active=1
+  for ci in $(seq 0 $((mig_n - 1))); do
+    ci_path="$(jq -r ".changes[$ci].path" "$mig" 2>/dev/null)"
+    ci_new="$(jq -r ".changes[$ci].new_sha256" "$mig" 2>/dev/null)"
+    ci_actual="$(sha256sum "$ROOT_DIR/$ci_path" 2>/dev/null | awk '{print $1}')"
+    if [ "$ci_new" != "$ci_actual" ]; then
+      mig_active=0
+      break
+    fi
+  done
+  if [ "$mig_active" = "1" ]; then
     ACTIVE_MIG="$mig"
     break
   fi
 done
 shopt -u nullglob
 if [ -z "$ACTIVE_MIG" ]; then
-  echo "generate-acceptance-package: no ACTIVE migration record found in docs/migrations/ with to_head=$HEAD_OID and single_application_marker=applied=true" >&2
+  echo "generate-acceptance-package: no ACTIVE migration record found in docs/migrations/ whose new_sha256 currently matches the in-tree runtime artifacts" >&2
   exit 1
 fi
 MIGRATION_RECORD="$ACTIVE_MIG"

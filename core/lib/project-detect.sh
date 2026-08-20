@@ -2,18 +2,13 @@
 # project-detect.sh — Detect project type from project files (Phase 2)
 #
 # Design: detection order is significant — more specific markers win.
-#   1. node    — package.json
-#   2. python  — pyproject.toml OR setup.py OR requirements.txt
-#   3. rust    — Cargo.toml
-#   4. go      — go.mod
-#   5. docs    — no source markers AND docs present (e.g. .md files at root)
-#   6. generic — fallback
+#   mixed → electron → node → python → rust → go → shell → docs → unknown
 #
 # Usage:
 #   source project-detect.sh
 #   detect_project_type [project_dir]
 #
-# Output: one of "node" | "python" | "rust" | "go" | "docs" | "generic"
+# Output: node | python | rust | go | shell | electron | mixed | docs | unknown
 
 # ---- detection rules --------------------------------------------------------
 # Each rule returns 0 if the project matches the type. First match wins.
@@ -46,6 +41,29 @@ detect_go() {
   _has_file "$d" "go.mod"
 }
 
+# shell project: no source markers; Makefile / *.mk / *.sh at root.
+detect_shell() {
+  local d="$1"
+  if detect_node "$d" || detect_python "$d" || detect_rust "$d" || detect_go "$d"; then return 1; fi
+  _has_file "$d" "Makefile" || compgen -G "$d/*.mk" >/dev/null 2>&1 || compgen -G "$d/*.sh" >/dev/null 2>&1
+}
+
+# electron project: package.json with electron/tauri/nw in dependencies.
+detect_electron() {
+  local d="$1"
+  _has_file "$d" "package.json" && grep -qE '"(electron|tauri|nw)"' "$d/package.json" 2>/dev/null
+}
+
+# mixed project: ≥2 distinct source markers among node/python/rust/go.
+detect_mixed() {
+  local d="$1" c=0
+  detect_node "$d" && c=$((c+1))
+  detect_python "$d" && c=$((c+1))
+  detect_rust "$d" && c=$((c+1))
+  detect_go "$d" && c=$((c+1))
+  [ "$c" -ge 2 ]
+}
+
 # docs project: no source-code markers AND has markdown documentation files.
 # We require ≥1 .md file at root or under docs/ subdirectory.
 detect_docs() {
@@ -66,10 +84,12 @@ detect_docs() {
 }
 
 # ---- main entry point -------------------------------------------------------
-# Order matters: specific markers first; docs is a "no-source" fallback; generic is the
-# final fallback.
+# Order matters: specific markers first; shell/docs are "no-source" fallbacks;
+# unknown is the final fallback.
 detect_project_type() {
   local dir="${1:-.}"
+  detect_mixed "$dir" && { printf 'mixed'; return 0; }
+  detect_electron "$dir" && { printf 'electron'; return 0; }
   if detect_node "$dir"; then
     printf 'node'
     return 0
@@ -86,10 +106,11 @@ detect_project_type() {
     printf 'go'
     return 0
   fi
+  detect_shell "$dir" && { printf 'shell'; return 0; }
   if detect_docs "$dir"; then
     printf 'docs'
     return 0
   fi
-  printf 'generic'
+  printf 'unknown'
   return 0
 }

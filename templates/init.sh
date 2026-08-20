@@ -45,6 +45,16 @@ fi
 DETECTED_TYPE="$(detect_project_type "$ROOT_DIR")"
 echo "Detected project type: $DETECTED_TYPE"
 
+# Legacy bridge: the detector (§8.1) returns a 9-value detected_type, but the
+# config example files — and the config.json `project_type` field, per
+# config-validate.sh — are 6-value. Types without a dedicated example fall back
+# to `generic`. This bridge is replaced by the typed-template renderer in
+# F-CONV-05 / F-CONV-06.
+case "$DETECTED_TYPE" in
+  shell|electron|mixed|unknown) EXAMPLE_TYPE="generic" ;;
+  *) EXAMPLE_TYPE="$DETECTED_TYPE" ;;
+esac
+
 # ---- 2. Create .harness/logs/runs/ ----
 HARNESS_DIR="$ROOT_DIR/.harness"
 LOGS_DIR="$HARNESS_DIR/logs/runs"
@@ -52,7 +62,7 @@ mkdir -p "$LOGS_DIR"
 echo "Created: $LOGS_DIR"
 
 # ---- 3. Copy matching config example ----
-EXAMPLE_FILE="$TEMPLATE_DIR/.harness/config.json.${DETECTED_TYPE}.example"
+EXAMPLE_FILE="$TEMPLATE_DIR/.harness/config.json.${EXAMPLE_TYPE}.example"
 TARGET_CONFIG="$HARNESS_DIR/config.json"
 if [ ! -f "$EXAMPLE_FILE" ]; then
   echo "init.sh: example file not found: $EXAMPLE_FILE" >&2
@@ -63,7 +73,7 @@ if [ -f "$TARGET_CONFIG" ] && [ "$FORCE_CONFIG" != "true" ]; then
   echo "Existing config found at $TARGET_CONFIG (use --force-config to overwrite); keeping it"
 else
   cp "$EXAMPLE_FILE" "$TARGET_CONFIG"
-  echo "Wrote: $TARGET_CONFIG (from $DETECTED_TYPE example)"
+  echo "Wrote: $TARGET_CONFIG (from $EXAMPLE_TYPE example)"
 fi
 
 # ---- 4. Write v2 feature_list.json ----

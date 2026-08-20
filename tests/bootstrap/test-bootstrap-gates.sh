@@ -115,6 +115,15 @@ build_sandbox() {
 }
 EOF
   cp "$ROOT_DIR/feature_list.json"     "$sb/feature_list.json"     || return 1
+  # Normalize WIP to a deterministic zero baseline. The live registry may carry
+  # an in_progress feature (WIP=1) while a feature is being developed; T1/T6
+  # exercise the state machine from a clean slate, so a verbatim copy would leak
+  # that live WIP state into the sandbox and make the first promotion hit the
+  # WIP limit (rc=4) instead of succeeding (rc=0). Resetting in_progress →
+  # not_started keeps the feature set intact while pinning WIP=0.
+  jq '(.features[] | select(.status == "in_progress") | .status) = "not_started"' \
+    "$sb/feature_list.json" > "$sb/feature_list.json.tmp" && \
+    mv "$sb/feature_list.json.tmp" "$sb/feature_list.json" || return 1
   cp "$ROOT_DIR/AGENTS.md"             "$sb/AGENTS.md"             || return 1
   cp "$ROOT_DIR/CLAUDE.md"             "$sb/CLAUDE.md"             || return 1
   cp "$ROOT_DIR/init.sh"               "$sb/init.sh"               || return 1

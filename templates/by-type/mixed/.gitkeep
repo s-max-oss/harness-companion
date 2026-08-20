@@ -1,0 +1,2 @@
+# mixed: defaults to common/. A mixed project has ≥2 source markers; the user
+# is asked to confirm or pick a primary type. No dedicated override by default.

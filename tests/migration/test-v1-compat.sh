@@ -560,16 +560,18 @@ else
 fi
 
 # ============================================================================
-# G14 — Codex host produces codex-progress.md instead of CLAUDE.md
+# G14 — Codex host produces codex-progress.md AND CLAUDE.md (rc.3 §6.2a #10)
 # ============================================================================
 echo ""
-echo "=== G14: --host=codex produces codex-progress.md ==="
+echo "=== G14: --host=codex produces codex-progress.md + CLAUDE.md ==="
 TMP_CODEX=""
 safe_mktemp TMP_CODEX "G14 codex" || exit 1
 touch "$TMP_CODEX/package.json"
 bash "$ROOT_DIR/scripts/harness-init.sh" "$TMP_CODEX" --host=codex >/dev/null 2>&1
-if [ -f "$TMP_CODEX/codex-progress.md" ] && [ ! -f "$TMP_CODEX/CLAUDE.md" ]; then
-  pass "G14 --host=codex wrote codex-progress.md (and skipped CLAUDE.md)"
+# rc.3 §6.2a #10: CLAUDE.md is written for BOTH hosts (host-agnostic common
+# artifact); #11 (progress file) is the only host-specific artifact.
+if [ -f "$TMP_CODEX/codex-progress.md" ] && [ -f "$TMP_CODEX/CLAUDE.md" ]; then
+  pass "G14 --host=codex wrote codex-progress.md AND CLAUDE.md"
 else
   fail "G14 --host=codex" "codex-progress.md=$( [ -f "$TMP_CODEX/codex-progress.md" ] && echo Y || echo N ) CLAUDE.md=$( [ -f "$TMP_CODEX/CLAUDE.md" ] && echo Y || echo N )"
 fi

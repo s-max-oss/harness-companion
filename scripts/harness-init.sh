@@ -41,6 +41,11 @@ RENDER_BRIEF="false"
 HOST="claude"
 MODE="minimal"
 FORCE_CONFIG="false"
+STAGE_DIR=""
+CHANGED_PATHS=()
+declare -A EXPECTED_KIND=()
+declare -A EXPECTED_SHA=()
+EXISTING_BRIEF_SHA=""
 
 # ---- helpers ----------------------------------------------------------------
 
@@ -80,10 +85,18 @@ has_legacy_markers() {
 validate_snapshot() {
   local snap="$1"
   [ -f "$snap" ] || return 1
-  jq -e 'type == "object" and .schema_version == 1' "$snap" >/dev/null 2>&1 || return 1
+  jq -e 'type == "object" and .schema_version == 1
+    and (.source_version | type == "string" and length > 0)
+    and (has("captured_from_git_rev"))
+    and ((.captured_from_git_rev == null) or
+         (.captured_from_git_rev | type == "string" and test("^[0-9a-f]{40}$")))' "$snap" >/dev/null 2>&1 || return 1
   jq -e '(.templates | type) == "object"' "$snap" >/dev/null 2>&1 || return 1
+  jq -e '[.templates | keys[]] | all(.[];
+    (type == "string") and length > 0
+    and (test("(^/|(^|/)\\.\\.(/|$)|\\\\)") | not))' "$snap" >/dev/null 2>&1 || return 1
   jq -e '[.templates[] | .sha256] | all(.[]; (type == "string") and test("^[0-9a-f]{64}$"))' "$snap" >/dev/null 2>&1 || return 1
-  jq -e '[.templates[] | .source] | all(.[]; (type == "string") and (length > 0))' "$snap" >/dev/null 2>&1 || return 1
+  jq -e '[.templates[] | .source] | all(.[]; (type == "string") and (length > 0)
+    and (test("(^/|(^|/)\\.\\.(/|$)|\\\\)") | not))' "$snap" >/dev/null 2>&1 || return 1
   return 0
 }
 
@@ -153,6 +166,125 @@ snap_add() {  # <target_rel> <source_rel> <sha256>
   SNAP_ENTRIES="$(printf '%s' "$SNAP_ENTRIES" | jq -c --arg k "$1" --arg s "$2" --arg h "$3" '. + {($k): {source: $s, sha256: $h}}')"
 }
 
+stage_begin() {
+  STAGE_DIR="$(mktemp -d)" || { echo "error: could not create staging directory" >&2; return 1; }
+  CHANGED_PATHS=()
+  EXPECTED_KIND=()
+  EXPECTED_SHA=()
+}
+
+stage_mark() {
+  local rel="$1" seen
+  for seen in "${CHANGED_PATHS[@]}"; do [ "$seen" = "$rel" ] && return 0; done
+  CHANGED_PATHS+=("$rel")
+}
+
+expect_target_unchanged() { # <target_rel>; bind absent or current sha
+  local rel="$1"
+  if [ -f "$TARGET/$rel" ]; then
+    EXPECTED_KIND["$rel"]="file"
+    EXPECTED_SHA["$rel"]="$(sha256_file "$TARGET/$rel")"
+  elif [ -e "$TARGET/$rel" ] || [ -L "$TARGET/$rel" ]; then
+    EXPECTED_KIND["$rel"]="other"
+    EXPECTED_SHA["$rel"]=""
+  else
+    EXPECTED_KIND["$rel"]="absent"
+    EXPECTED_SHA["$rel"]=""
+  fi
+}
+
+expect_classified_target() { # <target_rel> <sha-at-classification|empty-for-absent>
+  local rel="$1" classified_sha="$2"
+  if [ -n "$classified_sha" ]; then
+    EXPECTED_KIND["$rel"]="file"; EXPECTED_SHA["$rel"]="$classified_sha"
+  else
+    EXPECTED_KIND["$rel"]="absent"; EXPECTED_SHA["$rel"]=""
+  fi
+}
+
+target_matches_expectation() { # <target_rel>
+  local rel="$1" kind="${EXPECTED_KIND[$1]:-}" now
+  [ -z "$kind" ] && return 0
+  case "$kind" in
+    absent) [ ! -e "$TARGET/$rel" ] && [ ! -L "$TARGET/$rel" ] ;;
+    file) [ -f "$TARGET/$rel" ] && [ ! -L "$TARGET/$rel" ] || return 1
+          now="$(sha256_file "$TARGET/$rel")"; [ -n "$now" ] && [ "$now" = "${EXPECTED_SHA[$rel]}" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+stage_copy() { # <source_abs> <target_rel>
+  local src="$1" rel="$2" out="$STAGE_DIR/$2"
+  mkdir -p "$(dirname "$out")" || return 1
+  cp "$src" "$out" || return 1
+  case "$rel" in init.sh|checklist.sh) chmod +x "$out" || return 1 ;; esac
+  stage_mark "$rel"
+}
+
+commit_stage() {
+  local rollback="$STAGE_DIR/.rollback" rel dest backup i parent resolved_target resolved_parent
+  mkdir -p "$rollback" || return 1
+  resolved_target="$(cd "$TARGET" && pwd -P)" || return 1
+  local committed=()
+  for rel in "${CHANGED_PATHS[@]}"; do
+    dest="$TARGET/$rel"; backup="$rollback/$rel"
+    parent="$(dirname "$dest")"
+    # Validate the nearest existing ancestor before mkdir. Otherwise a
+    # snapshot-derived parent containing a symlink could make mkdir write
+    # outside the project before the later realpath check.
+    local probe="$parent"
+    while [ ! -e "$probe" ] && [ ! -L "$probe" ]; do
+      [ "$probe" = "$TARGET" ] && break
+      probe="$(dirname "$probe")"
+    done
+    [ -L "$probe" ] && { echo "error: refusing symlink parent for: $rel" >&2; break; }
+    resolved_parent="$(cd "$probe" && pwd -P)" || break
+    case "$resolved_parent/" in "$resolved_target/"*) ;; *) echo "error: target parent escapes project root: $rel" >&2; break ;; esac
+    mkdir -p "$parent" "$(dirname "$backup")" || break
+    resolved_parent="$(cd "$parent" && pwd -P)" || break
+    case "$resolved_parent/" in "$resolved_target/"*) ;; *) echo "error: target path escapes project root: $rel" >&2; break ;; esac
+    [ -L "$dest" ] && { echo "error: refusing symlink target: $rel" >&2; break; }
+    if ! target_matches_expectation "$rel"; then
+      echo "error: concurrent target change detected before write: $rel" >&2
+      break
+    fi
+    if [ -e "$dest" ]; then
+      cp -p "$dest" "$backup" || break
+      printf 'existing' > "$backup.kind"
+    else
+      printf 'new' > "$backup.kind"
+    fi
+    local tmp="${dest}.harness-init.$$"
+    if ! cp -p "$STAGE_DIR/$rel" "$tmp" || ! mv "$tmp" "$dest"; then
+      rm -f "$tmp"
+      break
+    fi
+    committed+=("$rel")
+  done
+  if [ "${#committed[@]}" -ne "${#CHANGED_PATHS[@]}" ]; then
+    for ((i=${#committed[@]}-1; i>=0; i--)); do
+      rel="${committed[$i]}"; dest="$TARGET/$rel"; backup="$rollback/$rel"
+      if [ "$(cat "$backup.kind" 2>/dev/null)" = "existing" ]; then cp -p "$backup" "$dest" 2>/dev/null || true; else rm -f "$dest"; fi
+    done
+    echo "error: commit failed; staged changes rolled back" >&2
+    return 1
+  fi
+  return 0
+}
+
+desired_source_for() { # <target_rel> [recorded_source]
+  local rel="$1" recorded="${2:-}" base
+  case "$rel" in
+    AGENTS.md|CLAUDE.md|init.sh|checklist.sh)
+      base="${rel##*/}"
+      if [ -f "$TEMPLATES_DIR/by-type/$DTYPE/$base" ]; then printf 'by-type/%s/%s' "$DTYPE" "$base"; else printf 'common/%s' "$base"; fi ;;
+    feature_list.json) printf 'common/feature_list.json' ;;
+    .harness/config.json) printf '.harness/config.json.%s.example' "$PROJECT_TYPE" ;;
+    session-handoff.md|clean-state-checklist.md) printf '%s' "$rel" ;;
+    *) printf '%s' "$recorded" ;;
+  esac
+}
+
 # render_typed <file> <dest_abs> <target_rel> — by-type/<type>/F else common/F.
 render_typed() {
   local f="$1" dest="$2" trel="$3" src="" srel=""
@@ -162,11 +294,12 @@ render_typed() {
     src="$TEMPLATES_DIR/common/$f"; srel="common/$f"
   fi
   [ -f "$src" ] || { echo "error: template missing: $src" >&2; return 1; }
-  if [ -f "$dest" ] && [ "$FORCE_CONFIG" != "true" ]; then
+  if [ -f "$dest" ]; then
     return 0   # skip-if-exists
   fi
-  cp "$src" "$dest" || { echo "error: write failed: $dest" >&2; return 1; }
-  snap_add "$trel" "$srel" "$(sha256_file "$dest")"
+  expect_target_unchanged "$trel"
+  stage_copy "$src" "$trel" || { echo "error: staging failed: $trel" >&2; return 1; }
+  snap_add "$trel" "$srel" "$(sha256_file "$STAGE_DIR/$trel")"
   return 0
 }
 
@@ -174,23 +307,28 @@ render_typed() {
 render_flat() {
   local src="$TEMPLATES_DIR/$1" dest="$2" trel="$3" srel="$4"
   [ -f "$src" ] || { echo "error: template missing: $src" >&2; return 1; }
-  if [ -f "$dest" ] && [ "$FORCE_CONFIG" != "true" ]; then
+  if [ -f "$dest" ]; then
     return 0
   fi
-  cp "$src" "$dest" || { echo "error: write failed: $dest" >&2; return 1; }
-  snap_add "$trel" "$srel" "$(sha256_file "$dest")"
+  expect_target_unchanged "$trel"
+  stage_copy "$src" "$trel" || { echo "error: staging failed: $trel" >&2; return 1; }
+  snap_add "$trel" "$srel" "$(sha256_file "$STAGE_DIR/$trel")"
   return 0
 }
 
 SNAPSHOT_PATH="$TARGET/.harness/.template-snapshot.json"
 
 write_snapshot() {
+  local out="$STAGE_DIR/.harness/.template-snapshot.json"
+  mkdir -p "$(dirname "$out")" || return 1
   jq -n -S \
     --arg rev "$CAPTURED_REV" \
     --arg ver "$VERSION" \
     --argjson templates "$SNAP_ENTRIES" \
     '{ schema_version: 1, captured_from_git_rev: (if $rev == "" then null else $rev end), source_version: $ver, templates: $templates }' \
-    > "$SNAPSHOT_PATH"
+    > "$out" || return 1
+  expect_target_unchanged ".harness/.template-snapshot.json"
+  stage_mark ".harness/.template-snapshot.json"
 }
 
 # build the canonical Brief (22 fields, jq -S sorted). Called after the snapshot
@@ -235,8 +373,18 @@ build_brief() {
 }
 
 render_brief_md() {
-  local brief_json="$TARGET/.harness/PROJECT_BRIEF.json"
+  local brief_json="${1:-$TARGET/.harness/PROJECT_BRIEF.json}"
+  local brief_md="${2:-$TARGET/.harness/PROJECT_BRIEF.md}"
   [ -f "$brief_json" ] || { echo "error: PROJECT_BRIEF.json missing; cannot render MD" >&2; return 1; }
+  jq -e 'type == "object" and .schema_version == 1 and .advisory == true
+    and (.source_version|type=="string" and length>0)
+    and ((.captured_from_git_rev == null) or (.captured_from_git_rev|type=="string" and test("^[0-9a-f]{40}$")))
+    and (.goal|type=="string" and test("[^[:space:]]"))
+    and (.detected_type|type=="string") and (.stack|type=="string") and (.cadence|type=="string")
+    and ((.deadline==null) or (.deadline|type=="string"))
+    and (.test_framework|type=="string") and (.secrets_handling|type=="string") and (.external_network|type=="string")
+    and (.success_criteria|type=="array" and length>0 and all(.[]; type=="string" and test("[^[:space:]]")))' \
+    "$brief_json" >/dev/null 2>&1 || { echo "error: PROJECT_BRIEF.json is invalid; refusing to render" >&2; return 1; }
   local schema src_rev src_ver
   schema="$(jq -r '.schema_version' "$brief_json" 2>/dev/null)"
   src_rev="$(jq -r '.captured_from_git_rev // "0000000000000000000000000000000000000000"' "$brief_json" 2>/dev/null)"
@@ -262,7 +410,7 @@ render_brief_md() {
     jq -r '.success_criteria[] | "- \(.)"' "$brief_json"
     echo ""
     echo "_Advisory. Current-session user instructions take precedence._"
-  } > "$TARGET/.harness/PROJECT_BRIEF.md"
+  } > "$brief_md" || return 1
   return 0
 }
 
@@ -279,33 +427,59 @@ do_update() {
       ;;
   esac
 
-  local snap="$TARGET/.harness/.template-snapshot.json"
+  if [ "$STATE" = "legacy-unmanaged" ]; then
+    echo "=== Update plan ($( [ "$APPLY" = "true" ] && echo apply || echo 'dry-run — no writes' )) ==="
+    echo "  would-create: .harness/.template-snapshot.json (legacy migration; existing files remain unclaimed)"
+    if [ "$APPLY" != "true" ]; then echo "Re-run with --apply to write."; return 0; fi
+    return 3  # caller falls through to the migration-safe fresh renderer
+  fi
+
+  local snap="$TARGET/.harness/.template-snapshot.json" snapshot_base_sha
+  snapshot_base_sha="$(sha256_file "$snap")"
+  [ -n "$snapshot_base_sha" ] || { echo "error: could not hash snapshot" >&2; return 1; }
   local plan="" wrote_any=false
-  local k src sha_snap sha_now sha_tmpl base
-  for k in $(jq -r '.templates | keys[]' "$snap" 2>/dev/null); do
-    src="$(jq -r --arg k "$k" '.templates[$k].source' "$snap" 2>/dev/null)"
-    sha_snap="$(jq -r --arg k "$k" '.templates[$k].sha256' "$snap" 2>/dev/null)"
+  local k src desired sha_snap sha_now sha_tmpl
+  SNAP_ENTRIES="$(jq -c '.templates' "$snap")" || return 2
+  stage_begin || return 1
+  for k in $(jq -r '.templates | keys[]' "$snap" 2>/dev/null | tr -d '\r'); do
+    src="$(jq -r --arg k "$k" '.templates[$k].source' "$snap" 2>/dev/null | tr -d '\r')"
+    desired="$(desired_source_for "$k" "$src")"
+    sha_snap="$(jq -r --arg k "$k" '.templates[$k].sha256' "$snap" 2>/dev/null | tr -d '\r')"
     [ -f "$TARGET/$k" ] && sha_now="$(sha256_file "$TARGET/$k")" || sha_now=""
-    # re-derive current template content from the recorded source path.
-    if [ -f "$TEMPLATES_DIR/$src" ]; then
-      sha_tmpl="$(sha256_file "$TEMPLATES_DIR/$src")"
-    else
-      base="${src##*/}"
-      [ -f "$TEMPLATES_DIR/common/$base" ] && sha_tmpl="$(sha256_file "$TEMPLATES_DIR/common/$base")" || sha_tmpl=""
-    fi
+    if [ -f "$TARGET/$k" ] && [ -z "$sha_now" ]; then rm -rf "$STAGE_DIR"; echo "error: could not hash target: $k" >&2; return 1; fi
+    [ -n "$desired" ] && [ -f "$TEMPLATES_DIR/$desired" ] && sha_tmpl="$(sha256_file "$TEMPLATES_DIR/$desired")" || sha_tmpl=""
 
     if [ -z "$sha_now" ]; then
+      if [ -z "$sha_tmpl" ]; then
+        plan="$(printf '%s\n%s' "$plan" "  would-skip (template unavailable): $k")"
+        continue
+      fi
       plan="$(printf '%s\n%s' "$plan" "  would-create: $k")"
+      if [ "$APPLY" = "true" ]; then
+        expect_classified_target "$k" "$sha_now"
+        stage_copy "$TEMPLATES_DIR/$desired" "$k" || { rm -rf "$STAGE_DIR"; return 1; }
+        snap_add "$k" "$desired" "$sha_tmpl"
+        wrote_any=true
+      fi
       continue
     fi
-    if [ "$sha_now" = "$sha_tmpl" ]; then
+    if [ -n "$sha_tmpl" ] && [ "$sha_now" = "$sha_tmpl" ]; then
+      snap_add "$k" "$desired" "$sha_tmpl"
       continue   # identical → skip
     fi
-    if [ "$sha_now" = "$sha_snap" ] && [ "$sha_tmpl" != "$sha_snap" ]; then
+    if [ "$k" = ".harness/config.json" ] && [ "$FORCE_CONFIG" = "true" ] && [ -n "$sha_tmpl" ]; then
+      plan="$(printf '%s\n%s' "$plan" "  would-update (--force-config): $k")"
+      if [ "$APPLY" = "true" ]; then
+        expect_classified_target "$k" "$sha_now"
+        stage_copy "$TEMPLATES_DIR/$desired" "$k" || { rm -rf "$STAGE_DIR"; return 1; }
+        snap_add "$k" "$desired" "$sha_tmpl"; wrote_any=true
+      fi
+    elif [ "$sha_now" = "$sha_snap" ] && [ -n "$sha_tmpl" ] && [ "$sha_tmpl" != "$sha_snap" ]; then
       plan="$(printf '%s\n%s' "$plan" "  would-update (template changed): $k")"
       if [ "$APPLY" = "true" ]; then
-        cp "$TEMPLATES_DIR/$src" "$TARGET/$k" 2>/dev/null || true
-        snap_add "$k" "$src" "$(sha256_file "$TARGET/$k")"
+        expect_classified_target "$k" "$sha_now"
+        stage_copy "$TEMPLATES_DIR/$desired" "$k" || { rm -rf "$STAGE_DIR"; return 1; }
+        snap_add "$k" "$desired" "$sha_tmpl"
         wrote_any=true
       fi
     elif [ "$sha_now" != "$sha_tmpl" ] && [ "$sha_now" != "$sha_snap" ]; then
@@ -317,20 +491,38 @@ do_update() {
     echo "=== Update plan (dry-run — no writes) ==="
     printf '%s\n' "$plan" | sed '/^$/d'
     echo "Re-run with --apply to write."
+    rm -rf "$STAGE_DIR"
     return 0
   fi
 
   if [ "$wrote_any" = "true" ]; then
-    write_snapshot
-    local digest
-    digest="$(sha256_file "$SNAPSHOT_PATH")"
-    if [ -f "$TARGET/.harness/PROJECT_BRIEF.json" ]; then
-      jq --arg d "$digest" '.template_manifest_digest = $d' "$TARGET/.harness/PROJECT_BRIEF.json" \
-        > "$TARGET/.harness/PROJECT_BRIEF.json.tmp" 2>/dev/null \
-        && mv "$TARGET/.harness/PROJECT_BRIEF.json.tmp" "$TARGET/.harness/PROJECT_BRIEF.json"
-      render_brief_md
-    fi
+    write_snapshot || { rm -rf "$STAGE_DIR"; return 1; }
+    expect_classified_target ".harness/.template-snapshot.json" "$snapshot_base_sha"
   fi
+  local snap_for_digest="$snap" digest brief_out md_out
+  [ "$wrote_any" = "true" ] && snap_for_digest="$STAGE_DIR/.harness/.template-snapshot.json"
+  digest="$(sha256_file "$snap_for_digest")"
+  if [ -n "$BRIEF_PATH" ] || [ "$BRIEF_STDIN" = "true" ]; then
+    brief_out="$STAGE_DIR/.harness/PROJECT_BRIEF.json"; md_out="$STAGE_DIR/.harness/PROJECT_BRIEF.md"
+    mkdir -p "$(dirname "$brief_out")" || { rm -rf "$STAGE_DIR"; return 1; }
+    build_brief "$digest" > "$brief_out" || { rm -rf "$STAGE_DIR"; return 1; }
+    render_brief_md "$brief_out" "$md_out" || { rm -rf "$STAGE_DIR"; return 1; }
+    if [ -n "$EXISTING_BRIEF_SHA" ]; then expect_classified_target ".harness/PROJECT_BRIEF.json" "$EXISTING_BRIEF_SHA"; else expect_target_unchanged ".harness/PROJECT_BRIEF.json"; fi
+    expect_target_unchanged ".harness/PROJECT_BRIEF.md"
+    stage_mark ".harness/PROJECT_BRIEF.json"; stage_mark ".harness/PROJECT_BRIEF.md"
+  elif [ "$wrote_any" = "true" ] && [ -f "$TARGET/.harness/PROJECT_BRIEF.json" ]; then
+    brief_out="$STAGE_DIR/.harness/PROJECT_BRIEF.json"; md_out="$STAGE_DIR/.harness/PROJECT_BRIEF.md"
+    mkdir -p "$(dirname "$brief_out")" || { rm -rf "$STAGE_DIR"; return 1; }
+    local brief_base_sha
+    brief_base_sha="$(sha256_file "$TARGET/.harness/PROJECT_BRIEF.json")"
+    [ -n "$brief_base_sha" ] || { rm -rf "$STAGE_DIR"; return 1; }
+    jq -S --arg d "$digest" '.template_manifest_digest = $d' "$TARGET/.harness/PROJECT_BRIEF.json" > "$brief_out" || { rm -rf "$STAGE_DIR"; return 1; }
+    render_brief_md "$brief_out" "$md_out" || { rm -rf "$STAGE_DIR"; return 1; }
+    expect_classified_target ".harness/PROJECT_BRIEF.json" "$brief_base_sha"; expect_target_unchanged ".harness/PROJECT_BRIEF.md"
+    stage_mark ".harness/PROJECT_BRIEF.json"; stage_mark ".harness/PROJECT_BRIEF.md"
+  fi
+  if [ "${#CHANGED_PATHS[@]}" -gt 0 ]; then commit_stage || { rm -rf "$STAGE_DIR"; return 1; }; fi
+  rm -rf "$STAGE_DIR"
   echo "=== Update applied ==="
   return 0
 }
@@ -391,14 +583,12 @@ TARGET="$(cd "$TARGET" && pwd)"
 PROJECT_NAME="$(basename "$TARGET")"
 
 # ---- recon (read-only; run BEFORE any write so detection reflects true state) ----
-DTYPE="$(detect_project_type "$TARGET")"
+REPO_DTYPE="$(detect_project_type "$TARGET")"
+DTYPE="$REPO_DTYPE"
 PROJECT_TYPE="$(map_project_type "$DTYPE")"
 CAPTURED_REV="$(captured_rev)"
 STATE="$(detect_state "$TARGET")"
 SNAPSHOT_PATH="$TARGET/.harness/.template-snapshot.json"
-
-INITIAL_STATE="$(compute_initial_state)"
-TYPE_EVIDENCE="$(compute_type_evidence)"
 
 # ---- Brief input ------------------------------------------------------------
 
@@ -406,6 +596,60 @@ INPUT_BRIEF_JSON="{}"
 
 # §7.2.1 defaults + legacy placeholders.
 OP_DEFAULTS='{"commit":"ask","push":"ask","merge":"ask","release":"ask","install_packages":"ask","external_mutation":"ask","destructive_ops":false}'
+
+# Validate every caller-provided field before any target write. Optional fields
+# may be omitted (the canonical builder supplies spec defaults), but when
+# present their type/enum/shape is fail-closed.
+validate_brief_input() {
+  printf '%s' "$1" | jq -e '
+    def valid_date:
+      capture("^(?<y>[0-9]{4})-(?<m>[0-9]{2})-(?<d>[0-9]{2})$") as $x
+      | ($x.y|tonumber) as $y | ($x.m|tonumber) as $m | ($x.d|tonumber) as $d
+      | ($m >= 1 and $m <= 12 and $d >= 1
+         and $d <= ([31,(if (($y%4==0 and $y%100!=0) or $y%400==0) then 29 else 28 end),31,30,31,30,31,31,30,31,30,31][$m-1]));
+    type == "object"
+    and ((has("schema_version") | not) or .schema_version == 1)
+    and (.goal | type == "string" and test("[^[:space:]]") and length <= 500)
+    and (.success_criteria | type == "array" and length >= 1 and length <= 7
+         and all(.[]; type == "string" and test("[^[:space:]]")))
+    and ((has("detected_type") | not) or (.detected_type | IN("node","python","rust","go","shell","electron","mixed","docs","unknown")))
+    and ((has("stack") | not) or (.stack | IN("node","python","rust","go","shell","electron","mixed","docs","unknown")))
+    and ((has("cadence") | not) or (.cadence | IN("stable","weekly","daily","oneoff")))
+    and ((has("deadline") | not) or .deadline == null or (.deadline | type == "string" and valid_date))
+    and ((has("test_framework") | not) or (.test_framework | type == "string" and length > 0 and length <= 50))
+    and ((has("secrets_handling") | not) or (.secrets_handling | IN("env-file","vault","keyring","unspecified")))
+    and ((has("external_network") | not) or (.external_network | IN("ask","allowed","denied")))
+    and ((has("prohibitions") | not) or (.prohibitions | type == "array" and length <= 20 and all(.[]; type == "string" and test("[^[:space:]]") and length <= 200)))
+    and ((has("initial_project_state") | not) or (.initial_project_state | type == "object"
+         and all(to_entries[];
+           (.key | IN("is_git_repo","has_existing_tests","existing_harness_files","detection_summary"))
+           and (if (.key|IN("is_git_repo","has_existing_tests")) then (.value|type)=="boolean"
+                elif .key=="existing_harness_files" then (.value|type)=="array" and all(.value[]; type=="string")
+                else (.value|type)=="string" and (.value|length)<=200 end))))
+    and ((has("operation_preferences") | not) or
+         (.operation_preferences | type == "object"
+          and all(to_entries[]; if .key == "destructive_ops" then (.value|type)=="boolean"
+                                else (.key|IN("commit","push","merge","release","install_packages","external_mutation"))
+                                  and (.value|IN("ask","auto","denied")) end)))
+    and ((has("defaults_applied") | not) or (.defaults_applied | type == "array" and all(.[ ];
+         type == "object" and has("value") and (.field|type=="string" and startswith("/"))
+         and (.rationale|type=="string" and length<=200)
+         and (.source|IN("spec_default","legacy_placeholder")))))
+    and ((has("conflicts_resolved") | not) or (.conflicts_resolved | type == "array" and all(.[ ];
+         type == "object" and (.field|type=="string" and startswith("/"))
+         and (.repo_evidence|type=="string") and (.user_input|type=="string")
+         and (.resolution|IN("user","repo","custom","deferred")) and has("resolved_value")
+         and (if .resolution=="deferred" then .resolved_value==null else .resolved_value!=null end))))
+    and ((has("provenance") | not) or (.provenance | type == "object" and all(to_entries[];
+         (.key|startswith("/")) and (.value|type=="object")
+         and (.value.source|IN("conversation","repo","environment","cli","spec_default","legacy_placeholder","existing_brief")))))
+    and (if (.detected_type // "") | IN("mixed","unknown")
+         then (.type_evidence | type == "object")
+           and (.type_evidence.markers_seen | type == "array" and all(.[]; type=="string"))
+           and (.type_evidence.notes | type == "string" and length <= 500)
+         else ((has("type_evidence") | not) or .type_evidence == null or (.type_evidence|type=="object")) end)
+  ' >/dev/null 2>&1
+}
 
 # AC-13a: in --brief / --brief-stdin mode, goal + success_criteria are required.
 if [ -n "$BRIEF_PATH" ] || [ "$BRIEF_STDIN" = "true" ]; then
@@ -418,6 +662,23 @@ if [ -n "$BRIEF_PATH" ] || [ "$BRIEF_STDIN" = "true" ]; then
     echo "error: Brief: not a valid JSON object" >&2
     exit 2
   fi
+  # Resume inputs may intentionally contain only changed fields. Merge them
+  # over the existing canonical Brief before validation so confirmed values,
+  # nested preferences, defaults, conflicts, and provenance are preserved.
+  if [ "$STATE" = "managed-valid" ] && [ -f "$TARGET/.harness/PROJECT_BRIEF.json" ]; then
+    EXISTING_BRIEF_SHA="$(sha256_file "$TARGET/.harness/PROJECT_BRIEF.json")"
+    [ -n "$EXISTING_BRIEF_SHA" ] || { echo "error: could not hash existing PROJECT_BRIEF.json" >&2; exit 2; }
+    EXISTING_BRIEF_JSON="$(cat "$TARGET/.harness/PROJECT_BRIEF.json" 2>/dev/null)" || EXISTING_BRIEF_JSON=""
+    [ "$(sha256_file "$TARGET/.harness/PROJECT_BRIEF.json")" = "$EXISTING_BRIEF_SHA" ] || { echo "error: PROJECT_BRIEF.json changed during read" >&2; exit 2; }
+    if ! printf '%s' "$EXISTING_BRIEF_JSON" | jq -e 'type=="object"' >/dev/null 2>&1; then
+      echo "error: existing PROJECT_BRIEF.json is invalid" >&2; exit 2
+    fi
+    INPUT_BRIEF_JSON="$(jq -n --argjson old "$EXISTING_BRIEF_JSON" --argjson new "$INPUT_BRIEF_JSON" '
+      ($old * $new)
+      | .initial_project_state = (($old.initial_project_state // {}) * ($new.initial_project_state // {}))
+      | .operation_preferences = (($old.operation_preferences // {}) * ($new.operation_preferences // {}))
+      | .provenance = (($old.provenance // {}) * ($new.provenance // {}))')" || exit 2
+  fi
   if ! printf '%s' "$INPUT_BRIEF_JSON" | jq -e '(.goal | type) == "string" and (.goal | test("[^[:space:]]")) and (.goal | length) <= 500' >/dev/null 2>&1; then
     echo "error: required field 'goal' is missing or empty" >&2
     exit 2
@@ -426,7 +687,23 @@ if [ -n "$BRIEF_PATH" ] || [ "$BRIEF_STDIN" = "true" ]; then
     echo "error: required field 'success_criteria' is missing or empty" >&2
     exit 2
   fi
+  if ! validate_brief_input "$INPUT_BRIEF_JSON"; then
+    echo "error: Brief: schema or enum validation failed" >&2
+    exit 2
+  fi
 fi
+
+# On the resolved Brief path, template/config selection is Brief-driven. Repo
+# detection is only the fallback for fields that the Agent legitimately left
+# absent and for legacy mode.
+if [ -n "$BRIEF_PATH" ] || [ "$BRIEF_STDIN" = "true" ]; then
+  DTYPE="$(printf '%s' "$INPUT_BRIEF_JSON" | jq -r --arg d "$REPO_DTYPE" '.detected_type // $d' | tr -d '\r')"
+elif [ "$STATE" = "managed-valid" ] && [ -f "$TARGET/.harness/PROJECT_BRIEF.json" ]; then
+  DTYPE="$(jq -r --arg d "$REPO_DTYPE" '.detected_type // $d' "$TARGET/.harness/PROJECT_BRIEF.json" 2>/dev/null | tr -d '\r' || printf '%s' "$REPO_DTYPE")"
+fi
+PROJECT_TYPE="$(map_project_type "$DTYPE")"
+INITIAL_STATE="$(compute_initial_state)"
+TYPE_EVIDENCE="$(compute_type_evidence)"
 
 # legacy mode placeholder defaults_applied (§3.2): goal + success_criteria were
 # filled with placeholders; record them so status can flag the Brief as placeholder.
@@ -441,13 +718,22 @@ fi
 # ---- mode dispatch ----------------------------------------------------------
 
 if [ "$RENDER_BRIEF" = "true" ]; then
-  render_brief_md
-  exit $?
+  stage_begin || exit 1
+  mkdir -p "$STAGE_DIR/.harness" || { rm -rf "$STAGE_DIR"; exit 1; }
+  render_source_sha="$(sha256_file "$TARGET/.harness/PROJECT_BRIEF.json")"
+  [ -n "$render_source_sha" ] || { echo "error: could not hash PROJECT_BRIEF.json" >&2; rm -rf "$STAGE_DIR"; exit 1; }
+  if ! render_brief_md "$TARGET/.harness/PROJECT_BRIEF.json" "$STAGE_DIR/.harness/PROJECT_BRIEF.md"; then rm -rf "$STAGE_DIR"; exit 1; fi
+  [ "$(sha256_file "$TARGET/.harness/PROJECT_BRIEF.json")" = "$render_source_sha" ] || { echo "error: PROJECT_BRIEF.json changed during render" >&2; rm -rf "$STAGE_DIR"; exit 1; }
+  expect_target_unchanged ".harness/PROJECT_BRIEF.md"
+  stage_mark ".harness/PROJECT_BRIEF.md"
+  if [ "$(sha256_file "$TARGET/.harness/PROJECT_BRIEF.json")" = "$render_source_sha" ] && commit_stage; then rm -rf "$STAGE_DIR"; exit 0; fi
+  rm -rf "$STAGE_DIR"; exit 1
 fi
 
 if [ "$UPDATE" = "true" ]; then
   do_update
-  exit $?
+  update_rc=$?
+  [ "$update_rc" -eq 3 ] || exit "$update_rc"
 fi
 
 if [ "$STATE" = "managed-inconsistent" ]; then
@@ -455,10 +741,22 @@ if [ "$STATE" = "managed-inconsistent" ]; then
   exit 2
 fi
 
-if [ "$STATE" = "managed-valid" ] && [ -z "$BRIEF_PATH" ] && [ "$BRIEF_STDIN" != "true" ]; then
+if [ "$STATE" = "managed-valid" ]; then
+  if [ -n "$BRIEF_PATH" ] || [ "$BRIEF_STDIN" = "true" ]; then
+    # A resolved Brief is the confirmation token for resume. Run the same
+    # 3-way engine as explicit update and merge the Brief fields above.
+    APPLY="true"
+    do_update
+    exit $?
+  fi
+  if [ "$FORCE_CONFIG" = "true" ]; then
+    APPLY="true"
+    do_update
+    exit $?
+  fi
   # §3.4.1 legacy-skip-existing: already initialized, no overwrite.
   echo "harness-init.sh: project already initialized (managed-valid); skipping existing files"
-  echo "  (use --update to upgrade templates, or --brief to re-initialize)"
+  echo "  (use --update to upgrade templates, or --brief to resume with a confirmed Brief)"
   exit 0
 fi
 
@@ -466,62 +764,89 @@ fi
 
 # Fresh init / legacy-unmanaged initial write. #1-#3 always written on fresh;
 # #4-#14 skip-if-exists (never overwrite user files).
-mkdir -p "$TARGET/.harness/logs/runs"
+stage_begin || exit 1
 
 # #9 AGENTS.md, #10 CLAUDE.md, #8 init.sh (typed).
-render_typed "AGENTS.md" "$TARGET/AGENTS.md" "AGENTS.md"
-render_typed "CLAUDE.md" "$TARGET/CLAUDE.md" "CLAUDE.md"
-render_typed "init.sh"   "$TARGET/init.sh"   "init.sh"
-chmod +x "$TARGET/init.sh" 2>/dev/null || true
+render_typed "AGENTS.md" "$TARGET/AGENTS.md" "AGENTS.md" || { rm -rf "$STAGE_DIR"; exit 1; }
+render_typed "CLAUDE.md" "$TARGET/CLAUDE.md" "CLAUDE.md" || { rm -rf "$STAGE_DIR"; exit 1; }
+render_typed "init.sh"   "$TARGET/init.sh"   "init.sh" || { rm -rf "$STAGE_DIR"; exit 1; }
 
 # #7 feature_list.json (type-agnostic, from common/).
-render_flat "common/feature_list.json" "$TARGET/feature_list.json" "feature_list.json" "common/feature_list.json"
+render_flat "common/feature_list.json" "$TARGET/feature_list.json" "feature_list.json" "common/feature_list.json" || { rm -rf "$STAGE_DIR"; exit 1; }
 
 # #4 .harness/config.json (type-matched example).
 CONFIG_SRC="$TEMPLATES_DIR/.harness/config.json.${PROJECT_TYPE}.example"
 CONFIG_SREL=".harness/config.json.${PROJECT_TYPE}.example"
 if [ ! -f "$CONFIG_SRC" ]; then
   echo "error: config example missing: $CONFIG_SRC" >&2
+  rm -rf "$STAGE_DIR"
   exit 1
 fi
 if [ ! -f "$TARGET/.harness/config.json" ] || [ "$FORCE_CONFIG" = "true" ]; then
-  cp "$CONFIG_SRC" "$TARGET/.harness/config.json" || { echo "error: write failed: config.json" >&2; exit 1; }
+  expect_target_unchanged ".harness/config.json"
+  stage_copy "$CONFIG_SRC" ".harness/config.json" || { echo "error: staging failed: config.json" >&2; rm -rf "$STAGE_DIR"; exit 1; }
+  snap_add ".harness/config.json" "$CONFIG_SREL" "$(sha256_file "$STAGE_DIR/.harness/config.json")"
 fi
-snap_add ".harness/config.json" "$CONFIG_SREL" "$(sha256_file "$TARGET/.harness/config.json")"
 
 # #11 progress (host-specific; NOT recorded in the snapshot — it would break
 # AC-14 cross-host byte-equality of the snapshot).
 PROGRESS_DEST="$TARGET/claude-progress.md"
 [ "$HOST" = "codex" ] && PROGRESS_DEST="$TARGET/codex-progress.md"
-if [ ! -f "$PROGRESS_DEST" ] || [ "$FORCE_CONFIG" = "true" ]; then
-  cp "$TEMPLATES_DIR/claude-progress.md" "$PROGRESS_DEST" 2>/dev/null || true
+if [ ! -f "$PROGRESS_DEST" ]; then
+  expect_target_unchanged "${PROGRESS_DEST##*/}"
+  stage_copy "$TEMPLATES_DIR/claude-progress.md" "${PROGRESS_DEST##*/}" || { echo "error: staging failed: progress" >&2; rm -rf "$STAGE_DIR"; exit 1; }
 fi
 
 # #6 .gitignore append (never overwrite user entries).
 GITIGNORE="$TARGET/.gitignore"
-{
-  if [ -f "$GITIGNORE" ]; then cat "$GITIGNORE"; echo ""; fi
-  echo "# harness-companion"
-  echo ".harness/logs/"
-  echo ".harness/.registry.lock/"
-} > "${GITIGNORE}.tmp" 2>/dev/null || true
-mv "${GITIGNORE}.tmp" "$GITIGNORE" 2>/dev/null || true
+if ! { [ -f "$GITIGNORE" ] && grep -Fxq '.harness/logs/' "$GITIGNORE" && grep -Fxq '.harness/.registry.lock/' "$GITIGNORE"; }; then
+  mkdir -p "$STAGE_DIR"
+  {
+    if [ -f "$GITIGNORE" ]; then cat "$GITIGNORE"; [ ! -s "$GITIGNORE" ] || echo ""; fi
+    echo "# harness-companion"
+    echo ".harness/logs/"
+    echo ".harness/.registry.lock/"
+  } > "$STAGE_DIR/.gitignore" || { rm -rf "$STAGE_DIR"; exit 1; }
+  expect_target_unchanged ".gitignore"
+  stage_mark ".gitignore"
+fi
 
 # --full extras: #12 session-handoff.md, #13 clean-state-checklist.md, #14 checklist.sh.
 if [ "$MODE" = "full" ]; then
-  render_flat "session-handoff.md"       "$TARGET/session-handoff.md"       "session-handoff.md"       "session-handoff.md"
-  render_flat "clean-state-checklist.md" "$TARGET/clean-state-checklist.md" "clean-state-checklist.md" "clean-state-checklist.md"
-  render_typed "checklist.sh"            "$TARGET/checklist.sh"            "checklist.sh"
-  chmod +x "$TARGET/checklist.sh" 2>/dev/null || true
+  render_flat "session-handoff.md"       "$TARGET/session-handoff.md"       "session-handoff.md"       "session-handoff.md" || { rm -rf "$STAGE_DIR"; exit 1; }
+  render_flat "clean-state-checklist.md" "$TARGET/clean-state-checklist.md" "clean-state-checklist.md" "clean-state-checklist.md" || { rm -rf "$STAGE_DIR"; exit 1; }
+  render_typed "checklist.sh"            "$TARGET/checklist.sh"            "checklist.sh" || { rm -rf "$STAGE_DIR"; exit 1; }
 fi
 
 # ---- snapshot + brief -------------------------------------------------------
 
-write_snapshot
-SNAPSHOT_DIGEST="$(sha256_file "$SNAPSHOT_PATH")"
+write_snapshot || { rm -rf "$STAGE_DIR"; exit 1; }
+SNAPSHOT_DIGEST="$(sha256_file "$STAGE_DIR/.harness/.template-snapshot.json")"
 
-build_brief "$SNAPSHOT_DIGEST" > "$TARGET/.harness/PROJECT_BRIEF.json"
-render_brief_md
+mkdir -p "$STAGE_DIR/.harness"
+build_brief "$SNAPSHOT_DIGEST" > "$STAGE_DIR/.harness/PROJECT_BRIEF.json" || { rm -rf "$STAGE_DIR"; exit 1; }
+render_brief_md "$STAGE_DIR/.harness/PROJECT_BRIEF.json" "$STAGE_DIR/.harness/PROJECT_BRIEF.md" || { rm -rf "$STAGE_DIR"; exit 1; }
+expect_target_unchanged ".harness/PROJECT_BRIEF.json"; expect_target_unchanged ".harness/PROJECT_BRIEF.md"
+stage_mark ".harness/PROJECT_BRIEF.json"; stage_mark ".harness/PROJECT_BRIEF.md"
+LOGS_PREEXISTED=false
+HARNESS_PREEXISTED=false
+[ -d "$TARGET/.harness/logs/runs" ] && LOGS_PREEXISTED=true
+[ -d "$TARGET/.harness" ] && HARNESS_PREEXISTED=true
+for guarded_dir in "$TARGET/.harness" "$TARGET/.harness/logs" "$TARGET/.harness/logs/runs"; do
+  if [ -L "$guarded_dir" ]; then
+    echo "error: refusing symlink directory in managed path: ${guarded_dir#"$TARGET/"}" >&2
+    rm -rf "$STAGE_DIR"; exit 1
+  fi
+done
+mkdir -p "$TARGET/.harness/logs/runs" || { echo "error: could not create run log directory" >&2; rm -rf "$STAGE_DIR"; exit 1; }
+if ! commit_stage; then
+  if [ "$LOGS_PREEXISTED" != "true" ]; then
+    rmdir "$TARGET/.harness/logs/runs" "$TARGET/.harness/logs" 2>/dev/null || true
+    [ "$HARNESS_PREEXISTED" = "true" ] || rmdir "$TARGET/.harness" 2>/dev/null || true
+  fi
+  rm -rf "$STAGE_DIR"; exit 1
+fi
+rm -rf "$STAGE_DIR"
 
 # ---- report ----------------------------------------------------------------
 

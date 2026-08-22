@@ -313,6 +313,65 @@ REG_FAIL_RC=$?
 check "T12g: runtime registration failure propagates" 1 "$REG_FAIL_RC"
 check "T12h: failed registration rolls back verdict append" yes "$([ ! -f "$D/.harness/reviews/feature/F-CONV-01.jsonl" ] && echo yes || echo no)"
 
+# ---- T12i: existing-file rollback — a failed append on an EXISTING verdict
+# file rolls back to the exact prior bytes (never truncates/corrupts already-
+# committed records). One append succeeds, then a second append's registration
+# fails; the file must still contain exactly the first record, byte-for-byte.
+D="$(mktemp -d "$TMPDIR/t12i-XXXX")"
+ginit "$D"
+write_plan "$D" 1 F-CONV-01
+gcommit "$D"
+BASE="$(git -C "$D" rev-parse HEAD~1 2>/dev/null || git -C "$D" rev-parse HEAD)"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+verdict_append_record "$D" feature F-CONV-01 "$(feature_rec "$D" F-CONV-01 1 FAIL "" "$BASE" "$HEAD")" >/dev/null
+before="$(cat "$D/.harness/reviews/feature/F-CONV-01.jsonl")"
+(
+  runtime_register() { return 1; }
+  verdict_append_record "$D" feature F-CONV-01 "$(feature_rec "$D" F-CONV-01 1 FAIL "" "$BASE" "$HEAD")"
+) >/dev/null 2>&1
+REG_FAIL_RC=$?
+after="$(cat "$D/.harness/reviews/feature/F-CONV-01.jsonl")"
+after_n="$(wc -l < "$D/.harness/reviews/feature/F-CONV-01.jsonl" | tr -d '[:space:]')"
+check "T12i: existing-file failed append propagates" 1 "$REG_FAIL_RC"
+check "T12j: existing-file rollback preserves byte-exact prior state" "$before" "$after"
+check "T12k: existing-file still exactly one record" 1 "$after_n"
+check "T12l: next_attempt still 2 after rollback" 2 "$(verdict_next_attempt "$D" feature F-CONV-01)"
+
+# ---- T12m: same-ID concurrent verdict writers — the per-(kind,id) transaction
+# lock serializes N concurrent appends for the SAME (feature,F-CONV-01) so every
+# record survives with contiguous attempts 1..N and the file validates. Without
+# the lock, racing next_attempt reads would produce duplicate attempts and lost
+# updates.
+D="$(mktemp -d "$TMPDIR/t12m-XXXX")"
+ginit "$D"
+write_plan "$D" 1 F-CONV-01
+gcommit "$D"
+BASE="$(git -C "$D" rev-parse HEAD~1 2>/dev/null || git -C "$D" rev-parse HEAD)"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+N=8
+# On MSYS2/Windows every subprocess fork is ~30-150 ms, so one verdict_append_record
+# critical section (record validation + git object checks + runtime registration)
+# is ~3-5 s. Eight writers serialize to ~40 s, far exceeding the library's 10 s
+# default lock timeout — the 8th writer would time out and drop its update. Raise
+# the timeout for THIS test only (the lock still serializes; the 10 s default is
+# unchanged in production). This asserts the invariant — contiguous attempts
+# 1..N with no lost updates — rather than the platform's raw write speed.
+export LOCK_TIMEOUT_S=120
+i=1
+while [ "$i" -le "$N" ]; do
+  verdict_append_record "$D" feature F-CONV-01 "$(feature_rec "$D" F-CONV-01 1 FAIL "" "$BASE" "$HEAD")" \
+    >"$TMPDIR/t12m-$i.out" 2>&1 &
+  i=$((i + 1))
+done
+wait
+export LOCK_TIMEOUT_S=10
+n="$(wc -l < "$D/.harness/reviews/feature/F-CONV-01.jsonl" | tr -d '[:space:]')"
+check "T12m: all N concurrent writers survived" "$N" "$n"
+check "T12n: file validates after concurrent writes" true "$(verdict_validate_file "$D" feature F-CONV-01 | jq -r '.valid')"
+attempts="$(jq -s 'map(.attempt) | sort' "$D/.harness/reviews/feature/F-CONV-01.jsonl")"
+expected_attempts="$(jq -n --argjson n "$N" '[range(1; $n + 1)]')"
+check "T12o: concurrent attempts are contiguous 1..N" "$expected_attempts" "$attempts"
+
 # ---- T13: writer refuses fabricated head_sha (not a real git object) ----
 D="$(mktemp -d "$TMPDIR/t13-XXXX")"
 ginit "$D"

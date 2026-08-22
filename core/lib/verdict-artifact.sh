@@ -664,6 +664,12 @@ verdict_next_attempt() {
 # is fully validated BEFORE the append — a re-review never modifies prior
 # records. When the project is a git repo, head_sha must resolve to a real git
 # object. Prints the appended record; exit 0/1.
+#
+# The read-modify-write sequence — next_attempt, record build/validate, append,
+# runtime-manifest registration, and failure rollback — runs inside a per-
+# (kind,id) transaction lock so concurrent writers for the SAME artifact
+# serialize: neither can read the same attempt number, interleave appends, nor
+# truncate the other's just-appended bytes during rollback.
 verdict_append_record() {
   local project_dir="$1" kind="$2" id="$3" json="$4"
   local path
@@ -672,56 +678,93 @@ verdict_append_record() {
     echo "verdict: invalid kind '$kind'" >&2
     return 1
   fi
-  local attempt rec
-  attempt="$(verdict_next_attempt "$project_dir" "$kind" "$id")"
-  rec="$(printf '%s' "$json" | jq -c --argjson a "$attempt" '.attempt = $a' 2>/dev/null)" || {
-    echo "verdict: refusing to append invalid JSON" >&2
+
+  # ---- Same-ID transaction lock ---------------------------------------------
+  # A DISTINCT leaf from the runtime-manifest lock (runtime_register acquires
+  # that below); re-using the same leaf here would deadlock the nested acquire.
+  # The token is captured immediately (before any nested lock mutates
+  # LOCK_REGISTRY_TOKEN) so release_lock releases THIS lock, not the nested one.
+  local lock_dir lock_token
+  lock_dir="$project_dir/.harness/.registry.lock/verdict-${kind}-${id}"
+  mkdir -p "$(dirname "$lock_dir")" || {
+    echo "verdict: cannot create verdict lock parent for $kind/$id" >&2
     return 1
   }
-  # writer-side integrity: head_sha must be a real git object in a git repo
-  local head
-  head="$(printf '%s' "$rec" | jq -r '.head_sha // ""')"
-  if command -v git >/dev/null 2>&1 && git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
-    if ! git -C "$project_dir" cat-file -e "$head^{commit}" 2>/dev/null \
-       && ! git -C "$project_dir" cat-file -e "$head" 2>/dev/null; then
-      echo "verdict: head_sha $head is not a real git object in $project_dir — refusing to record" >&2
-      return 1
-    fi
-  fi
-  if ! verdict_validate_record "$project_dir" "$rec"; then
-    echo "verdict: refusing to append invalid record" >&2
-    return 1
-  fi
-  mkdir -p "$(dirname "$path")"
-  local path_existed=0 old_size=0 rollback_tmp=""
-  if [ -f "$path" ]; then
-    path_existed=1
-    old_size="$(wc -c < "$path" | tr -d '[:space:]')"
-  fi
-  printf '%s' "$rec" | jq -c . >> "$path" || {
-    echo "verdict: append failed for $path" >&2
+  # Timeout via the library default (LOCK_TIMEOUT_S, 10s) rather than a
+  # hardcoded value, so slow platforms / tests can raise it without touching
+  # this file. A re-review's critical section (validation + fingerprint + git
+  # object checks) is expensive; under contention the Nth writer may wait
+  # N × (critical-section time) before its turn, and 10s is easily exceeded.
+  acquire_lock "$lock_dir" >/dev/null || {
+    echo "verdict: failed to acquire verdict lock for $kind/$id" >&2
     return 1
   }
-  # Codex r7 + rc6 final remediation: bind the verdict's first-seen bytes in
-  # the runtime-manifest registry so the DWM gate enforces append-only on
-  # later checks (idempotent — a later append never rewrites the first-seen
-  # binding). All registration failures are HARD failures (rc6 final: the
-  # previous `|| true` swallowed registry-write errors and produced a silent
-  # trust gap).
-  if ! type runtime_register >/dev/null 2>&1 || \
-     ! runtime_register "$project_dir" ".harness/reviews/$kind/$id.jsonl" "verdict"; then
-    echo "verdict: runtime-manifest registration failed; rolling back verdict append" >&2
-    if [ "$path_existed" = "1" ]; then
-      rollback_tmp="${path}.rollback.$$"
-      if ! head -c "$old_size" "$path" > "$rollback_tmp" 2>/dev/null || \
-         ! mv "$rollback_tmp" "$path" 2>/dev/null; then
-        rm -f "$rollback_tmp"
-        echo "verdict: FATAL — failed to roll back $path after registration failure" >&2
-        return 1
+  lock_token="${LOCK_REGISTRY_TOKEN:-}"
+
+  local rc=0 rec=""
+  {
+    local attempt
+    attempt="$(verdict_next_attempt "$project_dir" "$kind" "$id")"
+    rec="$(printf '%s' "$json" | jq -c --argjson a "$attempt" '.attempt = $a' 2>/dev/null)" || {
+      echo "verdict: refusing to append invalid JSON" >&2
+      rc=1
+    }
+    if [ "$rc" -eq 0 ]; then
+      # writer-side integrity: head_sha must be a real git object in a git repo
+      local head
+      head="$(printf '%s' "$rec" | jq -r '.head_sha // ""')"
+      if command -v git >/dev/null 2>&1 && git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
+        if ! git -C "$project_dir" cat-file -e "$head^{commit}" 2>/dev/null \
+           && ! git -C "$project_dir" cat-file -e "$head" 2>/dev/null; then
+          echo "verdict: head_sha $head is not a real git object in $project_dir — refusing to record" >&2
+          rc=1
+        fi
       fi
-    else
-      rm -f "$path"
     fi
+    if [ "$rc" -eq 0 ] && ! verdict_validate_record "$project_dir" "$rec"; then
+      echo "verdict: refusing to append invalid record" >&2
+      rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+      mkdir -p "$(dirname "$path")"
+      local path_existed=0 old_size=0 rollback_tmp=""
+      if [ -f "$path" ]; then
+        path_existed=1
+        old_size="$(wc -c < "$path" | tr -d '[:space:]')"
+      fi
+      printf '%s' "$rec" | jq -c . >> "$path" || {
+        echo "verdict: append failed for $path" >&2
+        rc=1
+      }
+      if [ "$rc" -eq 0 ]; then
+        # Codex r7 + rc6 final remediation: bind the verdict's first-seen bytes
+        # in the runtime-manifest registry so the DWM gate enforces append-only
+        # on later checks (idempotent — a later append never rewrites the
+        # first-seen binding). All registration failures are HARD failures (rc6
+        # final: the previous `|| true` swallowed registry-write errors).
+        if ! type runtime_register >/dev/null 2>&1 || \
+           ! runtime_register "$project_dir" ".harness/reviews/$kind/$id.jsonl" "verdict"; then
+          echo "verdict: runtime-manifest registration failed; rolling back verdict append" >&2
+          if [ "$path_existed" = "1" ]; then
+            rollback_tmp="${path}.rollback.$$"
+            if ! head -c "$old_size" "$path" > "$rollback_tmp" 2>/dev/null || \
+               ! mv "$rollback_tmp" "$path" 2>/dev/null; then
+              rm -f "$rollback_tmp"
+              echo "verdict: FATAL — failed to roll back $path after registration failure" >&2
+              rc=1
+            fi
+          else
+            rm -f "$path"
+          fi
+          rc=1
+        fi
+      fi
+    fi
+  } || rc=1
+
+  release_lock "$lock_dir" "$lock_token" || true
+
+  if [ "$rc" -ne 0 ]; then
     return 1
   fi
   printf '%s' "$rec"

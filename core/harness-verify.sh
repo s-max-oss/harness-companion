@@ -375,7 +375,9 @@ while IFS= read -r -u 3 cmd_id; do
             failed_commands: $failed_commands,
             skipped_commands: $skipped_commands
           }')"
-        ev_write_terminal "$RUN_ID" "$ABORT_EVENT" || true
+        if ev_write_terminal "$RUN_ID" "$ABORT_EVENT"; then
+          register_run_or_die
+        fi
         echo "FATAL: failed to write command_completed event for $cmd_id" >&2
         exit 2
       fi
@@ -478,7 +480,9 @@ while IFS= read -r -u 3 cmd_id; do
         failed_commands: $failed_commands,
         skipped_commands: $skipped_commands
       }')"
-    ev_write_terminal "$RUN_ID" "$ABORT_EVENT" || true
+    if ev_write_terminal "$RUN_ID" "$ABORT_EVENT"; then
+      register_run_or_die
+    fi
     echo "FATAL: failed to write command_completed event for $cmd_id" >&2
     exit 2
   fi

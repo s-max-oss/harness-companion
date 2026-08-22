@@ -1312,6 +1312,89 @@ printf '%s\n' 'unregistered' > "$D/.harness/acceptance/$HEAD_SHA/unregistered.lo
 RES="$(dwm_compare_manifest "$D" "$OUT")"
 check "T47b: unregistered acceptance artifact rejected" 1 "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_artifact_unregistered")] | length')"
 
+# ---- T48 (rc6 final remediation R1): runtime_register fail-closed on stale genesis ---
+# An EXISTING registry whose genesis anchor does not match the expected HEAD must
+# be rejected by runtime_register ITSELF (rc≠0, no append) — not merely caught
+# later at the DWM gate (T44). This closes the window where a stale registry
+# would otherwise be silently re-anchored or appended-to during registration.
+D="$(mktemp -d "$TMPDIR/t48-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+mkdir -p "$D/.harness"
+printf '{"genesis":"1111111111111111111111111111111111111111111111111111111111111111"}\n' \
+  > "$D/.harness/runtime-manifest.jsonl"
+lines_before="$(wc -l < "$D/.harness/runtime-manifest.jsonl" | tr -d '[:space:]')"
+rc=0
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
+rc=$?
+lines_after="$(wc -l < "$D/.harness/runtime-manifest.jsonl" | tr -d '[:space:]')"
+check "T48a: stale genesis fails closed" 1 "$rc"
+check "T48b: stale genesis appends nothing" "$lines_before" "$lines_after"
+
+# ---- T49 (rc6 final remediation R1): runtime_register fail-closed on malformed JSONL ---
+# A registry carrying a non-JSON line must abort registration. Line 0 is a valid
+# genesis so the prepend path does not mask the violation; validation catches the
+# malformed second line.
+D="$(mktemp -d "$TMPDIR/t49-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+mkdir -p "$D/.harness"
+printf '{"genesis":"%s"}\nthis is not valid json\n' "$HEAD_SHA" > "$D/.harness/runtime-manifest.jsonl"
+lines_before="$(wc -l < "$D/.harness/runtime-manifest.jsonl" | tr -d '[:space:]')"
+rc=0
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
+rc=$?
+lines_after="$(wc -l < "$D/.harness/runtime-manifest.jsonl" | tr -d '[:space:]')"
+check "T49a: malformed registry fails closed" 1 "$rc"
+check "T49b: malformed registry appends nothing" "$lines_before" "$lines_after"
+
+# ---- T50 (rc6 final remediation R1): runtime_register fail-closed on duplicate genesis ---
+D="$(mktemp -d "$TMPDIR/t50-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+mkdir -p "$D/.harness"
+printf '{"genesis":"%s"}\n{"genesis":"%s"}\n' "$HEAD_SHA" "$HEAD_SHA" > "$D/.harness/runtime-manifest.jsonl"
+lines_before="$(wc -l < "$D/.harness/runtime-manifest.jsonl" | tr -d '[:space:]')"
+rc=0
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
+rc=$?
+lines_after="$(wc -l < "$D/.harness/runtime-manifest.jsonl" | tr -d '[:space:]')"
+check "T50a: duplicate genesis fails closed" 1 "$rc"
+check "T50b: duplicate genesis appends nothing" "$lines_before" "$lines_after"
+
+# ---- T51 (rc6 final remediation R1): runtime_register fail-closed on dangling symlink ---
+# A dangling symlink at the registry path is an obstacle, not "absent": without
+# the lstat (-L) guard it would fall through the `! -e` short-circuit and be
+# silently treated as a no-op. Symlink creation is platform-gated (see D12/D13);
+# where unsupported the assertion is skipped.
+D="$(mktemp -d "$TMPDIR/t51-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+mkdir -p "$D/.harness"
+rm -f "$D/.harness/runtime-manifest.jsonl"
+ln -s "/nonexistent/reg-target-$$" "$D/.harness/runtime-manifest.jsonl" 2>/dev/null
+if [ -L "$D/.harness/runtime-manifest.jsonl" ]; then
+  rc=0
+  RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
+  rc=$?
+  check "T51a: dangling symlink registry fails closed" 1 "$rc"
+  check "T51b: dangling symlink left untouched (still a symlink)" "symlink" "$([ -L "$D/.harness/runtime-manifest.jsonl" ] && echo symlink || echo replaced)"
+else
+  echo "  [SKIP] T51 dangling symlink — symlink creation unsupported on this platform"
+fi
+
+# ---- T52 (rc6 final remediation R1): runtime_register fail-closed on directory obstacle ---
+# A directory at the registry path is an obstacle: `-e` true but `-f` false. It
+# must hard-fail (never silently skip as "absent" nor be treated as an empty file).
+D="$(mktemp -d "$TMPDIR/t52-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+mkdir -p "$D/.harness/runtime-manifest.jsonl"
+rc=0
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
+rc=$?
+check "T52a: directory obstacle fails closed" 1 "$rc"
+
 echo ""
 echo "Dirty-Worktree-Manifest Results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

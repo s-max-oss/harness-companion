@@ -199,6 +199,59 @@ _runtime_prepend_genesis() {
   return 0
 }
 
+# ---- _runtime_validate_registry ---------------------------------------------
+# Fail-closed validation of an EXISTING registry, called under the registry
+# lock after genesis bootstrap/prepend. Enforces three invariants:
+#   1. Valid JSONL — every line parses as a single JSON object (malformed
+#      line, including a blank or truncated line, fails). A trailing CR from
+#      MSYS jq's CRLF output is stripped before parsing.
+#   2. UNIQUE genesis — exactly one line carries a `genesis` key, and it must
+#      be the FIRST line (line 0). Duplicate or misplaced genesis fails.
+#   3. Correct genesis — the genesis value must equal the expected HEAD anchor
+#      (`runtime_manifest_genesis_value`: RUNTIME_MANIFEST_GENESIS or
+#      `git rev-parse HEAD`). A stale/tampered genesis fails.
+# Any violation returns non-zero and aborts registration (fail-closed).
+_runtime_validate_registry() {
+  local project_dir="$1" mf="$2"
+  local expected
+  if ! expected="$(runtime_manifest_genesis_value "$project_dir")"; then
+    echo "runtime-manifest: cannot determine genesis anchor to validate registry" >&2
+    return 1
+  fi
+  [ -n "$expected" ] || { echo "runtime-manifest: expected genesis anchor is empty (fail-closed)" >&2; return 1; }
+  local line idx=0 gen_count=0 gen_idx=-1 gen_val=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    idx=$((idx + 1))
+    if ! printf '%s' "$line" | jq -e . >/dev/null 2>&1; then
+      echo "runtime-manifest: registry line $idx is not valid JSON (fail-closed)" >&2
+      return 1
+    fi
+    if printf '%s' "$line" | jq -e 'has("genesis")' >/dev/null 2>&1; then
+      gen_count=$((gen_count + 1))
+      if [ "$gen_count" -gt 1 ]; then
+        echo "runtime-manifest: registry has duplicate genesis lines (fail-closed)" >&2
+        return 1
+      fi
+      gen_idx=$idx
+      gen_val="$(printf '%s' "$line" | jq -r '.genesis // empty' 2>/dev/null)"
+    fi
+  done < "$mf"
+  if [ "$gen_count" -eq 0 ]; then
+    echo "runtime-manifest: registry has no genesis line (fail-closed)" >&2
+    return 1
+  fi
+  if [ "$gen_idx" -ne 1 ]; then
+    echo "runtime-manifest: genesis anchor is not line 0 (found at line $((gen_idx - 1))) (fail-closed)" >&2
+    return 1
+  fi
+  if [ "$gen_val" != "$expected" ]; then
+    echo "runtime-manifest: genesis anchor mismatch (expected $expected, got $gen_val) (fail-closed)" >&2
+    return 1
+  fi
+  return 0
+}
+
 # ---- runtime_register -------------------------------------------------------
 # Bind the first-seen bytes of <rel_path> (relative to <project_dir>) under
 # <kind>. Hard-fails on missing file, missing hash tool, or append error.
@@ -213,15 +266,31 @@ runtime_register() {
     return 1
   fi
   mf="$(runtime_manifest_path "$project_dir")"
+  # ---- Obstacle detection (lstat / lexical absence) -------------------------
+  # The registry path must be EITHER entirely absent (true lexical absence → the
+  # not-applicable short-circuit or a fresh bootstrap below) OR an existing
+  # regular file. Any other node is an obstacle that must hard-fail, never be
+  # silently treated as a no-op:
+  #   - a dangling symlink  → `-L` (lstat) is true but `-e` is false; without
+  #     this check a dangling link would fall through the `! -e` short-circuit
+  #     and be skipped as "absent";
+  #   - a directory / FIFO / device → `-e` true but `-f` false.
+  if [ -L "$mf" ]; then
+    echo "runtime-manifest: registry path $mf is a symlink — refusing (fail-closed)" >&2
+    return 1
+  fi
+  if [ -e "$mf" ] && [ ! -f "$mf" ]; then
+    echo "runtime-manifest: registry path $mf is not a regular file — refusing (fail-closed)" >&2
+    return 1
+  fi
   # ---- Not-applicable short-circuit (NOT a failure) -------------------------
   # The registry binds runtime artifacts to a git HEAD genesis anchor. A project
   # with no git repo and no RUNTIME_MANIFEST_GENESIS has no anchor to bind
   # against, so registration is a no-op: there is nothing to register INTO.
   # This is distinct from a genuine registration failure (missing file / hash
   # tool / append / lock), which still returns non-zero. Only skip when the
-  # registry path is ENTIRELY ABSENT — an existing registry file already has its
-  # anchor, and a directory (or any other obstacle) at the registry path is a
-  # genuine failure to fail-closed on, not a no-op.
+  # registry path is ENTIRELY ABSENT (a truly missing path — obstacles above are
+  # already fail-closed before reaching here).
   if [ ! -e "$mf" ] && ! runtime_manifest_genesis_value "$project_dir" >/dev/null 2>&1; then
     return 0
   fi
@@ -248,6 +317,15 @@ runtime_register() {
       fi
     elif ! head -1 "$mf" 2>/dev/null | jq -e 'has("genesis")' >/dev/null 2>&1; then
       if ! _runtime_prepend_genesis "$project_dir" "$mf"; then
+        lock_rc=1
+      fi
+    fi
+    if [ "$lock_rc" -eq 0 ]; then
+      # Validate the (possibly just-created / prepended) registry before
+      # trusting it: valid JSONL, unique genesis at line 0, genesis == expected
+      # HEAD. Fail-closed — a stale, duplicate, or tampered genesis aborts the
+      # registration rather than appending to a corrupt registry.
+      if ! _runtime_validate_registry "$project_dir" "$mf"; then
         lock_rc=1
       fi
     fi

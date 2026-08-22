@@ -179,15 +179,27 @@ _lr_read_meta() {
     return 1
   fi
   # Required fields: pid, hostname, timestamp, token
-  local pid host ts tok
-  pid="$(cat "$lock_dir/pid" 2>/dev/null)"
-  host="$(cat "$lock_dir/hostname" 2>/dev/null)"
-  ts="$(cat "$lock_dir/timestamp" 2>/dev/null)"
-  tok="$(cat "$lock_dir/token" 2>/dev/null)"
+  # Read via the `read` builtin (no `cat` subprocess forks): this runs on every
+  # contention poll, and on MSYS2 each fork costs ~30 ms, so 5×cat per iteration
+  # starves concurrent lock acquirers. Each metadata file is a single line
+  # (written by printf '%s\n'), so `read` captures the same value `cat` did.
+  #
+  # TOCTOU safety: a concurrent release_lock may `rm -rf` the lock_dir between
+  # the `[ -d ]` guard above and these reads, so any file may vanish. Two rules
+  # make this tolerant: (1) initialize every var to "" so `set -u` never sees an
+  # unbound name, and (2) put `2>/dev/null` BEFORE the input redirect so the
+  # "No such file or directory" redirection error is suppressed (bash opens
+  # redirections left-to-right; a later `2>/dev/null` does not catch the input-
+  # redirect failure). A vanished file then yields "" → the `-z` guard below
+  # returns 1 (damaged → wait), exactly as the old `cat` path did.
+  local pid="" host="" ts="" tok="" start_time=""
+  IFS= read -r pid  2>/dev/null < "$lock_dir/pid"  || true
+  IFS= read -r host 2>/dev/null < "$lock_dir/hostname" || true
+  IFS= read -r ts   2>/dev/null < "$lock_dir/timestamp" || true
+  IFS= read -r tok  2>/dev/null < "$lock_dir/token" || true
   # Optional: process_start_time (may be empty)
-  local start_time=""
   if [ -f "$lock_dir/process_start_time" ]; then
-    start_time="$(cat "$lock_dir/process_start_time" 2>/dev/null)"
+    IFS= read -r start_time 2>/dev/null < "$lock_dir/process_start_time" || true
   fi
   if [ -z "$pid" ] || [ -z "$host" ] || [ -z "$ts" ] || [ -z "$tok" ]; then
     return 1
@@ -205,17 +217,25 @@ _lr_read_meta() {
 # Decision matrix per design §7.5.
 _lr_is_stale() {
   local lock_dir="$1"
+  # my_host is precomputed once by the acquire loop and passed in — calling
+  # `hostname` on every contention poll is another ~100 ms fork on MSYS2.
+  local my_host="${2:-}"
+  if [ -z "$my_host" ]; then
+    my_host="$(_lr_my_hostname)"
+  fi
   if ! _lr_read_meta "$lock_dir"; then
     # Damaged metadata — wait (don't fast-recover)
     return 1
   fi
-  local my_host
-  my_host="$(_lr_my_hostname)"
-  local now
-  now="$(_lr_now)"
+
+  # `now` is computed lazily — only the cross-host and no-start_time past-timeout
+  # branches actually need wall-clock time. The common contention case (same
+  # host, live PID) skips the `date` fork entirely.
+  local now=""
 
   # --- Cross-host: NEVER judge stale by local PID ---
   if [ "$LR_META_HOST" != "$my_host" ]; then
+    now="$(_lr_now)"
     if [ $(( now - LR_META_TS )) -gt "$CROSS_HOST_TIMEOUT_S" ]; then
       return 0  # cross-host grace expired → recover
     fi
@@ -246,6 +266,7 @@ _lr_is_stale() {
   fi
 
   # No start_time (legacy/Windows): cannot disambiguate. Only recover past timeout.
+  now="${now:-$(_lr_now)}"
   if [ $(( now - LR_META_TS )) -gt "$LOCK_TIMEOUT_S" ]; then
     return 0
   fi
@@ -259,7 +280,8 @@ _lr_is_stale() {
 # Returns 1 if lock_dir is not stale (or metadata damaged).
 _lr_snapshot_stale() {
   local lock_dir="$1"
-  if _lr_is_stale "$lock_dir"; then
+  local my_host="${2:-}"
+  if _lr_is_stale "$lock_dir" "$my_host"; then
     LR_STALE_PID="$LR_META_PID"
     LR_STALE_START="$LR_META_START"
     LR_STALE_TS="$LR_META_TS"
@@ -303,8 +325,13 @@ _lr_mkdir_acquire() {
     return 2
   fi
 
+  # Deadline via the $SECONDS builtin (integer seconds since shell start),
+  # not `date +%s` — the latter is a ~77 ms fork on MSYS2 and this runs on
+  # every contention poll. $SECONDS is monotonic within this shell (and its
+  # background subshells), so a relative deadline is strictly more correct
+  # than wall-clock time (immune to NTP/clock steps).
   local deadline
-  deadline=$(( $(_lr_now) + timeout_s ))
+  deadline=$(( SECONDS + timeout_s ))
   local my_token
   my_token="$(_lr_random_token)"
   if [ -z "$my_token" ]; then
@@ -316,7 +343,7 @@ _lr_mkdir_acquire() {
   my_host="$(_lr_my_hostname)"
   local my_start_time=""
 
-  while [ "$(_lr_now)" -lt "$deadline" ]; do
+  while [ "$SECONDS" -lt "$deadline" ]; do
     # mkdir is POSIX-atomic; EEXIST means someone else holds it
     if mkdir "$lock_dir" 2>/dev/null; then
       # We hold the lock — compute start_time NOW (it can be slow on
@@ -340,7 +367,7 @@ _lr_mkdir_acquire() {
     # delete if the identity still matches — otherwise another process may
     # have released and re-acquired the lock, and we'd be stealing the new
     # owner's lock. Use rm -rf because metadata files live inside lock_dir.
-    if _lr_snapshot_stale "$lock_dir"; then
+    if _lr_snapshot_stale "$lock_dir" "$my_host"; then
       # _lr_snapshot_stale sets LR_STALE_PID / LR_STALE_START / LR_STALE_TS / LR_STALE_TOKEN
       if _lr_read_meta "$lock_dir" \
           && [ "$LR_META_PID" = "$LR_STALE_PID" ] \

@@ -213,6 +213,18 @@ runtime_register() {
     return 1
   fi
   mf="$(runtime_manifest_path "$project_dir")"
+  # ---- Not-applicable short-circuit (NOT a failure) -------------------------
+  # The registry binds runtime artifacts to a git HEAD genesis anchor. A project
+  # with no git repo and no RUNTIME_MANIFEST_GENESIS has no anchor to bind
+  # against, so registration is a no-op: there is nothing to register INTO.
+  # This is distinct from a genuine registration failure (missing file / hash
+  # tool / append / lock), which still returns non-zero. Only skip when the
+  # registry path is ENTIRELY ABSENT — an existing registry file already has its
+  # anchor, and a directory (or any other obstacle) at the registry path is a
+  # genuine failure to fail-closed on, not a no-op.
+  if [ ! -e "$mf" ] && ! runtime_manifest_genesis_value "$project_dir" >/dev/null 2>&1; then
+    return 0
+  fi
   mkdir -p "$(dirname "$mf")"
   # Acquire lock for the registry-init + idempotency-check + append window.
   _runtime_acquire "$project_dir" || {

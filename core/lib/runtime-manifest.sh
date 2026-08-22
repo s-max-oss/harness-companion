@@ -207,18 +207,18 @@ _runtime_prepend_genesis() {
 #      MSYS jq's CRLF output is stripped before parsing.
 #   2. UNIQUE genesis — exactly one line carries a `genesis` key, and it must
 #      be the FIRST line (line 0). Duplicate or misplaced genesis fails.
-#   3. Correct genesis — the genesis value must equal the expected HEAD anchor
-#      (`runtime_manifest_genesis_value`: RUNTIME_MANIFEST_GENESIS or
-#      `git rev-parse HEAD`). A stale/tampered genesis fails.
+#   3. Correct genesis — when the caller asserts an explicit expected HEAD via
+#      RUNTIME_MANIFEST_GENESIS, the genesis value MUST equal it (a stale or
+#      tampered genesis fails). When the env var is unset there is no
+#      authoritative anchor to compare against: the registry is untracked, so
+#      there is no committed blob to diff, and `git rev-parse HEAD` advances
+#      with every commit — comparing against it would falsely reject a
+#      legitimately-stale registry after any commit (the bootstrap-gates T7
+#      "feature commit → run regeneration" regression). Only the STRUCTURAL
+#      genesis checks apply in that case.
 # Any violation returns non-zero and aborts registration (fail-closed).
 _runtime_validate_registry() {
   local project_dir="$1" mf="$2"
-  local expected
-  if ! expected="$(runtime_manifest_genesis_value "$project_dir")"; then
-    echo "runtime-manifest: cannot determine genesis anchor to validate registry" >&2
-    return 1
-  fi
-  [ -n "$expected" ] || { echo "runtime-manifest: expected genesis anchor is empty (fail-closed)" >&2; return 1; }
   local line idx=0 gen_count=0 gen_idx=-1 gen_val=""
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
@@ -245,8 +245,13 @@ _runtime_validate_registry() {
     echo "runtime-manifest: genesis anchor is not line 0 (found at line $((gen_idx - 1))) (fail-closed)" >&2
     return 1
   fi
-  if [ "$gen_val" != "$expected" ]; then
-    echo "runtime-manifest: genesis anchor mismatch (expected $expected, got $gen_val) (fail-closed)" >&2
+  # Genesis VALUE correctness is only enforceable against an explicit expected
+  # anchor (see the doc comment above). When RUNTIME_MANIFEST_GENESIS is set,
+  # compare byte-for-byte and fail-closed on a stale/tampered genesis. When
+  # unset, there is no authoritative expected value, so skip the value check —
+  # a registry whose HEAD advanced after a commit remains valid.
+  if [ -n "${RUNTIME_MANIFEST_GENESIS:-}" ] && [ "$gen_val" != "${RUNTIME_MANIFEST_GENESIS}" ]; then
+    echo "runtime-manifest: genesis anchor mismatch (expected ${RUNTIME_MANIFEST_GENESIS}, got $gen_val) (fail-closed)" >&2
     return 1
   fi
   return 0

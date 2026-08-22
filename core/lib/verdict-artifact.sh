@@ -64,11 +64,24 @@
 . "$(dirname "${BASH_SOURCE[0]}")/validate-run-log.sh"
 # shellcheck source=workspace-fingerprint.sh
 . "$(dirname "${BASH_SOURCE[0]}")/workspace-fingerprint.sh"
+# runtime-manifest uses the shared registry mutex.  verdict-artifact.sh is a
+# public sourceable library, so it must load that dependency itself instead of
+# relying on a particular CLI caller to have done so.
+if ! type acquire_lock >/dev/null 2>&1 || ! type release_lock >/dev/null 2>&1; then
+  # shellcheck disable=SC1090
+  . "$(dirname "${BASH_SOURCE[0]}")/lock-registry.sh" || {
+    echo "verdict: cannot source lock-registry.sh" >&2
+    return 2 2>/dev/null || exit 2
+  }
+fi
 # Codex r7: register appended verdicts in the runtime-manifest byte-binding
 # registry (writer-side registration; the DWM gate enforces append-only).
 if ! type runtime_register >/dev/null 2>&1; then
   # shellcheck disable=SC1090
-  . "$(dirname "${BASH_SOURCE[0]}")/runtime-manifest.sh" 2>/dev/null || true
+  . "$(dirname "${BASH_SOURCE[0]}")/runtime-manifest.sh" || {
+    echo "verdict: cannot source runtime-manifest.sh" >&2
+    return 2 2>/dev/null || exit 2
+  }
 fi
 
 # ---- helpers ---------------------------------------------------------------
@@ -680,6 +693,11 @@ verdict_append_record() {
     return 1
   fi
   mkdir -p "$(dirname "$path")"
+  local path_existed=0 old_size=0 rollback_tmp=""
+  if [ -f "$path" ]; then
+    path_existed=1
+    old_size="$(wc -c < "$path" | tr -d '[:space:]')"
+  fi
   printf '%s' "$rec" | jq -c . >> "$path" || {
     echo "verdict: append failed for $path" >&2
     return 1
@@ -690,8 +708,21 @@ verdict_append_record() {
   # binding). All registration failures are HARD failures (rc6 final: the
   # previous `|| true` swallowed registry-write errors and produced a silent
   # trust gap).
-  if type runtime_register >/dev/null 2>&1; then
-    runtime_register "$project_dir" ".harness/reviews/$kind/$id.jsonl" "verdict"
+  if ! type runtime_register >/dev/null 2>&1 || \
+     ! runtime_register "$project_dir" ".harness/reviews/$kind/$id.jsonl" "verdict"; then
+    echo "verdict: runtime-manifest registration failed; rolling back verdict append" >&2
+    if [ "$path_existed" = "1" ]; then
+      rollback_tmp="${path}.rollback.$$"
+      if ! head -c "$old_size" "$path" > "$rollback_tmp" 2>/dev/null || \
+         ! mv "$rollback_tmp" "$path" 2>/dev/null; then
+        rm -f "$rollback_tmp"
+        echo "verdict: FATAL — failed to roll back $path after registration failure" >&2
+        return 1
+      fi
+    else
+      rm -f "$path"
+    fi
+    return 1
   fi
   printf '%s' "$rec"
   return 0

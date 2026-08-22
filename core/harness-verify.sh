@@ -46,6 +46,13 @@ source "$SKILL_DIR/lib/runtime-manifest.sh"
 # Keep -e off so command failures are captured, not shell-killing
 set +e
 
+register_run_or_die() {
+  if ! runtime_register_run "$PROJECT_DIR" "$RUN_ID"; then
+    echo "FATAL: failed to register runtime artifacts for run '$RUN_ID'" >&2
+    exit 2
+  fi
+}
+
 FEATURE_ID=""
 TARGET="."
 WRITE="false"
@@ -556,7 +563,7 @@ if [ "$PLANNED" -eq 0 ]; then
     echo "FATAL: failed to write run_completed (no_checks) terminal event" >&2
     exit 2
   fi
-  runtime_register_run "$PROJECT_DIR" "$RUN_ID"
+  register_run_or_die
   echo "Result: no_checks (0 verification steps configured)"
   echo "Add verification commands to .harness/config.json to enable passing eligibility."
 elif [ "${#EFFECTIVE_REQUIRED[@]}" -eq 0 ]; then
@@ -600,7 +607,7 @@ elif [ "${#EFFECTIVE_REQUIRED[@]}" -eq 0 ]; then
     echo "FATAL: failed to write run_completed (no_checks) terminal event" >&2
     exit 2
   fi
-  runtime_register_run "$PROJECT_DIR" "$RUN_ID"
+  register_run_or_die
   if [ "${#REQUIRED_IDS[@]}" -eq 0 ]; then
     echo "Result: no_checks (0 required verification steps — only optional commands configured)"
     echo "Mark at least one command required_for_passing: true to enable passing eligibility."
@@ -647,7 +654,7 @@ elif [ "$FAILED" -gt 0 ]; then
     echo "FATAL: failed to write run_failed terminal event" >&2
     exit 2
   fi
-  runtime_register_run "$PROJECT_DIR" "$RUN_ID" || true
+  register_run_or_die
   echo "Result: FAILED ($FAILED command(s) failed)"
   echo "Failed: ${FAILED_IDS[*]}"
 
@@ -694,7 +701,7 @@ else
       exit 2
     fi
     echo "Result: FAILED (required-coverage: ${#MISSING_REQUIRED[@]} required command(s) never executed)"
-    runtime_register_run "$PROJECT_DIR" "$RUN_ID"
+    register_run_or_die
     exit 1
   fi
 
@@ -718,7 +725,7 @@ else
     echo "FATAL: failed to write run_completed (passed) terminal event" >&2
     exit 2
   fi
-  runtime_register_run "$PROJECT_DIR" "$RUN_ID"
+  register_run_or_die
 
   # ---- Optionally update feature_list.json ----
   if [ "$WRITE" = "true" ]; then

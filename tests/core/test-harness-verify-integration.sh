@@ -15,6 +15,7 @@
 #  11. Path with spaces
 #  12. --write successful evidence association
 #  13. Association record is written correctly
+#  14. Runtime-manifest registration failures are fatal and propagated
 
 set -uo pipefail
 
@@ -1039,6 +1040,26 @@ else
   echo "FAIL: applicable-but-missing — expected missing_required_command rejection, got rc=$VAL17_RC: $VAL17"
   FAILED=$((FAILED + 1))
 fi
+
+# ============================================================================
+# Test 18: Runtime-manifest registration failure is fatal (never swallowed)
+# ============================================================================
+echo ""
+echo "========== Test 18: Runtime Manifest Registration Failure =========="
+
+T18="$TMPROOT/test18"
+mkdir -p "$T18"
+create_config "$T18" '[
+  {"id":"ok","command":["bash","-c","exit 0"],"required_for_passing":true}
+]'
+# A directory at the registry file path makes atomic registry creation fail in
+# a deterministic, cross-platform way after the command itself has passed.
+mkdir -p "$T18/.harness/runtime-manifest.jsonl"
+
+create_feature_list "$T18" "feat-register-failure"
+run_verify "feat-register-failure" "$T18"
+assert_exit_code "runtime-manifest registration failure exits 2" "2" "$VERIFY_RC"
+assert_contains "runtime-manifest registration failure says FATAL" "$VERIFY_OUT" "FATAL: failed to register runtime artifacts"
 
 # ============================================================================
 # Summary

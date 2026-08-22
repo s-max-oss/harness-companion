@@ -295,6 +295,23 @@ check "T12b: attempt 2 on second append" 2 "$(printf '%s' "$A2" | jq '.attempt')
 check "T12c: attempt 3 on third append" 3 "$(printf '%s' "$A3" | jq '.attempt')"
 check "T12d: next_attempt is 4" 4 "$(verdict_next_attempt "$D" feature F-CONV-01)"
 check "T12e: file validates (attempts 1..3)" true "$(verdict_validate_file "$D" feature F-CONV-01 | jq -r '.valid')"
+check "T12f: writer registers verdict in runtime manifest" 1 "$(jq -s '[.[] | select(.path == ".harness/reviews/feature/F-CONV-01.jsonl" and .kind == "verdict")] | length' "$D/.harness/runtime-manifest.jsonl")"
+
+# Registration is part of the append transaction.  A registry failure must be
+# visible to the caller and must not leave an unbound verdict behind.
+D="$(mktemp -d "$TMPDIR/t12g-XXXX")"
+ginit "$D"
+write_plan "$D" 1 F-CONV-01
+gcommit "$D"
+BASE="$(git -C "$D" rev-parse HEAD~1 2>/dev/null || git -C "$D" rev-parse HEAD)"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+(
+  runtime_register() { return 1; }
+  verdict_append_record "$D" feature F-CONV-01 "$(feature_rec "$D" F-CONV-01 1 FAIL "" "$BASE" "$HEAD")"
+) >/dev/null 2>&1
+REG_FAIL_RC=$?
+check "T12g: runtime registration failure propagates" 1 "$REG_FAIL_RC"
+check "T12h: failed registration rolls back verdict append" yes "$([ ! -f "$D/.harness/reviews/feature/F-CONV-01.jsonl" ] && echo yes || echo no)"
 
 # ---- T13: writer refuses fabricated head_sha (not a real git object) ----
 D="$(mktemp -d "$TMPDIR/t13-XXXX")"
@@ -355,6 +372,7 @@ check "T17a: CLI append attempt 1" 1 "$(printf '%s' "$CLI_OUT" | jq '.attempt')"
 check "T17b: CLI append host manual" "manual" "$(printf '%s' "$CLI_OUT" | jq -r '.reviewer_host')"
 check "T17c: CLI validate valid" true "$(bash "$ROOT_DIR/core/harness-verdict.sh" validate "$D" feature F-CONV-07 | jq -r '.valid')"
 check "T17d: CLI next attempt 2" 2 "$(bash "$ROOT_DIR/core/harness-verdict.sh" next "$D" feature F-CONV-07)"
+check "T17e: standalone CLI loads lock dependency and registers verdict" 1 "$(jq -s '[.[] | select(.path == ".harness/reviews/feature/F-CONV-07.jsonl" and .kind == "verdict")] | length' "$D/.harness/runtime-manifest.jsonl")"
 
 # ---- T18: CLI refuses PASS without --run ----
 D="$(mktemp -d "$TMPDIR/t18-XXXX")"

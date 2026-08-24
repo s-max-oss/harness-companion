@@ -22,10 +22,10 @@
 #     Returns 0 on success, 5 on timeout.
 #     Side effects on success:
 #       - mkdir backend: creates $lock_dir with metadata files
-#       - flock backend: opens FD 9 on $lock_dir/flock.lock and holds an
-#         exclusive flock in the *calling* shell. The token is exposed as
+#       - flock backend: allocates a distinct FD for $lock_dir/flock.lock and
+#         holds an exclusive flock in the *calling* shell. The token is exposed as
 #         $LOCK_REGISTRY_TOKEN. Do NOT wrap acquire_lock in $(...) — that
-#         runs it in a subshell, the subshell exits, FD 9 closes, and the
+#         runs it in a subshell, the subshell exits, its FD closes, and the
 #         kernel releases the flock. acquire_lock sets a global; do not
 #         capture via command substitution.
 #   release_lock <lock_dir> [token]
@@ -56,6 +56,60 @@ elif [ "$(uname -s 2>/dev/null)" = "Linux" ] && command -v flock >/dev/null 2>&1
 else
   _LR_BACKEND="mkdir"
 fi
+
+# The flock backend must support nested locks in one shell. Verdict writes hold
+# a per-(kind,id) transaction lock while runtime_register acquires the distinct
+# runtime-manifest lock. A fixed FD would make the inner acquire close and
+# replace the outer lock. Keep one dynamically allocated FD and token per
+# lock_dir instead. Use parallel indexed arrays rather than associative arrays
+# so the mkdir fallback remains sourceable by the system Bash 3.2 shipped on
+# older macOS hosts. Declarations without initializers preserve active entries
+# if this library is sourced more than once.
+declare -a _LR_FLOCK_DIRS 2>/dev/null || true
+declare -a _LR_FLOCK_FDS 2>/dev/null || true
+declare -a _LR_FLOCK_TOKENS 2>/dev/null || true
+: "${_LR_FLOCK_NEXT_INDEX:=0}"
+LR_FLOCK_INDEX=-1
+
+_lr_flock_find_index() {
+  local needle="$1" i
+  LR_FLOCK_INDEX=-1
+  for ((i=0; i<_LR_FLOCK_NEXT_INDEX; i++)); do
+    if [ "${_LR_FLOCK_DIRS[$i]:-}" = "$needle" ]; then
+      LR_FLOCK_INDEX="$i"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Allocate/close numeric descriptors without Bash 4's `exec {var}` syntax so
+# this file can still be parsed when the mkdir backend is sourced by Bash 3.2.
+# The evaluated fragment contains only a range-checked integer and a quoted
+# reference to the local path variable; path bytes are never interpolated into
+# shell syntax.
+_lr_flock_open_fd() {
+  local lock_file="$1" fd=10
+  while eval ": >&${fd}" 2>/dev/null; do
+    fd=$((fd + 1))
+    if [ "$fd" -gt 199 ]; then
+      return 1
+    fi
+  done
+  if ! eval "exec ${fd}>>\"\$lock_file\""; then
+    return 1
+  fi
+  LR_FLOCK_FD="$fd"
+  return 0
+}
+
+_lr_flock_close_fd() {
+  local fd="$1"
+  case "$fd" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  eval "exec ${fd}>&-" 2>/dev/null
+}
 
 # Map lock_dir to flock's lock file path. For the flock backend, the caller-
 # supplied lock_dir is a directory; we create a regular file inside it named
@@ -338,7 +392,10 @@ _lr_mkdir_acquire() {
     echo "acquire_lock: failed to generate token" >&2
     return 3
   fi
-  local my_pid="$$"
+  # BASHPID identifies the actual background subshell. `$$` remains the parent
+  # shell's PID inside `( ... ) &`, so using it makes independent contenders
+  # claim the same owner identity and defeats stale-owner diagnostics.
+  local my_pid="${BASHPID:-$$}"
   local my_host
   my_host="$(_lr_my_hostname)"
   local my_start_time=""
@@ -451,9 +508,9 @@ _lr_mkdir_release() {
 #   <lock_dir>/.lr_owner              — file containing our 32-char token
 
 # _lr_flock_acquire <lock_dir> [timeout_s]
-# IMPORTANT: opens FD 9 in the CALLING shell via `exec 9>>`. The caller must
+# IMPORTANT: opens a dynamic FD in the CALLING shell. The caller must
 # NOT capture acquire_lock's stdout via $(...) — that would run in a subshell,
-# the subshell would exit, FD 9 would close, and the kernel would release the
+# the subshell would exit, its FD would close, and the kernel would release the
 # flock immediately. We echo the token for visibility but expose it primarily
 # via the global LOCK_REGISTRY_TOKEN. After a successful acquire_lock, the
 # caller should run mutations, then call release_lock (NOT in a subshell).
@@ -463,6 +520,10 @@ _lr_flock_acquire() {
   if [ -z "$lock_dir" ]; then
     echo "acquire_lock: usage: acquire_lock <lock_dir> [timeout_s]" >&2
     return 2
+  fi
+  if _lr_flock_find_index "$lock_dir"; then
+    echo "acquire_lock: lock already held by this shell: $lock_dir" >&2
+    return 4
   fi
   local lock_file
   lock_file="$(_lr_flock_path "$lock_dir")"
@@ -486,9 +547,15 @@ _lr_flock_acquire() {
     return 3
   fi
 
-  # Open FD 9 in the calling shell. After this line returns, FD 9 stays
-  # open in the shell that called acquire_lock — not in a subshell.
-  exec 9>>"$lock_file"
+  # Allocate a distinct FD in the calling shell. After this line returns, the
+  # FD stays open in the shell that called acquire_lock — not in a subshell.
+  # A distinct FD is essential for nested, different lock_dir acquisitions.
+  local fd
+  if ! _lr_flock_open_fd "$lock_file"; then
+    echo "acquire_lock: failed to open lock file '$lock_file'" >&2
+    return 2
+  fi
+  fd="$LR_FLOCK_FD"
 
   # Try to acquire exclusive flock with the deadline. flock -w 1 waits at
   # most 1s; we loop until the deadline so we surface a clear timeout error.
@@ -496,17 +563,27 @@ _lr_flock_acquire() {
   local deadline
   deadline=$(( $(_lr_now) + timeout_s ))
   while [ "$(_lr_now)" -lt "$deadline" ] && [ "$rc" -ne 0 ]; do
-    flock -w 1 -x 9 && rc=0 || rc=$?
+    flock -w 1 -x "$fd" && rc=0 || rc=$?
   done
 
   if [ "$rc" -ne 0 ]; then
     # Timed out — close the FD in the calling shell and surface failure.
-    exec 9>&- 2>/dev/null || true
+    _lr_flock_close_fd "$fd" || true
     return 5
   fi
 
   # Got the flock — record token sidecar so release_lock can verify ownership.
-  printf '%s' "$my_token" > "$lock_dir/.lr_owner" 2>/dev/null || true
+  if ! printf '%s' "$my_token" > "$lock_dir/.lr_owner" 2>/dev/null; then
+    flock -u "$fd" 2>/dev/null || true
+    _lr_flock_close_fd "$fd" || true
+    echo "acquire_lock: failed to write owner token sidecar" >&2
+    return 3
+  fi
+  local map_index="$_LR_FLOCK_NEXT_INDEX"
+  _LR_FLOCK_DIRS[$map_index]="$lock_dir"
+  _LR_FLOCK_FDS[$map_index]="$fd"
+  _LR_FLOCK_TOKENS[$map_index]="$my_token"
+  _LR_FLOCK_NEXT_INDEX=$((_LR_FLOCK_NEXT_INDEX + 1))
   # Expose token via the global LOCK_REGISTRY_TOKEN so callers don't need to
   # capture stdout (which would put acquire_lock in a subshell).
   LOCK_REGISTRY_TOKEN="$my_token"
@@ -518,8 +595,8 @@ _lr_flock_acquire() {
 
 # _lr_flock_release <lock_dir> [token]
 # If [token] is omitted, reads $LOCK_REGISTRY_TOKEN from the environment.
-# Must be called in the same shell that called acquire_lock (so FD 9 is the
-# same kernel fd that holds the flock).
+# Must be called in the same shell that called acquire_lock so the mapped FD is
+# the same kernel fd that holds the flock.
 _lr_flock_release() {
   local lock_dir="${1:-}"
   local token="${2:-${LOCK_REGISTRY_TOKEN:-}}"
@@ -530,9 +607,23 @@ _lr_flock_release() {
   local lock_file
   lock_file="$(_lr_flock_path "$lock_dir")"
 
-  # Idempotent: if lock_file gone, nothing to do.
-  if [ ! -e "$lock_file" ]; then
-    return 0
+  _lr_flock_find_index "$lock_dir" || true
+  local map_index="$LR_FLOCK_INDEX"
+  local fd="" mapped_token=""
+  if [ "$map_index" -ge 0 ]; then
+    fd="${_LR_FLOCK_FDS[$map_index]:-}"
+    mapped_token="${_LR_FLOCK_TOKENS[$map_index]:-}"
+  fi
+  if [ -z "$fd" ] || [ -z "$mapped_token" ]; then
+    if [ ! -e "$lock_file" ]; then
+      return 0
+    fi
+    echo "release_lock: cannot_verify_ownership — no FD mapping for $lock_dir" >&2
+    return 6
+  fi
+  if [ "$mapped_token" != "$token" ]; then
+    echo "release_lock: token_mismatch — refusing to release lock held by another owner" >&2
+    return 6
   fi
 
   # Token check (fail-closed).
@@ -549,13 +640,14 @@ _lr_flock_release() {
     return 6
   fi
 
-  # Release the flock in the calling shell and close FD 9. Because the flock
-  # was acquired by the same shell via `exec 9>>`, this is the only fd that
-  # actually holds the kernel lock — closing it releases the lock for any
-  # waiters (proven by test-lock-registry T13).
-  flock -u 9 2>/dev/null || true
-  exec 9>&- 2>/dev/null || true
+  # Release only this lock_dir's FD. Other nested locks in the same shell keep
+  # their own FDs and remain held.
+  flock -u "$fd" 2>/dev/null || true
+  _lr_flock_close_fd "$fd" || true
   rm -f "$lock_dir/.lr_owner" 2>/dev/null || true
+  unset "_LR_FLOCK_DIRS[$map_index]"
+  unset "_LR_FLOCK_FDS[$map_index]"
+  unset "_LR_FLOCK_TOKENS[$map_index]"
   LOCK_REGISTRY_TOKEN=""
   return 0
 }

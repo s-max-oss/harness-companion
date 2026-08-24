@@ -135,6 +135,27 @@ validate_acceptance_package() {
     fi
   done
 
+  # A-G.log must retain a real, HEAD/run-bound formal DWM rc=0 transcript.
+  # The current-head checker independently reruns DWM after publication; this
+  # retained transcript proves the package was also clean immediately before
+  # its own files were published and avoids relying on an ephemeral console.
+  local ag_path ag_dwm
+  ag_path="$(jq -r '.a_g_log.path // empty' "$acc")"
+  ag_dwm="$(awk '
+    /----- BEGIN formal pre-publication DWM transcript -----/ { capture=1; next }
+    /----- END formal pre-publication DWM transcript -----/ { capture=0 }
+    capture { print }
+  ' "$ag_path" 2>/dev/null)"
+  if ! grep -Fq "Head:                $head_oid" "$ag_path" 2>/dev/null \
+     || ! grep -Fq "Run ID:              $run_id" "$ag_path" 2>/dev/null \
+     || ! grep -Fq "Formal DWM exit:     0" "$ag_path" 2>/dev/null \
+     || ! printf '%s' "$ag_dwm" | jq -e \
+          '.valid == true and (.violations | type == "array") and (.violations | length == 0)' \
+          >/dev/null 2>&1; then
+    _emit_result false "a_g_log missing HEAD/run-bound formal DWM rc0 transcript"
+    return 1
+  fi
+
   # Canonical NDJSON terminal must be a passing terminal (run_completed or
   # run_passed with overall_result=passed, failed_commands=0). We do NOT call
   # validate_run_log here because that validator requires the NDJSON to live

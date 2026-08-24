@@ -1191,52 +1191,30 @@ RES="$(dwm_compare_manifest "$D" "$OUT")"
 check "T45a: missing genesis line invalid" false "$(printf '%s' "$RES" | jq -r '.valid')"
 check "T45b: violation runtime_manifest_genesis_missing" "1" "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_manifest_genesis_missing")] | length')"
 
-# ---- T46 (rc6 final tracked-work migration): runtime_register prepends genesis
-# to a legacy registry that has no genesis line. This is the bootstrap path
-# for existing repos whose .harness/runtime-manifest.jsonl predates the rc6
-# final genesis-anchor requirement (documented in
-# docs/migrations/2026-08-17-rc6-final-contract-migration.json
-# concurrent_changes.runtime-manifest genesis anchor). After one prepend call
-# the registry has line 0 = {genesis:"<HEAD>"} and all subsequent
-# runtime_register calls are pure appends.
+# ---- T46: an existing registry with no genesis is never auto-repaired --------
+# A legacy registry and a registry whose trust root was deleted are
+# indistinguishable. Normal registration must therefore fail closed and leave
+# the existing bytes untouched. Legacy conversion belongs to an explicit,
+# separately audited migration boundary.
 D="$(mktemp -d "$TMPDIR/t46-XXXX")"
 setup_repo "$D"
 HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
-# Simulate a legacy registry: write ONLY a regular entry, no genesis line.
+# Simulate an existing registry after its genesis was removed.
 mkdir -p "$D/.harness"
 printf '{"path":"%s","kind":"ndjson","sha256":"%s","size":%s}\n' \
   ".harness/logs/runs/run-1.ndjson" \
   "0000000000000000000000000000000000000000000000000000000000000000" 0 \
   > "$D/.harness/runtime-manifest.jsonl"
-first_line_before="$(head -1 "$D/.harness/runtime-manifest.jsonl")"
-# Confirm the legacy state has no genesis line.
-if printf '%s' "$first_line_before" | jq -e 'has("genesis")' >/dev/null 2>&1; then
-  echo "PRECONDITION FAIL: legacy registry already has genesis" >&2
-  exit 1
-fi
-entry_count_before="$(wc -l < "$D/.harness/runtime-manifest.jsonl")"
-# Now call runtime_register — it should detect the missing genesis and prepend
-# under lock, atomically. The new line 0 must be {genesis:"<HEAD>"}.
-RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1 || {
-  echo "T46 setup FAIL: runtime_register returned non-zero" >&2
-  exit 1
-}
-first_line_after="$(head -1 "$D/.harness/runtime-manifest.jsonl")"
-check "T46a: prepend adds genesis line as line 0" "true" "$(printf '%s' "$first_line_after" | jq 'has("genesis")')"
-check "T46b: prepend preserves genesis value" "$HEAD_SHA" "$(printf '%s' "$first_line_after" | jq -r '.genesis')"
-check "T46c: prepend preserves original entry" "true" "$(printf '%s' "$first_line_after" | jq 'has("path") == false and has("genesis")')"
-# Total line count: 1 genesis + entry_count_before original lines (run-1 was
-# already registered → idempotency skip; existing entry line preserved).
-entry_count_after="$(wc -l < "$D/.harness/runtime-manifest.jsonl")"
-check "T46d: prepend adds exactly one line" "$((entry_count_before + 1))" "$entry_count_after"
-# Now compare manifest — the existing entries (run-1.ndjson registered with
-# sha=0..0) might mismatch the file, so this test does NOT assert valid=true.
-# We only assert the genesis-related reasons are NOT present.
-OUT="$(mf "$D" t46)"
-dwm_emit_manifest "$D" "$OUT"
-RES="$(dwm_compare_manifest "$D" "$OUT")"
-check "T46e: post-prepend no genesis_missing" "0" "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_manifest_genesis_missing")] | length')"
-check "T46f: post-prepend no genesis_mismatch" "0" "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_manifest_genesis_mismatch")] | length')"
+before_sha="$(_runtime_file_sha256 "$D/.harness/runtime-manifest.jsonl")"
+before_size="$(wc -c < "$D/.harness/runtime-manifest.jsonl" | tr -d '[:space:]')"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
+register_rc=$?
+after_sha="$(_runtime_file_sha256 "$D/.harness/runtime-manifest.jsonl")"
+after_size="$(wc -c < "$D/.harness/runtime-manifest.jsonl" | tr -d '[:space:]')"
+check "T46a: missing-genesis registration fails closed" "1" "$register_rc"
+check "T46b: failed registration preserves byte-exact registry hash" "$before_sha" "$after_sha"
+check "T46c: failed registration preserves byte-exact registry size" "$before_size" "$after_size"
+check "T46d: failed registration does not synthesize genesis" "0" "$(jq -s '[.[] | select(has("genesis"))] | length' "$D/.harness/runtime-manifest.jsonl")"
 
 # ---- D12 (Codex r4): symlink PLAN.json is rejected, not followed ------------
 # `[ -f ]` follows symlinks, so without the explicit symlink guard a symlink →

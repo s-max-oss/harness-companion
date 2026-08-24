@@ -337,40 +337,46 @@ check "T12j: existing-file rollback preserves byte-exact prior state" "$before" 
 check "T12k: existing-file still exactly one record" 1 "$after_n"
 check "T12l: next_attempt still 2 after rollback" 2 "$(verdict_next_attempt "$D" feature F-CONV-01)"
 
-# ---- T12m: same-ID concurrent verdict writers — the per-(kind,id) transaction
-# lock serializes N concurrent appends for the SAME (feature,F-CONV-01) so every
-# record survives with contiguous attempts 1..N and the file validates. Without
-# the lock, racing next_attempt reads would produce duplicate attempts and lost
-# updates.
-D="$(mktemp -d "$TMPDIR/t12m-XXXX")"
-ginit "$D"
-write_plan "$D" 1 F-CONV-01
-gcommit "$D"
-BASE="$(git -C "$D" rev-parse HEAD~1 2>/dev/null || git -C "$D" rev-parse HEAD)"
-HEAD="$(git -C "$D" rev-parse HEAD)"
-N=8
-# On MSYS2/Windows every subprocess fork is ~30-150 ms, so one verdict_append_record
-# critical section (record validation + git object checks + runtime registration)
-# is ~3-5 s. Eight writers serialize to ~40 s, far exceeding the library's 10 s
-# default lock timeout — the 8th writer would time out and drop its update. Raise
-# the timeout for THIS test only (the lock still serializes; the 10 s default is
-# unchanged in production). This asserts the invariant — contiguous attempts
-# 1..N with no lost updates — rather than the platform's raw write speed.
-export LOCK_TIMEOUT_S=120
-i=1
-while [ "$i" -le "$N" ]; do
-  verdict_append_record "$D" feature F-CONV-01 "$(feature_rec "$D" F-CONV-01 1 FAIL "" "$BASE" "$HEAD")" \
-    >"$TMPDIR/t12m-$i.out" 2>&1 &
-  i=$((i + 1))
-done
-wait
-export LOCK_TIMEOUT_S=10
-n="$(wc -l < "$D/.harness/reviews/feature/F-CONV-01.jsonl" | tr -d '[:space:]')"
-check "T12m: all N concurrent writers survived" "$N" "$n"
-check "T12n: file validates after concurrent writes" true "$(verdict_validate_file "$D" feature F-CONV-01 | jq -r '.valid')"
-attempts="$(jq -s 'map(.attempt) | sort' "$D/.harness/reviews/feature/F-CONV-01.jsonl")"
-expected_attempts="$(jq -n --argjson n "$N" '[range(1; $n + 1)]')"
-check "T12o: concurrent attempts are contiguous 1..N" "$expected_attempts" "$attempts"
+# ---- T12m: same-ID concurrent verdict writers under every lock backend ------
+# The per-(kind,id) transaction lock serializes N concurrent appends for the
+# SAME feature. Run the contract explicitly under mkdir and, when installed,
+# flock. The flock path also nests runtime_register's different lock, which is
+# the production Linux topology that a fixed FD breaks.
+run_same_id_concurrency() {
+  local backend="$1" label="$2" d base head n attempts expected_attempts i
+  d="$(mktemp -d "$TMPDIR/t12m-${backend}-XXXX")"
+  ginit "$d"
+  write_plan "$d" 1 F-CONV-01
+  gcommit "$d"
+  base="$(git -C "$d" rev-parse HEAD~1 2>/dev/null || git -C "$d" rev-parse HEAD)"
+  head="$(git -C "$d" rev-parse HEAD)"
+  local workers=8
+  local saved_backend="$_LR_BACKEND"
+  _LR_BACKEND="$backend"
+  export LOCK_TIMEOUT_S=120
+  i=1
+  while [ "$i" -le "$workers" ]; do
+    verdict_append_record "$d" feature F-CONV-01 "$(feature_rec "$d" F-CONV-01 1 FAIL "" "$base" "$head")" \
+      >"$TMPDIR/t12m-${backend}-$i.out" 2>&1 &
+    i=$((i + 1))
+  done
+  wait
+  export LOCK_TIMEOUT_S=10
+  n="$(wc -l < "$d/.harness/reviews/feature/F-CONV-01.jsonl" 2>/dev/null | tr -d '[:space:]')"
+  check "T12m-$label: all N concurrent writers survived" "$workers" "${n:-0}"
+  check "T12n-$label: file validates after concurrent writes" true "$(verdict_validate_file "$d" feature F-CONV-01 | jq -r '.valid')"
+  attempts="$(jq -s 'map(.attempt) | sort' "$d/.harness/reviews/feature/F-CONV-01.jsonl")"
+  expected_attempts="$(jq -n --argjson n "$workers" '[range(1; $n + 1)]')"
+  check "T12o-$label: concurrent attempts are contiguous 1..N" "$expected_attempts" "$attempts"
+  _LR_BACKEND="$saved_backend"
+}
+
+run_same_id_concurrency mkdir mkdir
+if command -v flock >/dev/null 2>&1; then
+  run_same_id_concurrency flock flock
+else
+  echo "SKIP: T12m-flock: flock(1) not installed on this platform"
+fi
 
 # ---- T13: writer refuses fabricated head_sha (not a real git object) ----
 D="$(mktemp -d "$TMPDIR/t13-XXXX")"

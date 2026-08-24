@@ -381,7 +381,11 @@ acquire_lock "$PKG_LOCK_DIR" 30 >/dev/null || {
   echo "generate-acceptance-package: failed to acquire package-write lock" >&2
   exit 1
 }
-trap 'release_lock "$PKG_LOCK_DIR" "${LOCK_REGISTRY_TOKEN:-}" >/dev/null 2>&1 || true' EXIT
+PKG_LOCK_TOKEN="${LOCK_REGISTRY_TOKEN:-}"
+# Nested runtime-manifest registrations replace LOCK_REGISTRY_TOKEN. Preserve
+# the package lock's own token now so the EXIT trap releases the correct lock
+# under both mkdir and multi-FD flock backends.
+trap 'release_lock "$PKG_LOCK_DIR" "$PKG_LOCK_TOKEN" >/dev/null 2>&1 || true' EXIT
 
 # ---- Idempotency: existing package at this HEAD is left untouched ----
 PKG_DIR="$ACCEPT_BASE/$HEAD_OID"
@@ -400,6 +404,23 @@ MIGRATION_SHA="$(sha256_of "$MIGRATION_RECORD")"
 
 A_G_LOG="$PKG_DIR/A-G.log"
 ACCEPT_JSON="$PKG_DIR/acceptance.json"
+
+# ---- Formal live DWM attestation (pre-publication) --------------------------
+# Capture a real rc=0 DWM execution in the package itself. This run happens
+# immediately before package publication; the current-head checker performs a
+# second live DWM after all package files have been registered. The two-step
+# design is intentionally non-circular: A-G.log can bind the first transcript,
+# while the post-publication gate verifies the final state that includes it.
+DWM_COMMAND="bash tools/snapshot-dirty-worktree.sh check tests/fixtures/dirty-worktree-manifest.jsonl <project-root>"
+DWM_RESULT="$(bash "$ROOT_DIR/tools/snapshot-dirty-worktree.sh" check \
+  "tests/fixtures/dirty-worktree-manifest.jsonl" "$ROOT_DIR" 2>&1)"
+DWM_RC=$?
+if [ "$DWM_RC" -ne 0 ] || ! printf '%s' "$DWM_RESULT" | jq -e '.valid == true' >/dev/null 2>&1; then
+  rm -rf "$PKG_DIR"
+  echo "generate-acceptance-package: formal pre-publication DWM failed (rc=$DWM_RC)" >&2
+  printf '%s\n' "$DWM_RESULT" >&2
+  exit 1
+fi
 
 # ---- Build A-G.log: copy the canonical FULL_SUITE_LOG and
 # prepend a header recording every binding for human inspection. The
@@ -427,6 +448,8 @@ ACCEPT_JSON="$PKG_DIR/acceptance.json"
   echo "  sha256:            $REVIEWER_VERDICT_SHA"
   echo "Migration record:    $MIGRATION_RECORD"
   echo "  sha256:            $MIGRATION_SHA"
+  echo "Formal DWM command:  $DWM_COMMAND"
+  echo "Formal DWM exit:     $DWM_RC"
   echo "Generated at:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "============================================================"
   echo ""
@@ -435,6 +458,10 @@ ACCEPT_JSON="$PKG_DIR/acceptance.json"
 cat "$FULL_SUITE_LOG" >> "$A_G_LOG"
 echo "" >> "$A_G_LOG"
 echo "----- END canonical full-suite log -----" >> "$A_G_LOG"
+echo "" >> "$A_G_LOG"
+echo "----- BEGIN formal pre-publication DWM transcript -----" >> "$A_G_LOG"
+printf '%s\n' "$DWM_RESULT" >> "$A_G_LOG"
+echo "----- END formal pre-publication DWM transcript -----" >> "$A_G_LOG"
 
 A_G_SHA="$(sha256_of "$A_G_LOG")"
 
@@ -507,13 +534,16 @@ runtime_replace() {
   _runtime_acquire "$ROOT_DIR" || return 1
   local lock_rc=0
   {
-    # Bootstrap registry (genesis) if absent
+    # Bootstrap a truly absent registry. An existing registry with no genesis
+    # is fail-closed: silently prepending would legitimize a trust root that an
+    # attacker may have removed.
     if [ ! -f "$mf" ]; then
       if ! _runtime_init_registry "$ROOT_DIR" "$mf"; then
         lock_rc=1
       fi
-    elif ! head -1 "$mf" 2>/dev/null | jq -e 'has("genesis")' >/dev/null 2>&1; then
-      if ! _runtime_prepend_genesis "$ROOT_DIR" "$mf"; then
+    fi
+    if [ "$lock_rc" -eq 0 ]; then
+      if ! _runtime_validate_registry "$ROOT_DIR" "$mf"; then
         lock_rc=1
       fi
     fi

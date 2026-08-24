@@ -50,5 +50,16 @@ if [ "$rc" != "0" ]; then
   echo "check-current-head-package: package at $pkg failed validation: $result" >&2
   exit 1
 fi
-echo "check-current-head-package: PASS ($pkg)"
+
+# Final authoritative DWM gate. The package contains the pre-publication
+# transcript; this second execution covers the package files and their
+# runtime-manifest registrations without creating a self-referential artifact.
+dwm_result="$(bash "$ROOT_DIR/tools/snapshot-dirty-worktree.sh" check \
+  "tests/fixtures/dirty-worktree-manifest.jsonl" "$ROOT_DIR" 2>&1)"
+dwm_rc=$?
+if [ "$dwm_rc" != "0" ] || ! printf '%s' "$dwm_result" | jq -e '.valid == true' >/dev/null 2>&1; then
+  echo "check-current-head-package: formal post-publication DWM failed (rc=$dwm_rc): $dwm_result" >&2
+  exit 1
+fi
+echo "check-current-head-package: PASS ($pkg; formal DWM rc=0)"
 exit 0

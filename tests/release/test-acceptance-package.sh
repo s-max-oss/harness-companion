@@ -51,10 +51,6 @@ mkdir -p "$TMPDIR_PKG"
 echo '{"timeout_seconds":300}' > "$TMPDIR_PKG/config.json"
 CFG_SHA="$(sha256_of "$TMPDIR_PKG/config.json")"
 
-# Synthetic A-G.log
-echo "synthetic ag-only output" > "$TMPDIR_PKG/A-G.log"
-AG_SHA="$(sha256_of "$TMPDIR_PKG/A-G.log")"
-
 # Synthetic full_suite_log
 echo "synthetic full-suite output" > "$TMPDIR_PKG/full-suite.log"
 FSL_SHA="$(sha256_of "$TMPDIR_PKG/full-suite.log")"
@@ -65,6 +61,18 @@ FSL_SHA="$(sha256_of "$TMPDIR_PKG/full-suite.log")"
 SYN_RUN_ID="20260819T120000Z-99999-99999"
 SYN_HEAD="0123456789abcdef0123456789abcdef01234567"
 SYN_CFG="sha256:$CFG_SHA"
+# Synthetic A-G.log retains the same HEAD/run/DWM fields required of a real
+# package. The live post-publication rerun belongs to the current-head checker,
+# not this project-agnostic shape test.
+cat > "$TMPDIR_PKG/A-G.log" <<EOF
+Head:                $SYN_HEAD
+Run ID:              $SYN_RUN_ID
+Formal DWM exit:     0
+----- BEGIN formal pre-publication DWM transcript -----
+{"valid":true,"violations":[]}
+----- END formal pre-publication DWM transcript -----
+EOF
+AG_SHA="$(sha256_of "$TMPDIR_PKG/A-G.log")"
 cat > "$TMPDIR_PKG/canonical.ndjson" <<EOF
 {"event":"run_started","schema_version":2,"run_id":"$SYN_RUN_ID","started_at":"2026-08-19T12:00:00Z","project_root":"$TMPDIR_PKG","vcs_revision":"$SYN_HEAD","vcs_revision_source":"git","workspace_fingerprint_initial":"sha256:deadbeef","config_sha256":"$SYN_CFG","required_command_ids":["full-suite"],"capability_level":2,"feature_id":"F-MAINT-01"}
 {"event":"command_completed","schema_version":2,"run_id":"$SYN_RUN_ID","command_id":"full-suite","command":["bash","tests/run-all.sh"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-08-19T12:00:01Z","duration_ms":1000,"log_artifact":"$TMPDIR_PKG/full-suite.log","log_sha256":"$FSL_SHA"}
@@ -220,6 +228,19 @@ if ln -s "$TMPDIR_NEG/canonical.ndjson" "$TMPDIR_NEG/canonical-symlink.ndjson" 2
   fi
 else
   pass "validator rejects canonical NDJSON that is a symlink [SKIP: real symlink unsupported on this platform]"
+fi
+
+# ---- Negative 8: A-G.log without retained formal DWM transcript ------------
+cp -r "$TMPDIR_PKG/." "$TMPDIR_NEG/"
+echo "Head:                $SYN_HEAD" > "$TMPDIR_NEG/A-G.log"
+NEW_AG_SHA="$(sha256_of "$TMPDIR_NEG/A-G.log")"
+sed -i "s/\"sha256\":\"$AG_SHA\"/\"sha256\":\"$NEW_AG_SHA\"/" "$TMPDIR_NEG/acceptance.json"
+result="$(validate_acceptance_package "$TMPDIR_NEG" 2>&1)"
+rc=$?
+if [ "$rc" != "0" ] && printf '%s' "$result" | jq -e '.valid == false' >/dev/null 2>&1; then
+  pass "validator rejects A-G.log without formal DWM rc0 transcript"
+else
+  fail "validator accepted A-G.log without formal DWM transcript: $result"
 fi
 
 echo "=== Acceptance Package (shape) Test Results: $PASS passed, $FAIL failed ==="

@@ -541,6 +541,80 @@ WAITER_EOF
 fi
 
 # ============================================================================
+# T14: flock nested distinct locks keep the outer lock held
+# ============================================================================
+# verdict_append_record holds a same-ID lock and then runtime_register acquires
+# a different runtime-manifest lock in the same shell. Releasing the inner lock
+# must not release the outer lock. This catches any regression to a shared
+# fixed FD (historically FD 9).
+echo ""
+echo "=== T14: flock nested locks use independent FDs (skipped if flock absent) ==="
+T14="$TMPROOT/t14"
+mkdir -p "$T14"
+rm -rf "$T14/outer" "$T14/inner"
+if ! command -v flock >/dev/null 2>&1; then
+  echo "SKIP: T14: flock(1) not installed on this platform — test skipped (Linux-only)"
+else
+  NESTED_HOLDER="$T14/nested-holder.sh"
+  NESTED_WAITER="$T14/nested-waiter.sh"
+  cat > "$NESTED_HOLDER" <<'NESTED_HOLDER_EOF'
+#!/bin/bash
+set -uo pipefail
+export LOCK_REGISTRY_BACKEND=flock
+source "$CORE_LIB/lock-registry.sh"
+OUTER="$1"
+INNER="$2"
+READY="$3"
+acquire_lock "$OUTER" 5 >/dev/null || exit 7
+outer_token="$LOCK_REGISTRY_TOKEN"
+acquire_lock "$INNER" 5 >/dev/null || exit 8
+inner_token="$LOCK_REGISTRY_TOKEN"
+release_lock "$INNER" "$inner_token" || exit 9
+date +%s > "$READY"
+sleep 3
+release_lock "$OUTER" "$outer_token" || exit 10
+NESTED_HOLDER_EOF
+  cat > "$NESTED_WAITER" <<'NESTED_WAITER_EOF'
+#!/bin/bash
+set -uo pipefail
+export LOCK_REGISTRY_BACKEND=flock
+source "$CORE_LIB/lock-registry.sh"
+OUTER="$1"
+RESULT="$2"
+started="$(date +%s)"
+acquire_lock "$OUTER" 10 >/dev/null || exit 7
+finished="$(date +%s)"
+printf '%s\n' "$((finished - started))" > "$RESULT"
+release_lock "$OUTER" "$LOCK_REGISTRY_TOKEN" || exit 8
+NESTED_WAITER_EOF
+  chmod +x "$NESTED_HOLDER" "$NESTED_WAITER"
+
+  ( CORE_LIB="$CORE_LIB" bash "$NESTED_HOLDER" "$T14/outer" "$T14/inner" "$T14/inner_released" ) &
+  NESTED_HOLDER_PID=$!
+  WAITED=0
+  while [ ! -f "$T14/inner_released" ] && [ "$WAITED" -lt 50 ]; do
+    sleep 0.1
+    WAITED=$((WAITED + 1))
+  done
+  if [ ! -f "$T14/inner_released" ]; then
+    assert_fail "T14: nested holder did not release inner lock" "no sentinel"
+    kill -9 "$NESTED_HOLDER_PID" 2>/dev/null || true
+  else
+    ( CORE_LIB="$CORE_LIB" bash "$NESTED_WAITER" "$T14/outer" "$T14/waited" ) &
+    NESTED_WAITER_PID=$!
+    wait "$NESTED_HOLDER_PID"; NESTED_HOLDER_RC=$?
+    wait "$NESTED_WAITER_PID"; NESTED_WAITER_RC=$?
+    NESTED_WAIT="$(cat "$T14/waited" 2>/dev/null || echo 0)"
+    if [ "$NESTED_HOLDER_RC" = "0" ] && [ "$NESTED_WAITER_RC" = "0" ] && [ "${NESTED_WAIT:-0}" -ge 2 ] 2>/dev/null; then
+      assert_pass "T14: releasing inner flock leaves outer flock held (waited=${NESTED_WAIT}s)"
+    else
+      assert_fail "T14: nested flock independence" "waited=$NESTED_WAIT holder_rc=$NESTED_HOLDER_RC waiter_rc=$NESTED_WAITER_RC"
+    fi
+  fi
+  rm -rf "$T14/outer" "$T14/inner"
+fi
+
+# ============================================================================
 # Summary
 # ============================================================================
 echo ""

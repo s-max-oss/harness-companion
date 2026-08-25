@@ -181,6 +181,18 @@ maintenance_rec() {
       reviewer_host:$host, checked:["maint"], reason:"test", recorded_at:"2026-08-08T00:00:00Z"}'
 }
 
+# reviewer_rec <dir> <fid> <verdict> <run_or_empty> <base> <head> [host]
+# A fresh independent Reviewer record uses its own kind/path/lock namespace.
+reviewer_rec() {
+  local d="$1" fid="$2" verdict="$3" run="$4" base="$5" head="$6" host="${7:-subagent}"
+  jq -n --arg fid "$fid" --arg v "$verdict" --arg r "$run" \
+    --arg base "$base" --arg head "$head" --arg host "$host" \
+    '{schema_version:1, kind:"reviewer", feature_id:$fid, attempt:1,
+      verdict:$v, base_sha:$base, head_sha:$head,
+      run_id:($r | if . == "" then null else . end),
+      reviewer_host:$host, checked:["independent-review"], reason:"test", recorded_at:"2026-08-08T00:00:00Z"}'
+}
+
 rec_valid() {
   local d="$1" rec="$2"
   verdict_validate_record "$d" "$rec" >/dev/null 2>&1
@@ -931,6 +943,62 @@ RES="$(verdict_validate_file "$D" phase 1)"
 check "MAINT-9: maintenance does not satisfy phase coverage" false "$(printf '%s' "$RES" | jq -r '.valid')"
 check "MAINT-9b: reason phase_coverage_failed" "phase_coverage_failed" "$(printf '%s' "$RES" | jq -r '.reason')"
 check "MAINT-9c: detail phase_feature_missing_artifact" "phase_feature_missing_artifact" "$(printf '%s' "$RES" | jq -r '.detail.reason')"
+
+# REVIEWER-1: the Reviewer writer participates in the exact source lock used
+# by acceptance-package generation, rather than appending outside that lock.
+D="$(mktemp -d "$TMPDIR/reviewer1-XXXX")"
+ginit "$D"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+LOCK_TRACE="$D/lock-trace.txt"
+ACQUIRE_LOCK_ORIGINAL="$(declare -f acquire_lock)"
+eval "$(printf '%s\n' "$ACQUIRE_LOCK_ORIGINAL" | sed '1s/acquire_lock/_reviewer_original_acquire_lock/')"
+acquire_lock() {
+  printf '%s\n' "$1" >> "$LOCK_TRACE"
+  _reviewer_original_acquire_lock "$@"
+}
+R1="$(verdict_append_record "$D" reviewer F-MAINT-01 "$(reviewer_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD")")"
+unset -f acquire_lock _reviewer_original_acquire_lock
+eval "$ACQUIRE_LOCK_ORIGINAL"
+check "REVIEWER-1a: writer appends Reviewer attempt 1" 1 "$(printf '%s' "$R1" | jq '.attempt')"
+check "REVIEWER-1b: writer acquires canonical Reviewer source lock" 1 "$(grep -Fxc "$D/.harness/.registry.lock/verdict-reviewer-F-MAINT-01" "$LOCK_TRACE")"
+check "REVIEWER-1c: Reviewer file validates" true "$(verdict_validate_file "$D" reviewer F-MAINT-01 | jq -r '.valid')"
+
+# REVIEWER-2: rc=8 is a post-release private-cleanup warning.  Once both the
+# verdict bytes and runtime registration are durable, the writer must return
+# the committed record (never invite a retry that would duplicate an attempt).
+D="$(mktemp -d "$TMPDIR/reviewer2-XXXX")"
+ginit "$D"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+RELEASE_LOCK_ORIGINAL="$(declare -f release_lock)"
+eval "$(printf '%s\n' "$RELEASE_LOCK_ORIGINAL" | sed '1s/release_lock/_reviewer_original_release_lock/')"
+release_lock() {
+  local target="$1"
+  _reviewer_original_release_lock "$@" || return $?
+  case "$target" in
+    */.harness/.registry.lock/verdict-reviewer-F-MAINT-01) return 8 ;;
+  esac
+  return 0
+}
+R2="$(verdict_append_record "$D" reviewer F-MAINT-01 "$(reviewer_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD")" 2>/dev/null)"
+R2_RC=$?
+unset -f release_lock _reviewer_original_release_lock
+eval "$RELEASE_LOCK_ORIGINAL"
+check "REVIEWER-2a: durable rc8 cleanup warning returns success" 0 "$R2_RC"
+check "REVIEWER-2b: durable rc8 returns committed attempt" 1 "$(printf '%s' "$R2" | jq '.attempt')"
+check "REVIEWER-2c: durable rc8 does not duplicate append" 1 "$(wc -l < "$D/.harness/reviews/reviewer/F-MAINT-01.jsonl" | tr -d '[:space:]')"
+check "REVIEWER-2d: durable rc8 registry anchor remains valid" 0 "$(_runtime_verify_registry_anchor "$D" "$D/.harness/runtime-manifest.jsonl" >/dev/null 2>&1; echo $?)"
+
+# REVIEWER-3: the public CLI emits the Reviewer schema and uses the same
+# append-only writer; it must not fall through to the phase-record branch.
+D="$(mktemp -d "$TMPDIR/reviewer3-XXXX")"
+ginit "$D"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+R3="$(bash "$ROOT_DIR/core/harness-verdict.sh" append "$D" reviewer F-MAINT-01 \
+  --verdict FAIL --base "$HEAD" --head "$HEAD" --host manual \
+  --checked reviewer-cli --reason "Reviewer CLI e2e")"
+check "REVIEWER-3a: CLI emits reviewer kind" reviewer "$(printf '%s' "$R3" | jq -r '.kind')"
+check "REVIEWER-3b: CLI reviewer attempt is 1" 1 "$(printf '%s' "$R3" | jq '.attempt')"
+check "REVIEWER-3c: CLI reviewer lifecycle validates" true "$(bash "$ROOT_DIR/core/harness-verdict.sh" validate "$D" reviewer F-MAINT-01 | jq -r '.valid')"
 
 echo ""
 echo "Verdict-Artifact Results: $PASSED passed, $FAILED failed"

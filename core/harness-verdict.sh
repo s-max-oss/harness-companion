@@ -118,7 +118,7 @@ cmd_append() {
         verdict:$verdict, base_sha:$base, head_sha:$head,
         run_id:($run | if . == "" then null else . end),
         reviewer_host:$host, checked:$checked, reason:$reason, recorded_at:$now}')"
-  elif [ "$kind" = "maintenance" ]; then
+  elif [ "$kind" = "maintenance" ] || [ "$kind" = "reviewer" ]; then
     record="$(jq -n --arg kind "$kind" --arg fid "$id" \
       --arg verdict "$verdict" --arg base "$base_sha" --arg head "$head_sha" \
       --arg run "$run_id" --arg host "$host" --argjson checked "$checked_json" \

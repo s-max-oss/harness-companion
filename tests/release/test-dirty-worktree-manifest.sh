@@ -1125,6 +1125,9 @@ ORIG_SZ="$(wc -c < "$D/.harness/logs/runs/run-tamper.ndjson")"
 # Pre-create the registry with a genesis anchor + a binding for run-tamper.ndjson.
 HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
 printf '{"genesis":"%s"}\n' "$HEAD_SHA" > "$D/.harness/runtime-manifest.jsonl"
+BOOTSTRAP_SHA="$(_runtime_file_sha256 "$D/.harness/runtime-manifest.jsonl")"
+_runtime_bootstrap_registry_anchor "$D" "$D/.harness/runtime-manifest.jsonl" "$BOOTSTRAP_SHA" explicit >/dev/null 2>&1
+check "T43-setup: initial registry anchor bootstraps" 0 "$?"
 # Register ALL existing runtime artifacts (the ones setup_repo creates), so
 # the runtime-artifact code path doesn't fire on legitimate fixtures.
 RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
@@ -1152,6 +1155,7 @@ dwm_emit_manifest "$D" "$OUT2"
 RES_TAMPER="$(dwm_compare_manifest "$D" "$OUT2")"
 check "T43b: registry duplicate path → invalid" false "$(printf '%s' "$RES_TAMPER" | jq -r '.valid')"
 check "T43c: violation runtime_manifest_duplicate_path" "1" "$(printf '%s' "$RES_TAMPER" | jq '[.violations[] | select(.reason == "runtime_manifest_duplicate_path")] | length')"
+check "T43d: direct registry rewrite breaks dedicated index anchor" "1" "$(printf '%s' "$RES_TAMPER" | jq '[.violations[] | select(.reason == "runtime_manifest_index_anchor_mismatch")] | length')"
 
 # ---- T44 (Codex rc6 final): genesis anchor mismatch ---------------------------
 # Set RUNTIME_MANIFEST_GENESIS to a value different from the in-tree genesis
@@ -1164,6 +1168,9 @@ HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
 # setup_repo runtime artifacts so the test fails on the genesis mismatch
 # (not on a chain of unregistered violations).
 printf '{"genesis":"%s"}\n' "$HEAD_SHA" > "$D/.harness/runtime-manifest.jsonl"
+BOOTSTRAP_SHA="$(_runtime_file_sha256 "$D/.harness/runtime-manifest.jsonl")"
+_runtime_bootstrap_registry_anchor "$D" "$D/.harness/runtime-manifest.jsonl" "$BOOTSTRAP_SHA" explicit >/dev/null 2>&1
+check "T44-setup: initial registry anchor bootstraps" 0 "$?"
 RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
 RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/reviews/feature/F-CONV-01.jsonl" "verdict" >/dev/null 2>&1
 OUT="$(mf "$D" t44)"
@@ -1286,7 +1293,9 @@ RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/acceptance/
 RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/acceptance/$HEAD_SHA/A-G.log" log
 RES="$(dwm_compare_manifest "$D" "$OUT")"
 check "T47a: registered acceptance artifacts accepted" true "$(printf '%s' "$RES" | jq -r '.valid')"
-printf '%s\n' 'unregistered' > "$D/.harness/acceptance/$HEAD_SHA/unregistered.log"
+UNREGISTERED_HEAD="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+mkdir -p "$D/.harness/acceptance/$UNREGISTERED_HEAD"
+printf '%s\n' '{"schema_version":1}' > "$D/.harness/acceptance/$UNREGISTERED_HEAD/acceptance.json"
 RES="$(dwm_compare_manifest "$D" "$OUT")"
 check "T47b: unregistered acceptance artifact rejected" 1 "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_artifact_unregistered")] | length')"
 
@@ -1340,6 +1349,50 @@ lines_after="$(wc -l < "$D/.harness/runtime-manifest.jsonl" | tr -d '[:space:]')
 check "T50a: duplicate genesis fails closed" 1 "$rc"
 check "T50b: duplicate genesis appends nothing" "$lines_before" "$lines_after"
 
+# ---- T50c: HEAD movement uses an append-only hash-chained transition --------
+D="$(mktemp -d "$TMPDIR/t50c-XXXX")"
+setup_repo "$D"
+OLD_HEAD="$(git -C "$D" rev-parse HEAD)"
+RUNTIME_MANIFEST_GENESIS="$OLD_HEAD" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null
+RUNTIME_MANIFEST_GENESIS="$OLD_HEAD" runtime_register "$D" ".harness/reviews/feature/F-CONV-01.jsonl" verdict >/dev/null
+MF="$D/.harness/runtime-manifest.jsonl"
+PREFIX_SIZE="$(wc -c < "$MF" | tr -d '[:space:]')"
+PREFIX_SHA="$(_runtime_file_sha256 "$MF")"
+git -C "$D" -c user.email=t@e.com -c user.name=t add .gitignore
+git -C "$D" -c user.email=t@e.com -c user.name=t commit -q -m next
+NEW_HEAD="$(git -C "$D" rev-parse HEAD)"
+runtime_transition_anchor "$D" "$NEW_HEAD" >/dev/null 2>&1
+tr_rc=$?
+check "T50c-a: descendant anchor transition succeeds" 0 "$tr_rc"
+head -c "$PREFIX_SIZE" "$MF" > "$D/prefix.bin"
+check "T50c-b: historical registry bytes remain an exact prefix" "$PREFIX_SHA" "$(_runtime_file_sha256 "$D/prefix.bin")"
+check "T50c-c: effective anchor advances to new HEAD" "$NEW_HEAD" "$(_runtime_effective_anchor "$MF")"
+check "T50c-d: transition previous_sha256 binds exact prefix" "$PREFIX_SHA" "$(tail -1 "$MF" | jq -r '.anchor_transition.previous_sha256')"
+cp "$MF" "$MF.no-lf"
+truncate -s -1 "$MF.no-lf"
+RUNTIME_MANIFEST_GENESIS="$NEW_HEAD" _runtime_validate_registry "$D" "$MF.no-lf" >/dev/null 2>&1
+check "T50c-e: registry without final LF fails closed" 1 "$?"
+jq -c 'if has("anchor_transition") then .anchor_transition.previous_sha256 = ("0" * 64) else . end' "$MF" > "$MF.bad"
+mv "$MF.bad" "$MF"
+RUNTIME_MANIFEST_GENESIS="$NEW_HEAD" _runtime_validate_registry "$D" "$MF" >/dev/null 2>&1
+check "T50c-f: tampered transition chain fails closed" 1 "$?"
+
+# A transition must never follow a symlink at the registry path.  Real symlink
+# support is platform-gated on Windows Git Bash.
+D_LINK="$(mktemp -d "$TMPDIR/t50c-link-XXXX")"
+setup_repo "$D_LINK"
+LINK_HEAD="$(git -C "$D_LINK" rev-parse HEAD)"
+RUNTIME_MANIFEST_GENESIS="$LINK_HEAD" runtime_register "$D_LINK" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null
+LINK_MF="$D_LINK/.harness/runtime-manifest.jsonl"
+mv "$LINK_MF" "$LINK_MF.real"
+ln -s "$LINK_MF.real" "$LINK_MF" 2>/dev/null
+if [ -L "$LINK_MF" ]; then
+  runtime_transition_anchor "$D_LINK" "$LINK_HEAD" >/dev/null 2>&1
+  check "T50c-g: transition refuses symlink registry" 1 "$?"
+else
+  echo "  [SKIP] T50c-g transition symlink — symlink creation unsupported on this platform"
+fi
+
 # ---- T51 (rc6 final remediation R1): runtime_register fail-closed on dangling symlink ---
 # A dangling symlink at the registry path is an obstacle, not "absent": without
 # the lstat (-L) guard it would fall through the `! -e` short-circuit and be
@@ -1372,6 +1425,167 @@ rc=0
 RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" "ndjson" >/dev/null 2>&1
 rc=$?
 check "T52a: directory obstacle fails closed" 1 "$rc"
+
+# ---- T53: generated bootstrap resumes only its exact pending input ----------
+D="$(mktemp -d "$TMPDIR/t53-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+MF="$D/.harness/runtime-manifest.jsonl"
+REL=".harness/logs/runs/run-1.ndjson"
+ART_SHA="$(_runtime_file_sha256 "$D/$REL")"
+ART_SIZE="$(wc -c < "$D/$REL" | tr -d ' \t\r')"
+_runtime_begin_init_pending "$D" "$HEAD_SHA" generated "$REL" ndjson "$ART_SHA" "$ART_SIZE"
+_runtime_init_registry "$D" "$MF"
+jq -cn --arg p "$REL" --arg k ndjson --arg h "$ART_SHA" --argjson s "$ART_SIZE" \
+  '{path:$p,kind:$k,sha256:$h,size:$s}' >> "$MF"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" "$REL" ndjson >/dev/null 2>&1
+check "T53a: exact pre-ref generated bootstrap resumes" 0 "$?"
+check "T53b: resumed bootstrap commits private ref" 0 "$(git -C "$D" show-ref --verify --quiet refs/harness/runtime-manifest; echo $?)"
+check "T53c: resumed bootstrap removes pending marker" absent "$([ ! -e "$(_runtime_init_pending_path "$D")" ] && echo absent || echo present)"
+_runtime_verify_registry_anchor "$D" "$MF" >/dev/null 2>&1
+check "T53d: resumed bootstrap verifies exact registry/index/ref binding" 0 "$?"
+
+# The marker schema is an exact transaction input, not merely a presence bit.
+# Mutating any bound field must make recovery fail closed before trust is
+# promoted.  Exercise the validator directly so a future weakening of its
+# genesis/path/kind/hash/size comparisons is caught precisely.
+PENDING="$(_runtime_init_pending_path "$D")"
+_runtime_begin_init_pending "$D" "$HEAD_SHA" generated "$REL" ndjson "$ART_SHA" "$ART_SIZE"
+cp "$PENDING" "$PENDING.valid"
+for field in genesis path kind sha256 size; do
+  cp "$PENDING.valid" "$PENDING"
+  case "$field" in
+    genesis) jq '.genesis = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$PENDING" > "$PENDING.tmp" ;;
+    path) jq '.path = ".harness/logs/runs/other.ndjson"' "$PENDING" > "$PENDING.tmp" ;;
+    kind) jq '.kind = "log"' "$PENDING" > "$PENDING.tmp" ;;
+    sha256) jq '.sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' "$PENDING" > "$PENDING.tmp" ;;
+    size) jq '.size += 1' "$PENDING" > "$PENDING.tmp" ;;
+  esac
+  mv "$PENDING.tmp" "$PENDING"
+  _runtime_init_pending_valid "$D" "$HEAD_SHA" generated "$REL" ndjson "$ART_SHA" "$ART_SIZE" >/dev/null 2>&1
+  check "T53d-$field: pending marker rejects mismatched $field" 1 "$?"
+done
+rm -f "$PENDING" "$PENDING.valid"
+
+# A valid marker must not authorize promotion of extra attacker-controlled
+# registry records written before the first durable private ref exists.
+D="$(mktemp -d "$TMPDIR/t53-forged-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+MF="$D/.harness/runtime-manifest.jsonl"
+REL=".harness/logs/runs/run-1.ndjson"
+ART_SHA="$(_runtime_file_sha256 "$D/$REL")"
+ART_SIZE="$(wc -c < "$D/$REL" | tr -d ' \t\r')"
+_runtime_begin_init_pending "$D" "$HEAD_SHA" generated "$REL" ndjson "$ART_SHA" "$ART_SIZE"
+_runtime_init_registry "$D" "$MF"
+jq -cn --arg p "$REL" --arg k ndjson --arg h "$ART_SHA" --argjson s "$ART_SIZE" \
+  '{path:$p,kind:$k,sha256:$h,size:$s}' >> "$MF"
+printf '%s\n' '{"path":".harness/logs/runs/forged.ndjson","kind":"ndjson","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1}' >> "$MF"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" "$REL" ndjson >/dev/null 2>&1
+check "T53e: pending marker refuses registry with forged extra record" 1 "$?"
+check "T53f: rejected forged bootstrap creates no private ref" 1 "$(git -C "$D" show-ref --verify --quiet refs/harness/runtime-manifest; echo $?)"
+
+# The same exact-two rule applies when a crash has already published a private
+# ref but has not durably published its receipt/index. A valid pending marker
+# must not authorize a ref carrying a third attacker-controlled record.
+D="$(mktemp -d "$TMPDIR/t53-ref-forged-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+MF="$D/.harness/runtime-manifest.jsonl"
+REL=".harness/logs/runs/run-1.ndjson"
+ART_SHA="$(_runtime_file_sha256 "$D/$REL")"
+ART_SIZE="$(wc -c < "$D/$REL" | tr -d ' \t\r')"
+_runtime_begin_init_pending "$D" "$HEAD_SHA" generated "$REL" ndjson "$ART_SHA" "$ART_SIZE"
+_runtime_init_registry "$D" "$MF"
+jq -cn --arg p "$REL" --arg k ndjson --arg h "$ART_SHA" --argjson s "$ART_SIZE" \
+  '{path:$p,kind:$k,sha256:$h,size:$s}' >> "$MF"
+printf '%s\n' '{"path":".harness/logs/runs/forged.ndjson","kind":"ndjson","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1}' >> "$MF"
+_runtime_prepare_empty_index "$D"
+_runtime_write_bootstrap_receipt "$D" "$MF" generated
+_runtime_commit_anchor "$D" "$MF"
+rm -f "$(_runtime_anchor_index "$D")" "$(_runtime_anchor_receipt "$D")"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" "$REL" ndjson >/dev/null 2>&1
+check "T53g: ref-present recovery rejects forged third record" 1 "$?"
+check "T53h: forged ref is never promoted to a verified anchor" 1 "$(_runtime_verify_registry_anchor "$D" "$MF" >/dev/null 2>&1; echo $?)"
+
+# Explicit-bootstrap recovery is bound to the exact registry SHA recorded by
+# its pending marker. A different but structurally valid ref must not be
+# adopted merely because its genesis is valid.
+D="$(mktemp -d "$TMPDIR/t53-explicit-sha-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+MF="$D/.harness/runtime-manifest.jsonl"
+_runtime_init_registry "$D" "$MF"
+EXPLICIT_EXPECTED_SHA="$(_runtime_file_sha256 "$MF")"
+_runtime_begin_init_pending "$D" "$HEAD_SHA" explicit "$EXPLICIT_EXPECTED_SHA"
+printf '%s\n' '{"path":".harness/logs/runs/other.ndjson","kind":"ndjson","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1}' >> "$MF"
+_runtime_prepare_empty_index "$D"
+_runtime_write_bootstrap_receipt "$D" "$MF" explicit
+_runtime_commit_anchor "$D" "$MF"
+rm -f "$(_runtime_anchor_index "$D")" "$(_runtime_anchor_receipt "$D")"
+_runtime_recover_generated_anchor "$D" "$MF" "$HEAD_SHA" explicit "$EXPLICIT_EXPECTED_SHA" >/dev/null 2>&1
+check "T53i: explicit recovery rejects ref whose registry SHA differs from marker" 1 "$?"
+
+# ---- T54: trusted registry/artifact deletion cannot disappear from the gate -
+D="$(mktemp -d "$TMPDIR/t54-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null 2>&1
+OUT="$(mf "$D" t54-registry)"
+dwm_emit_manifest "$D" "$OUT"
+rm -f "$D/.harness/runtime-manifest.jsonl"
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T54a: deleting trusted runtime registry is invalid" false "$(printf '%s' "$RES" | jq -r '.valid')"
+check "T54b: deleted trusted registry reports runtime_manifest_missing" 1 "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_manifest_missing")] | length')"
+
+# Deleting the registry AND every private Git anchor component must not
+# downgrade a repository that ships the runtime-manifest contract into a
+# legacy/no-registry project. Copying the contract source into this throwaway
+# repo models the applicability signal used by the production gate.
+mkdir -p "$D/core/lib"
+cp "$ROOT_DIR/core/lib/runtime-manifest.sh" "$D/core/lib/runtime-manifest.sh"
+rm -f "$(_runtime_anchor_index "$D")" "$(_runtime_anchor_receipt "$D")"
+git -C "$D" update-ref -d refs/harness/runtime-manifest >/dev/null 2>&1 || true
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T54c: deleting registry plus all anchors is still invalid" false "$(printf '%s' "$RES" | jq -r '.valid')"
+check "T54d: contract applicability blocks full-anchor downgrade" 1 "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_manifest_missing")] | length')"
+
+D="$(mktemp -d "$TMPDIR/t54-artifact-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null 2>&1
+OUT="$(mf "$D" t54-artifact)"
+dwm_emit_manifest "$D" "$OUT"
+rm -f "$D/.harness/logs/runs/run-1.ndjson"
+mkdir "$D/.harness/logs/runs/run-1.ndjson"
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T54e: type-replacing a registered artifact is invalid" false "$(printf '%s' "$RES" | jq -r '.valid')"
+check "T54f: registered type replacement is found by reverse traversal" 1 "$(printf '%s' "$RES" | jq '[.violations[] | select(.path == ".harness/logs/runs/run-1.ndjson" and .reason == "runtime_artifact_missing_or_not_regular")] | length')"
+
+# ---- T55: failed anchor update restores the exact pre-append registry ------
+D="$(mktemp -d "$TMPDIR/t55-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null 2>&1
+MF="$D/.harness/runtime-manifest.jsonl"
+BEFORE_SHA="$(_runtime_file_sha256 "$MF")"
+printf 'second run\n' > "$D/.harness/logs/runs/run-2.ndjson"
+ANCHOR_ORIGINAL="$(declare -f _runtime_anchor_registry)"
+eval "$(printf '%s\n' "$ANCHOR_ORIGINAL" | sed '1s/_runtime_anchor_registry/_t55_original_anchor_registry/')"
+T55_ANCHOR_CALLS=0
+_runtime_anchor_registry() {
+  T55_ANCHOR_CALLS=$((T55_ANCHOR_CALLS + 1))
+  [ "$T55_ANCHOR_CALLS" -gt 1 ] && _t55_original_anchor_registry "$@"
+}
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-2.ndjson" ndjson >/dev/null 2>&1
+T55_RC=$?
+unset -f _runtime_anchor_registry _t55_original_anchor_registry
+eval "$ANCHOR_ORIGINAL"
+check "T55a: injected anchor update failure propagates" 1 "$T55_RC"
+check "T55b: failed registration restores registry byte-for-byte" "$BEFORE_SHA" "$(_runtime_file_sha256 "$MF")"
+check "T55c: failed registration leaves no second path" 0 "$(jq -s '[.[] | select(.path? == ".harness/logs/runs/run-2.ndjson")] | length' "$MF")"
+check "T55d: restored registry still matches private anchor" 0 "$(_runtime_verify_registry_anchor "$D" "$MF" >/dev/null 2>&1; echo $?)"
+check "T55e: successful rollback removes recovery backup" 0 "$(find "$D/.git" -maxdepth 1 -type f -name 'runtime-manifest-backup.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
 
 echo ""
 echo "Dirty-Worktree-Manifest Results: $PASSED passed, $FAILED failed"

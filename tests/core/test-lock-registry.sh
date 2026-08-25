@@ -67,6 +67,7 @@ write_lock_meta() {
   printf '%s\n' "$host" > "$d/hostname"
   printf '%s\n' "$ts" > "$d/timestamp"
   printf '%s\n' "$tok" > "$d/token"
+  printf '%s\n' "$tok" > "$d/.ready"
 }
 
 # ============================================================================
@@ -539,6 +540,7 @@ WAITER_EOF
   fi
   rm -rf "$T13/lock" "$T13/holder_started" "$T13/waiter_started.waited"
 fi
+source "$CORE_LIB/runtime-manifest.sh"
 
 # ============================================================================
 # T14: flock nested distinct locks keep the outer lock held
@@ -613,6 +615,141 @@ NESTED_WAITER_EOF
   fi
   rm -rf "$T14/outer" "$T14/inner"
 fi
+
+# ============================================================================
+# T15: an atomically published claim always has complete readable metadata
+# ============================================================================
+echo ""
+echo "=== T15: published claim metadata is complete ==="
+T15="$TMPROOT/t15"
+T15_LEAF="$T15/.harness/.registry.lock/runtime-manifest"
+mkdir -p "$T15/.harness/.registry.lock"
+if _runtime_acquire "$T15"; then
+  T15_TOKEN="$LOCK_REGISTRY_TOKEN"
+  if [ -f "$T15_LEAF/.claim" ] && _lr_read_meta "$T15_LEAF" \
+      && [ "$LR_META_PROTOCOL" = "claim" ] \
+      && [ "$LR_META_TOKEN" = "$T15_TOKEN" ] \
+      && [ -f "$LR_META_DIR/.ready" ]; then
+    assert_pass "T15: visible atomic claim resolves to complete owner metadata"
+  else
+    assert_fail "T15: published claim metadata" "missing, incomplete, or token mismatch"
+  fi
+  _runtime_release "$T15" || assert_fail "T15: release complete claim" "rc=$?"
+else
+  assert_fail "T15: acquire runtime claim" "rc=$?"
+fi
+
+# ============================================================================
+# T16: a crashed creator's unpublished private candidate never blocks
+# ============================================================================
+echo ""
+echo "=== T16: unpublished private candidate does not block ==="
+T16="$TMPROOT/t16"
+T16_LEAF="$T16/lock"
+T16_ORPHAN="${T16_LEAF}.claim.orphan0123456789abcdef"
+mkdir -p "$T16_ORPHAN"
+printf '%s\n' 999999 > "$T16_ORPHAN/pid"
+if acquire_lock "$T16_LEAF" 3 >/dev/null; then
+  T16_TOKEN="$LOCK_REGISTRY_TOKEN"
+  if _lr_read_meta "$T16_LEAF" && [ "$LR_META_TOKEN" = "$T16_TOKEN" ] \
+      && [ -d "$T16_ORPHAN" ]; then
+    assert_pass "T16: unpublished partial candidate is invisible to ownership"
+  else
+    assert_fail "T16: acquire beside orphan candidate" "metadata mismatch or orphan removed"
+  fi
+  release_lock "$T16_LEAF" "$T16_TOKEN" || assert_fail "T16: release acquired claim" "rc=$?"
+else
+  assert_fail "T16: orphan candidate must not block" "rc=$?"
+fi
+
+# ============================================================================
+# T17: claim release cleanup is confined to the old owner's private metadata
+# ============================================================================
+echo ""
+echo "=== T17: release cannot delete a successor lock ==="
+T17="$TMPROOT/t17"
+T17_LEAF="$T17/lock"
+mkdir -p "$T17"
+if acquire_lock "$T17_LEAF" 3 >/dev/null; then
+  T17_OLD_TOKEN="$LOCK_REGISTRY_TOKEN"
+  T17_NEW_TOKEN="successortoken0123456789abcdef"
+  T17_NEW_META="${T17_LEAF}.claim.${T17_NEW_TOKEN}"
+  T17_INJECTED=0
+  rm() {
+    if [ "$T17_INJECTED" = "0" ] && [ "${*: -1}" = "${T17_LEAF}/.claim" ]; then
+      command rm "$@" || return $?
+      mkdir "$T17_NEW_META" || return 91
+      _lr_write_meta "$T17_NEW_META" "${BASHPID:-$$}" "" "$(_lr_my_hostname)" "$(_lr_now)" "$T17_NEW_TOKEN" || return 92
+      ln "$T17_NEW_META/.ready" "$T17_LEAF/.claim" || return 93
+      T17_INJECTED=1
+      return 0
+    fi
+    command rm "$@"
+  }
+  release_lock "$T17_LEAF" "$T17_OLD_TOKEN"
+  T17_RELEASE_RC=$?
+  unset -f rm
+  if [ "$T17_RELEASE_RC" = "0" ] && _lr_read_meta "$T17_LEAF" && [ "$LR_META_TOKEN" = "$T17_NEW_TOKEN" ]; then
+    assert_pass "T17: predecessor private cleanup preserves successor claim"
+  else
+    assert_fail "T17: successor survives predecessor release" "release_rc=$T17_RELEASE_RC injected=$T17_INJECTED"
+  fi
+  release_lock "$T17_LEAF" "$T17_NEW_TOKEN" || assert_fail "T17: successor release" "rc=$?"
+else
+  assert_fail "T17: acquire predecessor lock" "rc=$?"
+fi
+
+# ============================================================================
+# T18: a non-directory shared path is an obstacle, never followed/replaced
+# ============================================================================
+echo ""
+echo "=== T18: shared lock path obstacle fails closed ==="
+T18="$TMPROOT/t18"
+mkdir -p "$T18"
+printf '%s\n' obstacle > "$T18/lock"
+if acquire_lock "$T18/lock" 2 >/dev/null 2>&1; then
+  T18_TOKEN="$LOCK_REGISTRY_TOKEN"
+  release_lock "$T18/lock" "$T18_TOKEN" >/dev/null 2>&1 || true
+  assert_fail "T18: regular-file lock obstacle rejected" "unexpected acquisition"
+elif [ -f "$T18/lock" ] && [ "$(cat "$T18/lock")" = "obstacle" ]; then
+  assert_pass "T18: regular-file lock obstacle rejected without replacement"
+else
+  assert_fail "T18: obstacle preserved" "shared path changed"
+fi
+
+# ============================================================================
+# T19: flock unlock+close double failure is not post-release rc8
+# ============================================================================
+echo ""
+echo "=== T19: flock double release failure retains retryable ownership ==="
+T19="$TMPROOT/t19"
+mkdir -p "$T19/lock"
+T19_TOKEN="flockdoublefailure0123456789"
+printf '%s\n' "$T19_TOKEN" > "$T19/lock/.lr_owner"
+: > "$T19/lock/flock.lock"
+eval "exec 19>>\"$T19/lock/flock.lock\""
+T19_INDEX="$_LR_FLOCK_NEXT_INDEX"
+_LR_FLOCK_DIRS[$T19_INDEX]="$T19/lock"
+_LR_FLOCK_FDS[$T19_INDEX]=19
+_LR_FLOCK_TOKENS[$T19_INDEX]="$T19_TOKEN"
+_LR_FLOCK_NEXT_INDEX=$((_LR_FLOCK_NEXT_INDEX + 1))
+FLOCK_ORIGINAL="$(declare -f flock 2>/dev/null || true)"
+CLOSE_ORIGINAL="$(declare -f _lr_flock_close_fd)"
+flock() { return 1; }
+_lr_flock_close_fd() { return 1; }
+_lr_flock_release "$T19/lock" "$T19_TOKEN" >/dev/null 2>&1
+T19_RC=$?
+unset -f flock _lr_flock_close_fd
+[ -z "$FLOCK_ORIGINAL" ] || eval "$FLOCK_ORIGINAL"
+eval "$CLOSE_ORIGINAL"
+if [ "$T19_RC" = "7" ] && [ "${_LR_FLOCK_FDS[$T19_INDEX]:-}" = "19" ] \
+   && [ "$(cat "$T19/lock/.lr_owner" 2>/dev/null)" = "$T19_TOKEN" ]; then
+  assert_pass "T19: double failure returns hard failure and preserves mapping/sidecar"
+else
+  assert_fail "T19: double failure remains retryable" "rc=$T19_RC fd=${_LR_FLOCK_FDS[$T19_INDEX]:-missing}"
+fi
+eval "exec 19>&-"
+unset "_LR_FLOCK_DIRS[$T19_INDEX]" "_LR_FLOCK_FDS[$T19_INDEX]" "_LR_FLOCK_TOKENS[$T19_INDEX]"
 
 # ============================================================================
 # Summary

@@ -17,7 +17,7 @@
 #
 # Validation invariants (fail-closed, mirroring validate-run-log.sh style):
 #   - schema_version == 1
-#   - kind == "feature" | "phase" | "maintenance"   (kind schema SPLIT)
+#   - kind == "feature" | "phase" | "maintenance" | "reviewer"
 #   - feature records: feature_id matching ^[A-Z][A-Z0-9_-]*$, phase integer 1..5
 #   - phase records:    phase integer 1..5, feature_ids non-empty array of strings
 #   - maintenance records: feature_id matching ^[A-Z][A-Z0-9_-]*$; NO phase
@@ -93,6 +93,7 @@ _v_artifact_path() {
     feature)     printf '%s/.harness/reviews/feature/%s.jsonl' "$project_dir" "$id" ;;
     phase)       printf '%s/.harness/reviews/phase/%s.jsonl' "$project_dir" "$id" ;;
     maintenance) printf '%s/.harness/reviews/maintenance/%s.jsonl' "$project_dir" "$id" ;;
+    reviewer)    printf '%s/.harness/reviews/reviewer/%s.jsonl' "$project_dir" "$id" ;;
     *)           printf '' ;;
   esac
 }
@@ -335,8 +336,8 @@ verdict_validate_record() {
   local kind
   kind="$(printf '%s' "$rec" | jq -r '.kind // empty')"
   case "$kind" in
-    feature|phase|maintenance) ;;
-    *) echo "verdict: kind must be feature|phase|maintenance" >&2; return 1 ;;
+    feature|phase|maintenance|reviewer) ;;
+    *) echo "verdict: kind must be feature|phase|maintenance|reviewer" >&2; return 1 ;;
   esac
   # phase 1..5 is a feature/phase invariant. The maintenance kind is a
   # repository-level verdict (F-MAINT-01 and future maintenance features) NOT
@@ -348,7 +349,7 @@ verdict_validate_record() {
       return 1
     fi
   fi
-  if [ "$kind" = "feature" ] || [ "$kind" = "maintenance" ]; then
+  if [ "$kind" = "feature" ] || [ "$kind" = "maintenance" ] || [ "$kind" = "reviewer" ]; then
     local fid
     fid="$(printf '%s' "$rec" | jq -r '.feature_id // empty')"
     if ! printf '%s' "$fid" | grep -qE '^[A-Z][A-Z0-9_-]*$'; then
@@ -511,7 +512,7 @@ verdict_validate_record() {
   # feature's run. Phase records are not feature-scoped (no expect_fid).
   if [ "$verdict" = "PASS" ] && [ -n "$run_id" ]; then
     local pass_reason
-    if [ "$kind" = "feature" ] || [ "$kind" = "maintenance" ]; then
+    if [ "$kind" = "feature" ] || [ "$kind" = "maintenance" ] || [ "$kind" = "reviewer" ]; then
       pass_reason="$( _v_require_passed_fresh_run "$project_dir" "$run_id" "$head" "$fid" "$fresh" 2>&1 )"
     else
       pass_reason="$( _v_require_passed_fresh_run "$project_dir" "$run_id" "$head" "" "$fresh" 2>&1 )"
@@ -606,7 +607,7 @@ verdict_validate_file() {
         '{valid:false, reason:"kind_mismatch", line:$line, found:$found, expected:$expected}'
       return 1
     fi
-    if [ "$kind" = "feature" ] || [ "$kind" = "maintenance" ]; then
+    if [ "$kind" = "feature" ] || [ "$kind" = "maintenance" ] || [ "$kind" = "reviewer" ]; then
       local rfid
       rfid="$(printf '%s' "$rec" | jq -r '.feature_id')"
       if [ "$rfid" != "$id" ]; then
@@ -727,15 +728,28 @@ verdict_append_record() {
     fi
     if [ "$rc" -eq 0 ]; then
       mkdir -p "$(dirname "$path")"
-      local path_existed=0 old_size=0 rollback_tmp=""
+      local path_existed=0 old_size=0 rollback_tmp="" append_tmp=""
+      if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
+        echo "verdict: artifact path is not a regular non-symlink file: $path" >&2
+        rc=1
+      fi
       if [ -f "$path" ]; then
         path_existed=1
         old_size="$(wc -c < "$path" | tr -d '[:space:]')"
       fi
-      printf '%s' "$rec" | jq -c . >> "$path" || {
-        echo "verdict: append failed for $path" >&2
+      append_tmp="${path}.append.$$"
+      if [ "$path_existed" = "1" ]; then
+        cp "$path" "$append_tmp" 2>/dev/null || rc=1
+      else
+        : > "$append_tmp" 2>/dev/null || rc=1
+      fi
+      if [ "$rc" -eq 0 ] && { ! printf '%s\n' "$rec" >> "$append_tmp" 2>/dev/null \
+         || ! mv "$append_tmp" "$path" 2>/dev/null; }; then
+        echo "verdict: fail-atomic append failed for $path" >&2
+        rm -f "$append_tmp"
         rc=1
-      }
+      fi
+      [ "$rc" -eq 0 ] || rm -f "$append_tmp"
       if [ "$rc" -eq 0 ]; then
         # Codex r7 + rc6 final remediation: bind the verdict's first-seen bytes
         # in the runtime-manifest registry so the DWM gate enforces append-only
@@ -762,7 +776,27 @@ verdict_append_record() {
     fi
   } || rc=1
 
-  release_lock "$lock_dir" "$lock_token" || true
+  local release_rc=0
+  release_lock "$lock_dir" "$lock_token" || release_rc=$?
+  if [ "$release_rc" -ne 0 ]; then
+    # rc=8 is post-release cleanup only: publication is durable and ownership
+    # is already detached, so retrying would create a duplicate logical
+    # attempt. rc=6/7 means the lock was NOT released; never misreport that as
+    # a harmless cleanup warning even when the data commit can be proven.
+    local committed_latest="" committed_mf=""
+    committed_latest="$(tail -1 "$path" 2>/dev/null || true)"
+    committed_mf="$(runtime_manifest_path "$project_dir" 2>/dev/null || true)"
+    if [ "$release_rc" -eq 8 ] && [ "$rc" -eq 0 ] && [ "$committed_latest" = "$rec" ] \
+       && [ -f "$committed_mf" ] \
+       && jq -s -e --arg p ".harness/reviews/$kind/$id.jsonl" \
+            'any(.[]; .path? == $p and .kind == "verdict")' "$committed_mf" >/dev/null 2>&1 \
+       && _runtime_verify_registry_anchor "$project_dir" "$committed_mf" >/dev/null 2>&1; then
+      echo "verdict-artifact: commit durable; verdict lock cleanup failed" >&2
+    else
+      echo "verdict-artifact: verdict lock was not released (rc=$release_rc)" >&2
+      rc=1
+    fi
+  fi
 
   if [ "$rc" -ne 0 ]; then
     return 1

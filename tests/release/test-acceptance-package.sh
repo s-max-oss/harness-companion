@@ -69,7 +69,7 @@ Head:                $SYN_HEAD
 Run ID:              $SYN_RUN_ID
 Formal DWM exit:     0
 ----- BEGIN formal pre-publication DWM transcript -----
-{"valid":true,"violations":[]}
+{"valid":true,"violations":[],"allowed_new":[],"new_non_mutable":[],"changed_mutable":[],"appended_mutable":[],"feature_revision_advanced":[],"content_changed_mutable":[],"runtime_paired_rewrite":[],"paired_rewrite_violations":[]}
 ----- END formal pre-publication DWM transcript -----
 EOF
 AG_SHA="$(sha256_of "$TMPDIR_PKG/A-G.log")"
@@ -90,7 +90,7 @@ MV_SHA="$(sha256_of "$TMPDIR_PKG/maintenance.jsonl")"
 # Synthetic reviewer_verdict — must end with a line binding head_sha to HEAD
 # and verdict=PASS, run_id matching.
 cat > "$TMPDIR_PKG/reviewer.jsonl" <<EOF
-{"verdict":"PASS","head_sha":"$SYN_HEAD","run_id":"$SYN_RUN_ID","recorded_at":"2026-08-19T12:00:04Z"}
+{"schema_version":1,"kind":"reviewer","feature_id":"F-MAINT-01","attempt":1,"verdict":"PASS","base_sha":"$SYN_HEAD","head_sha":"$SYN_HEAD","run_id":"$SYN_RUN_ID","reviewer_host":"subagent","checked":["synthetic"],"reason":"synthetic reviewer fixture","recorded_at":"2026-08-19T12:00:04Z"}
 EOF
 RV_SHA="$(sha256_of "$TMPDIR_PKG/reviewer.jsonl")"
 
@@ -109,6 +109,7 @@ cat > "$TMPDIR_PKG/acceptance.json" <<EOF
   "duration_ms": 1000,
   "effective_timeout": 300,
   "config_sha256": "$SYN_CFG",
+  "canonical_command": "bash tests/run-all.sh",
   "canonical_ndjson":   {"path":"$TMPDIR_PKG/canonical.ndjson",   "sha256":"$NDJSON_SHA"},
   "full_suite_log":     {"path":"$TMPDIR_PKG/full-suite.log",    "sha256":"$FSL_SHA"},
   "maintenance_verdict":{"path":"$TMPDIR_PKG/maintenance.jsonl",  "sha256":"$MV_SHA"},
@@ -242,6 +243,55 @@ if [ "$rc" != "0" ] && printf '%s' "$result" | jq -e '.valid == false' >/dev/nul
 else
   fail "validator accepted A-G.log without formal DWM transcript: $result"
 fi
+
+# ---- Negative 9: duplicate transcript markers are ambiguous ----------------
+cp -r "$TMPDIR_PKG/." "$TMPDIR_NEG/"
+printf '%s\n' '----- BEGIN formal pre-publication DWM transcript -----' >> "$TMPDIR_NEG/A-G.log"
+NEW_AG_SHA="$(sha256_of "$TMPDIR_NEG/A-G.log")"
+sed -i "s/\"sha256\":\"$AG_SHA\"/\"sha256\":\"$NEW_AG_SHA\"/" "$TMPDIR_NEG/acceptance.json"
+result="$(validate_acceptance_package "$TMPDIR_NEG" 2>&1)"; rc=$?
+if [ "$rc" != "0" ]; then pass "validator rejects duplicate DWM transcript marker"; else fail "validator accepted duplicate transcript marker" "$result"; fi
+
+# ---- Negative 10: valid=true cannot coexist with blocking DWM arrays --------
+cp -r "$TMPDIR_PKG/." "$TMPDIR_NEG/"
+sed -i 's/"new_non_mutable":\[\]/"new_non_mutable":["forged"]/' "$TMPDIR_NEG/A-G.log"
+NEW_AG_SHA="$(sha256_of "$TMPDIR_NEG/A-G.log")"
+sed -i "s/\"sha256\":\"$AG_SHA\"/\"sha256\":\"$NEW_AG_SHA\"/" "$TMPDIR_NEG/acceptance.json"
+result="$(validate_acceptance_package "$TMPDIR_NEG" 2>&1)"; rc=$?
+if [ "$rc" != "0" ]; then pass "validator rejects semantically inconsistent DWM transcript"; else fail "validator accepted inconsistent transcript" "$result"; fi
+
+# ---- Negative 11: markers must be ordered begin before end ------------------
+cp -r "$TMPDIR_PKG/." "$TMPDIR_NEG/"
+sed -i 's/BEGIN formal/__SWAP__/; s/END formal/BEGIN formal/; s/__SWAP__/END formal/' "$TMPDIR_NEG/A-G.log"
+NEW_AG_SHA="$(sha256_of "$TMPDIR_NEG/A-G.log")"
+sed -i "s/\"sha256\":\"$AG_SHA\"/\"sha256\":\"$NEW_AG_SHA\"/" "$TMPDIR_NEG/acceptance.json"
+result="$(validate_acceptance_package "$TMPDIR_NEG" 2>&1)"; rc=$?
+if [ "$rc" != "0" ]; then pass "validator rejects reversed DWM markers"; else fail "validator accepted reversed markers"; fi
+
+# ---- Negative 12: transcript schema is exact (no fabricated extra keys) -----
+cp -r "$TMPDIR_PKG/." "$TMPDIR_NEG/"
+sed -i 's/{"valid":true/{"fabricated":true,"valid":true/' "$TMPDIR_NEG/A-G.log"
+NEW_AG_SHA="$(sha256_of "$TMPDIR_NEG/A-G.log")"
+sed -i "s/\"sha256\":\"$AG_SHA\"/\"sha256\":\"$NEW_AG_SHA\"/" "$TMPDIR_NEG/acceptance.json"
+result="$(validate_acceptance_package "$TMPDIR_NEG" 2>&1)"; rc=$?
+if [ "$rc" != "0" ]; then pass "validator rejects extra DWM transcript keys"; else fail "validator accepted extra transcript key"; fi
+
+# ---- Negative 13: paired runtime rewrite cannot coexist with valid=true -----
+cp -r "$TMPDIR_PKG/." "$TMPDIR_NEG/"
+sed -i 's/"runtime_paired_rewrite":\[\]/"runtime_paired_rewrite":["forged"]/' "$TMPDIR_NEG/A-G.log"
+NEW_AG_SHA="$(sha256_of "$TMPDIR_NEG/A-G.log")"
+sed -i "s/\"sha256\":\"$AG_SHA\"/\"sha256\":\"$NEW_AG_SHA\"/" "$TMPDIR_NEG/acceptance.json"
+result="$(validate_acceptance_package "$TMPDIR_NEG" 2>&1)"; rc=$?
+if [ "$rc" != "0" ]; then pass "validator rejects non-empty runtime paired rewrite"; else fail "validator accepted paired runtime rewrite"; fi
+
+# ---- Negative 14: Reviewer lifecycle requires contiguous attempt numbers ---
+cp -r "$TMPDIR_PKG/." "$TMPDIR_NEG/"
+jq 'del(.attempt)' "$TMPDIR_NEG/reviewer.jsonl" > "$TMPDIR_NEG/reviewer.tmp"
+mv "$TMPDIR_NEG/reviewer.tmp" "$TMPDIR_NEG/reviewer.jsonl"
+NEW_RV_SHA="$(sha256_of "$TMPDIR_NEG/reviewer.jsonl")"
+sed -i "s/\"sha256\":\"$RV_SHA\"/\"sha256\":\"$NEW_RV_SHA\"/" "$TMPDIR_NEG/acceptance.json"
+result="$(validate_acceptance_package "$TMPDIR_NEG" 2>&1)"; rc=$?
+if [ "$rc" != "0" ]; then pass "validator rejects Reviewer lifecycle without attempt"; else fail "validator accepted Reviewer lifecycle without attempt"; fi
 
 echo "=== Acceptance Package (shape) Test Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] && exit 0 || exit 1

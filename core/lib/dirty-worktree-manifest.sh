@@ -205,10 +205,20 @@ dwm_record() {
     target="$(readlink "$rel" 2>/dev/null || true)"
   elif [ -d "$rel" ]; then
     typ="directory"
-  else
+  elif [ -f "$rel" ]; then
     sha="$( { sha256sum "$rel" 2>/dev/null || shasum -a 256 "$rel" 2>/dev/null; } | awk '{print $1}' )"
     size="$(wc -c < "$rel" 2>/dev/null | tr -d ' \t\r')"
     mode="$(stat -c %a "$rel" 2>/dev/null || stat -f %Lp "$rel" 2>/dev/null || true)"
+  elif [ -p "$rel" ]; then
+    typ="fifo"
+  elif [ -S "$rel" ]; then
+    typ="socket"
+  elif [ -b "$rel" ]; then
+    typ="block_device"
+  elif [ -c "$rel" ]; then
+    typ="char_device"
+  else
+    typ="other"
   fi
   local revarg regarg
   if [ "$rel" = "feature_list.json" ]; then
@@ -332,9 +342,27 @@ dwm_emit_manifest() {
         case "$rpath" in
           *.ndjson|*.log) dwm_record ".harness/logs/runs/$rpath" "!!" ;;
         esac
-      done < <(cd ".harness/logs/runs" && find . \( -name '*.ndjson' -o -name '*.log' \) -type f -printf '%P\n' 2>/dev/null \
+      done < <(cd ".harness/logs/runs" && find . \( -name '*.ndjson' -o -name '*.log' \) -printf '%P\n' 2>/dev/null \
         | sed 's|^\./||' | LC_ALL=C sort)
     fi
+
+    # The review and acceptance namespaces are gitignored runtime state too.
+    # Enumerate every matching filesystem node, not only regular files: a FIFO,
+    # socket, device, or symlink at a protected artifact path must reach the
+    # fail-closed type checks instead of disappearing from the current manifest.
+    local runtime_root runtime_rel
+    for runtime_root in ".harness/reviews" ".harness/acceptance"; do
+      [ -d "$runtime_root" ] || continue
+      while IFS= read -r runtime_rel; do
+        [ -n "$runtime_rel" ] || continue
+        case "$runtime_root/$runtime_rel" in
+          .harness/reviews/*.jsonl|.harness/reviews/*/*.jsonl|.harness/acceptance/*/acceptance.json|.harness/acceptance/*/A-G.log)
+            dwm_record "$runtime_root/$runtime_rel" "!!"
+            ;;
+        esac
+      done < <(cd "$runtime_root" && find . -mindepth 1 -printf '%P\n' 2>/dev/null \
+        | sed 's|^\./||' | LC_ALL=C sort)
+    done
   ) > "$tmp"
   local rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -594,11 +622,11 @@ dwm_compare_manifest() {
   # independent of the recorded fixture.
   #
   # Protection layers (rc6 final):
-  #   1. Genesis anchor (line 0 of the registry) MUST equal the HEAD OID that
-  #      authorized this registry's creation. The DWM gate compares the
-  #      committed `git rev-parse HEAD:<registry path>` (or the explicit
-  #      RUNTIME_MANIFEST_GENESIS env var, if set) byte-for-byte against the
-  #      in-tree genesis line. Any drift = fail-closed.
+  #   1. Genesis + append-only transitions identify the current authorized
+  #      HEAD. A dedicated Git index in .git binds the exact registry bytes;
+  #      DWM requires byte equality with its stage-0 blob and also compares the
+  #      effective anchor with current HEAD (or RUNTIME_MANIFEST_GENESIS).
+  #      Any drift = fail-closed.
   #   2. A REGISTERED artifact that changed is a violation:
   #        ndjson/log → runtime_artifact_not_byte_equal
   #        verdict    → runtime_artifact_not_append_only
@@ -609,16 +637,50 @@ dwm_compare_manifest() {
   #      register before the gate runs.
   #   4. Malformed registry / duplicate path lines / missing genesis line all
   #      fail-closed (no silent `reg_json="[]"` fallback).
-  if [ -f "$project_dir/.harness/runtime-manifest.jsonl" ]; then
+  local runtime_registry_path="$project_dir/.harness/runtime-manifest.jsonl"
+  local runtime_anchor_present=0 runtime_namespace_present=0 runtime_idx="" runtime_receipt="" runtime_ref="refs/harness/runtime-manifest"
+  if ! type _runtime_validate_registry >/dev/null 2>&1 && [ -f "$project_dir/core/lib/runtime-manifest.sh" ]; then
+    # shellcheck source=runtime-manifest.sh
+    . "$project_dir/core/lib/runtime-manifest.sh"
+  fi
+  if type _runtime_anchor_index >/dev/null 2>&1; then
+    runtime_idx="$(_runtime_anchor_index "$project_dir" 2>/dev/null || true)"
+    runtime_receipt="$(_runtime_anchor_receipt "$project_dir" 2>/dev/null || true)"
+    if { [ -n "$runtime_idx" ] && { [ -e "$runtime_idx" ] || [ -L "$runtime_idx" ]; }; } \
+       || { [ -n "$runtime_receipt" ] && { [ -e "$runtime_receipt" ] || [ -L "$runtime_receipt" ]; }; } \
+       || git -C "$project_dir" show-ref --verify --quiet "$runtime_ref" 2>/dev/null; then
+      runtime_anchor_present=1
+    fi
+  fi
+  runtime_namespace_present="$(jq -sr '
+    [.[] | select(.path | test("^\\.harness/logs/runs/.*\\.(ndjson|log)$|^\\.harness/reviews/.*\\.jsonl$|^\\.harness/acceptance/[0-9a-f]+/(acceptance\\.json|A-G\\.log)$"))] | length
+  ' "$cur_file" 2>/dev/null)"
+  if [ -L "$runtime_registry_path" ] || { [ -e "$runtime_registry_path" ] && [ ! -f "$runtime_registry_path" ]; }; then
+    mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_not_regular"}')")
+  elif [ -f "$runtime_registry_path" ]; then
     local reg_json reg_dup reg_genesis reg_genesis_expected reg_entry_count
-    if ! reg_json="$(jq -s '.' "$project_dir/.harness/runtime-manifest.jsonl" 2>/dev/null)"; then
+    # Validate the append-only anchor-transition hash chain with the same
+    # structural validator used by writers.  Merely selecting the last `to`
+    # value would let a fabricated transition replace the trust root.
+    if type _runtime_validate_registry >/dev/null 2>&1; then
+      if ! _runtime_validate_registry "$project_dir" "$runtime_registry_path" >/dev/null 2>&1; then
+        mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_anchor_chain_invalid"}')")
+      fi
+      if ! type _runtime_verify_registry_anchor >/dev/null 2>&1 \
+         || ! _runtime_verify_registry_anchor "$project_dir" "$runtime_registry_path" >/dev/null 2>&1; then
+        mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_index_anchor_mismatch"}')")
+      fi
+    else
+      mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_validator_missing"}')")
+    fi
+    if ! reg_json="$(jq -s '.' "$runtime_registry_path" 2>/dev/null)"; then
       # Malformed registry → fail-closed (never silently drop the binding).
       mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_invalid"}')")
       reg_json="[]"
     fi
     # A duplicate path line would let a later (tampered) line rebind an earlier
     # registration; reject the registry wholesale.
-    reg_dup="$(printf '%s' "$reg_json" | jq -r '[group_by(.path)[] | select(length > 1) | .[0].path] | length' 2>/dev/null)"
+    reg_dup="$(printf '%s' "$reg_json" | jq -r '[map(select(.path? != null)) | group_by(.path)[] | select(length > 1) | .[0].path] | length' 2>/dev/null)"
     if [ "$reg_dup" != "0" ] && [ -n "$reg_dup" ]; then
       mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_duplicate_path"}')")
     fi
@@ -636,7 +698,7 @@ dwm_compare_manifest() {
        && git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
       reg_genesis_expected="$(git -C "$project_dir" rev-parse HEAD 2>/dev/null)"
     fi
-    reg_genesis="$(printf '%s' "$reg_json" | jq -r '.[0].genesis // empty' 2>/dev/null)"
+    reg_genesis="$(printf '%s' "$reg_json" | jq -r 'reduce .[] as $o (""; if ($o.genesis? | type) == "string" then $o.genesis elif ($o.anchor_transition? | type) == "object" then $o.anchor_transition.to else . end)' 2>/dev/null)"
     reg_entry_count="$(printf '%s' "$reg_json" | jq -r 'length' 2>/dev/null)"
     if [ -z "$reg_genesis" ]; then
       mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_genesis_missing"}')")
@@ -645,7 +707,47 @@ dwm_compare_manifest() {
         '{path:$p, reason:"runtime_manifest_genesis_mismatch", expected:$e, actual:$a}')")
     fi
 
-    local cpath centry ckind csha rsha rsize actual
+    # First walk the trusted registry so a deleted or type-replaced artifact
+    # cannot disappear from a current-manifest-driven loop.
+    local cpath centry ckind rsha rsize actual
+    while IFS= read -r centry; do
+      [ -n "$centry" ] || continue
+      cpath="$(printf '%s' "$centry" | jq -r '.path // empty')"
+      ckind="$(printf '%s' "$centry" | jq -r '.kind // empty')"
+      rsha="$(printf '%s' "$centry" | jq -r '.sha256 // empty')"
+      rsize="$(printf '%s' "$centry" | jq -r '.size // -1')"
+      [ -n "$cpath" ] || continue
+      case "$cpath" in
+        ".harness/logs/runs/"*.ndjson|".harness/logs/runs/"*.log|".harness/reviews/"*.jsonl|".harness/acceptance/"*/acceptance.json|".harness/acceptance/"*/A-G.log) ;;
+        *) continue ;;
+      esac
+      if [ -L "$project_dir/$cpath" ] || [ ! -f "$project_dir/$cpath" ]; then
+        mutable_violations+=("$(jq -nc --arg p "$cpath" '{path:$p, reason:"runtime_artifact_missing_or_not_regular"}')")
+        continue
+      fi
+      if [ "$ckind" = "verdict" ]; then
+        actual="$(head -c "$rsize" "$project_dir/$cpath" 2>/dev/null | {
+          if type _runtime_stdin_sha256 >/dev/null 2>&1; then
+            _runtime_stdin_sha256
+          elif command -v sha256sum >/dev/null 2>&1; then
+            sha256sum | awk '{print $1}'
+          else
+            shasum -a 256 | awk '{print $1}'
+          fi
+        } 2>/dev/null)"
+        if [ -z "$actual" ] || [ "$actual" != "$rsha" ]; then
+          mutable_violations+=("$(jq -nc --arg p "$cpath" '{path:$p, reason:"runtime_artifact_not_append_only"}')")
+        fi
+      else
+        actual="$(_runtime_file_sha256 "$project_dir/$cpath" 2>/dev/null || true)"
+        if [ -z "$actual" ] || [ "$actual" != "$rsha" ]; then
+          mutable_violations+=("$(jq -nc --arg p "$cpath" '{path:$p, reason:"runtime_artifact_not_byte_equal"}')")
+        fi
+      fi
+    done <<<"$(printf '%s' "$reg_json" | jq -c '.[] | select(.path? != null)' 2>/dev/null)"
+
+    # Then walk the current runtime namespace solely to reject unregistered
+    # additions (including symlink replacements).
     while IFS= read -r cpath; do
       [ -n "$cpath" ] || continue
       case "$cpath" in
@@ -654,8 +756,6 @@ dwm_compare_manifest() {
         ".harness/reviews/"*.jsonl)    ckind="verdict" ;;
         ".harness/acceptance/"*/acceptance.json) ckind="acceptance" ;;
         ".harness/acceptance/"*/A-G.log)          ckind="log" ;;
-        ".harness/acceptance/.lock/"*)            continue ;;
-        ".harness/acceptance/"*)                  ckind="acceptance" ;;
         *) continue ;;
       esac
       centry="$(printf '%s' "$reg_json" | jq -c --arg p "$cpath" 'map(select(.path == $p)) | .[0] // null' 2>/dev/null)"
@@ -668,24 +768,17 @@ dwm_compare_manifest() {
           '{path:$p, reason:"runtime_artifact_unregistered", kind:$k}')")
         continue
       fi
-      csha="$(jq -r --arg p "$cpath" 'select(.path == $p) | .sha256 // ""' "$cur_file" | head -1)"
-      rsha="$(printf '%s' "$centry" | jq -r '.sha256 // ""')"
-      rsize="$(printf '%s' "$centry" | jq -r '.size // 0')"
-      if [ "$ckind" = "verdict" ]; then
-        # append-only: the registered bytes must remain a PREFIX of current.
-        actual="$(head -c "$rsize" "$project_dir/$cpath" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}')"
-        if [ -n "$actual" ] && [ "$actual" = "$rsha" ]; then
-          :
-        else
-          mutable_violations+=("$(jq -nc --arg p "$cpath" '{path:$p, reason:"runtime_artifact_not_append_only"}')")
-        fi
-      else
-        # byte-immutable: current sha must equal the registered first-seen sha.
-        if [ -n "$csha" ] && [ "$csha" != "$rsha" ]; then
-          mutable_violations+=("$(jq -nc --arg p "$cpath" '{path:$p, reason:"runtime_artifact_not_byte_equal"}')")
-        fi
-      fi
-    done <<<"$(jq -r 'select(.type == "file") | .path' "$cur_file" | tr -d '\r')"
+    done <<<"$(jq -r '.path' "$cur_file" | tr -d '\r')"
+  elif [ "$runtime_anchor_present" = "1" ] \
+       || { [ -n "${RUNTIME_MANIFEST_GENESIS:-}" ] && [ "${runtime_namespace_present:-0}" -gt 0 ]; } \
+       || { [ -f "$project_dir/core/lib/runtime-manifest.sh" ] && [ "${runtime_namespace_present:-0}" -gt 0 ]; }; then
+    # A repository that ships the runtime-manifest contract cannot become a
+    # pre-registry repository merely by deleting all three Git anchor parts
+    # together with the registry. Runtime artifacts plus the in-repo contract
+    # make the registry mandatory; this closes the "delete every trust-root
+    # component" downgrade while leaving older projects that do not implement
+    # this contract unaffected.
+    mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_missing"}')")
   fi
 
   rm -f "$cur_file"

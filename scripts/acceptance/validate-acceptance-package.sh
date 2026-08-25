@@ -258,7 +258,14 @@ validate_acceptance_package() {
     _emit_result false "reviewer_verdict.path missing or does not exist"
     return 1
   fi
-  if ! jq -s -e '
+  # A project-backed validation delegates the complete lifecycle to the one
+  # canonical verdict validator below. That validator intentionally preserves
+  # the immutable pre-attempt Reviewer prefix while requiring every current
+  # record (especially the latest record) to use the strict numeric schema.
+  # Reimplementing the lifecycle here rejected that valid historical prefix
+  # before the canonical validator could inspect it. Project-agnostic packages
+  # have no canonical validator context, so retain the standalone shape check.
+  if [ -z "$project_dir" ] && ! jq -s -e '
       length > 0 and ([.[].attempt] == [range(1; length + 1)]) and all(.[];
         ((.schema_version | type) == "number") and .schema_version == 1
         and .kind == "reviewer" and .feature_id == "F-MAINT-01"

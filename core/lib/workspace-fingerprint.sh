@@ -53,6 +53,7 @@ BUILTIN_EXCLUDES=(
   ".harness/reviews/"
   ".harness/acceptance/"
   ".harness/.registry.lock/"
+  ".harness/*.lock.claim.*/*"
   ".harness/*.tmp.*"
   ".harness/branch-gate.json"
   ".harness/registry-journal.ndjson"

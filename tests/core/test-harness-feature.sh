@@ -126,7 +126,10 @@ EOF
       # and gives the evidence run a genuine revision to match.
       git add -A
       git commit -qm "seed evidence base"
-      bash "$ROOT_DIR/core/harness-verify.sh" "$id" --write >/dev/null 2>&1 || true
+      if ! bash "$ROOT_DIR/core/harness-verify.sh" "$id" --write; then
+        echo "seed_feature: harness-verify failed for feature '$id'" >&2
+        return 1
+      fi
       # harness-verify --write doesn't change status; if seed asked for a
       # non-in_progress starting state, set it now (and bump revision).
       if [ "$state" != "in_progress" ]; then
@@ -253,7 +256,7 @@ for row in "${LEGAL_EDGES[@]}"; do
       assert_pass "F3[${idx}]: $FROM → $TO (revision +1)"
     fi
   else
-    assert_fail "F3[${idx}]: $FROM → $TO" "rc=$RC post_status=$POST_STATUS diff=$DIFF rev_after=$REV_AFTER"
+    assert_fail "F3[${idx}]: $FROM → $TO" "rc=$RC post_status=$POST_STATUS diff=$DIFF rev_after=$REV_AFTER out=$OUT"
   fi
 done
 

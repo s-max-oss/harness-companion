@@ -184,7 +184,7 @@ _acquire_lock_in_caller() {
   # LOCK_TIMEOUT_S env override allows tests to give a wider contention budget
   # on slow filesystems (e.g. MSYS) without changing production defaults.
   local lock_timeout="${LOCK_TIMEOUT_S:-10}"
-  if ! acquire_lock "$lock_dir" "$lock_timeout"; then
+  if ! acquire_lock "$lock_dir" "$lock_timeout" >/dev/null; then
     echo "harness-feature: lock_timeout — could not acquire registry lock after ${lock_timeout}s" >&2
     return 7
   fi

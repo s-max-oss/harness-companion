@@ -896,6 +896,22 @@ check "MAINT-6a: attempt 1 on first append" 1 "$(printf '%s' "$M6A" | jq '.attem
 check "MAINT-6b: attempt 2 on second append" 2 "$(printf '%s' "$M6B" | jq '.attempt')"
 check "MAINT-6c: maintenance file validates" true "$(verdict_validate_file "$D" maintenance F-MAINT-01 | jq -r '.valid')"
 
+# MAINT-6d: a historical attempted row with the old string schema remains
+# append-only context; a new strict row continues the attempt sequence and is
+# solely responsible for current validity.
+D="$(mktemp -d "$TMPDIR/maint6d-XXXX")"
+ginit "$D"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+mkdir -p "$D/.harness/reviews/maintenance"
+maintenance_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD" \
+  | jq -c '.schema_version = "1" | .attempt = 1' \
+  > "$D/.harness/reviews/maintenance/F-MAINT-01.jsonl"
+M6D="$(verdict_append_record "$D" maintenance F-MAINT-01 "$(maintenance_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD")")"
+check "MAINT-6d: strict row continues legacy attempt sequence" 2 "$(printf '%s' "$M6D" | jq '.attempt')"
+M6D_VALID="$(verdict_validate_file "$D" maintenance F-MAINT-01)"
+check "MAINT-6e: string-schema history plus strict latest validates" true "$(printf '%s' "$M6D_VALID" | jq -r '.valid')"
+check "MAINT-6f: attempted legacy row count is reported" 1 "$(printf '%s' "$M6D_VALID" | jq -r '.legacy_records')"
+
 # MAINT-7: maintenance record feature_id must match the file id (validate_file)
 D="$(mktemp -d "$TMPDIR/maint7-XXXX")"
 ginit "$D"
@@ -962,6 +978,57 @@ eval "$ACQUIRE_LOCK_ORIGINAL"
 check "REVIEWER-1a: writer appends Reviewer attempt 1" 1 "$(printf '%s' "$R1" | jq '.attempt')"
 check "REVIEWER-1b: writer acquires canonical Reviewer source lock" 1 "$(grep -Fxc "$D/.harness/.registry.lock/verdict-reviewer-F-MAINT-01" "$LOCK_TRACE")"
 check "REVIEWER-1c: Reviewer file validates" true "$(verdict_validate_file "$D" reviewer F-MAINT-01 | jq -r '.valid')"
+
+# REVIEWER-1d: append-only compatibility for the pre-attempt Reviewer writer.
+# The immutable legacy prefix is preserved byte-for-byte; the formal lifecycle
+# begins at attempt 1 and the latest strict record decides current validity.
+D="$(mktemp -d "$TMPDIR/reviewer1d-XXXX")"
+ginit "$D"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+mkdir -p "$D/.harness/reviews/reviewer"
+reviewer_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD" \
+  | jq -c '.schema_version = "1" | del(.attempt)' \
+  > "$D/.harness/reviews/reviewer/F-MAINT-01.jsonl"
+R1D="$(verdict_append_record "$D" reviewer F-MAINT-01 "$(reviewer_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD")")"
+check "REVIEWER-1d: formal suffix starts at attempt 1" 1 "$(printf '%s' "$R1D" | jq '.attempt')"
+R1D_VALID="$(verdict_validate_file "$D" reviewer F-MAINT-01)"
+check "REVIEWER-1e: legacy prefix plus strict suffix validates" true "$(printf '%s' "$R1D_VALID" | jq -r '.valid')"
+check "REVIEWER-1f: legacy prefix count is reported" 1 "$(printf '%s' "$R1D_VALID" | jq -r '.legacy_records')"
+
+# A legacy record may never appear after the formal lifecycle has started.
+reviewer_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD" \
+  | jq -c '.schema_version = "1" | del(.attempt)' \
+  >> "$D/.harness/reviews/reviewer/F-MAINT-01.jsonl"
+R1D_BAD="$(verdict_validate_file "$D" reviewer F-MAINT-01)"
+check "REVIEWER-1g: legacy record after formal suffix rejected" attempt_gap_or_dup "$(printf '%s' "$R1D_BAD" | jq -r '.reason')"
+
+# A legacy-only file is historical context, not a current formal verdict.
+D="$(mktemp -d "$TMPDIR/reviewer1h-XXXX")"
+ginit "$D"
+HEAD="$(git -C "$D" rev-parse HEAD)"
+mkdir -p "$D/.harness/reviews/reviewer"
+reviewer_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD" \
+  | jq -c '.schema_version = "1" | del(.attempt)' \
+  > "$D/.harness/reviews/reviewer/F-MAINT-01.jsonl"
+R1H_BAD="$(verdict_validate_file "$D" reviewer F-MAINT-01)"
+check "REVIEWER-1h: legacy-only Reviewer file rejected" formal_attempt_missing "$(printf '%s' "$R1H_BAD" | jq -r '.reason')"
+
+# Only an absent attempt field is pre-attempt history. Null, empty-string and
+# string-valued attempts are malformed, even on historical string-schema rows.
+for BAD_ATTEMPT in 'null' '""' '"1"'; do
+  D="$(mktemp -d "$TMPDIR/reviewer1i-XXXX")"
+  ginit "$D"
+  HEAD="$(git -C "$D" rev-parse HEAD)"
+  mkdir -p "$D/.harness/reviews/reviewer"
+  reviewer_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD" \
+    | jq -c --argjson bad "$BAD_ATTEMPT" '.schema_version = "1" | .attempt = $bad' \
+    > "$D/.harness/reviews/reviewer/F-MAINT-01.jsonl"
+  reviewer_rec "$D" F-MAINT-01 FAIL "" "$HEAD" "$HEAD" \
+    | jq -c '.attempt = 1' \
+    >> "$D/.harness/reviews/reviewer/F-MAINT-01.jsonl"
+  R1I_BAD="$(verdict_validate_file "$D" reviewer F-MAINT-01)"
+  check "REVIEWER-1i: malformed present attempt $BAD_ATTEMPT rejected" invalid_attempt "$(printf '%s' "$R1I_BAD" | jq -r '.reason')"
+done
 
 # REVIEWER-2: rc=8 is a post-release private-cleanup warning.  Once both the
 # verdict bytes and runtime registration are durable, the writer must return

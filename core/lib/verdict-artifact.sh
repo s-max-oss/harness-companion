@@ -440,7 +440,7 @@ verdict_validate_record() {
       return 1
     fi
   fi
-  if ! printf '%s' "$rec" | jq -e '(.attempt | type) == "number" and .attempt >= 1' >/dev/null 2>&1; then
+  if ! printf '%s' "$rec" | jq -e '(.attempt | type) == "number" and .attempt >= 1 and (.attempt | floor) == .attempt' >/dev/null 2>&1; then
     echo "verdict: attempt must be integer >= 1" >&2
     return 1
   fi
@@ -545,7 +545,13 @@ verdict_validate_record() {
 
 # ---- verdict_validate_file ------------------------------------------------
 # Validates a whole artifact file: per-record schema + attempt continuity
-# (1..N, no gaps/dups) + kind/id consistency. JSON result on stdout, exit 0/1.
+# (1..N, no gaps/dups) + kind/id consistency. Reviewer artifacts created
+# before the formal attempt lifecycle may contain an immutable prefix with no
+# `attempt`; that prefix is accepted only before a strict suffix beginning at
+# attempt 1. Historical records that encoded schema_version as the string "1"
+# are immutable legacy context: their ordering and identity are checked, but
+# they cannot satisfy the current verdict. The latest record is always required
+# to use the current strict schema. JSON result on stdout, exit 0/1.
 verdict_validate_file() {
   local project_dir="$1" kind="$2" id="$3"
   local path
@@ -571,34 +577,58 @@ verdict_validate_file() {
     jq -n --arg path "$path" '{valid:false, reason:"empty_artifact", path:$path}'
     return 1
   fi
-  local i
+  local i formal_started expected_attempt legacy_records
   i=0
+  formal_started=0
+  expected_attempt=1
+  legacy_records=0
   while [ "$i" -lt "$n" ]; do
     local rec
     rec="$(printf '%s' "$records" | jq -c ".[$i]")"
-    local attempt expect
-    attempt="$(printf '%s' "$rec" | jq -r '.attempt // empty')"
-    expect=$((i + 1))
-    if [ "$attempt" != "$expect" ]; then
-      jq -n --argjson line $((i + 1)) --argjson found "${attempt:-0}" --argjson expected "$expect" \
-        '{valid:false, reason:"attempt_gap_or_dup", line:$line, found:$found, expected:$expected}'
-      return 1
-    fi
-    # Historical attempts (i < n-1) validate authenticity only (fresh=0); the
-    # LATEST record (i == n-1) binds current head/run/fingerprint (fresh=1).
-    # This is what makes the whole maintenance verdict file pass
-    # verdict_validate_file even though only the last attempt's base/head match
-    # the CURRENT repo state — each earlier attempt's base/head are still
-    # real-oid + ancestor-verified inside verdict_validate_record.
-    local rec_fresh
-    if [ "$i" -eq $((n - 1)) ]; then
-      rec_fresh=1
+    local attempt has_attempt is_legacy
+    has_attempt="$(printf '%s' "$rec" | jq -r 'has("attempt")')"
+    is_legacy=0
+    if [ "$has_attempt" != "true" ]; then
+      # Compatibility is deliberately narrow: only the historical Reviewer
+      # writer emitted schema_version="1" records without attempts. They may
+      # form a prefix, never a suffix or an interleaving with formal attempts.
+      if [ "$kind" != "reviewer" ] \
+         || [ "$formal_started" -ne 0 ] \
+         || ! printf '%s' "$rec" | jq -e '.schema_version == "1"' >/dev/null 2>&1; then
+        jq -n --argjson line $((i + 1)) --argjson found 0 --argjson expected "$expected_attempt" \
+          '{valid:false, reason:"attempt_gap_or_dup", line:$line, found:$found, expected:$expected}'
+        return 1
+      fi
+      is_legacy=1
+      legacy_records=$((legacy_records + 1))
     else
-      rec_fresh=0
+      if ! printf '%s' "$rec" | jq -e \
+        '(.attempt | type) == "number" and .attempt >= 1 and (.attempt | floor) == .attempt' \
+        >/dev/null 2>&1; then
+        jq -n --argjson line $((i + 1)) '{valid:false, reason:"invalid_attempt", line:$line}'
+        return 1
+      fi
+      attempt="$(printf '%s' "$rec" | jq -r '.attempt')"
+      formal_started=1
+      if [ "$attempt" != "$expected_attempt" ]; then
+        jq -n --argjson line $((i + 1)) --argjson found "$attempt" --argjson expected "$expected_attempt" \
+          '{valid:false, reason:"attempt_gap_or_dup", line:$line, found:$found, expected:$expected}'
+        return 1
+      fi
+      expected_attempt=$((expected_attempt + 1))
     fi
-    if ! verdict_validate_record "$project_dir" "$rec" "$rec_fresh" >/dev/null 2>&1; then
-      jq -n --argjson line $((i + 1)) '{valid:false, reason:"invalid_record", line:$line}'
-      return 1
+    # Some historical maintenance/reviewer writers serialized schema_version
+    # as "1". Their bound runs may predate today's stricter run-log contract,
+    # so re-validating them under the new contract would make an append-only
+    # artifact permanently unusable. Treat only non-latest string-schema rows
+    # as anchored legacy context; they still participate in attempt continuity
+    # and kind/id checks below, but never decide the current verdict.
+    if [ "$is_legacy" -eq 0 ] \
+       && { [ "$kind" = "maintenance" ] || [ "$kind" = "reviewer" ]; } \
+       && [ "$i" -lt $((n - 1)) ] \
+       && printf '%s' "$rec" | jq -e '.schema_version == "1"' >/dev/null 2>&1; then
+      is_legacy=1
+      legacy_records=$((legacy_records + 1))
     fi
     local rkind
     rkind="$(printf '%s' "$rec" | jq -r '.kind')"
@@ -624,8 +654,26 @@ verdict_validate_file() {
         return 1
       fi
     fi
+    if [ "$is_legacy" -eq 0 ]; then
+      local rec_fresh
+      if [ "$i" -eq $((n - 1)) ]; then
+        rec_fresh=1
+      else
+        rec_fresh=0
+      fi
+      if ! verdict_validate_record "$project_dir" "$rec" "$rec_fresh" >/dev/null 2>&1; then
+        jq -n --argjson line $((i + 1)) '{valid:false, reason:"invalid_record", line:$line}'
+        return 1
+      fi
+    fi
     i=$((i + 1))
   done
+  # A legacy-only Reviewer file is historical context, not a current formal
+  # verdict. Acceptance requires a strict attempted suffix.
+  if [ "$formal_started" -eq 0 ]; then
+    jq -n --argjson records "$n" '{valid:false, reason:"formal_attempt_missing", records:$records}'
+    return 1
+  fi
   # P0-4: a phase PASS must cover every feature of that phase. The LATEST
   # record decides the active phase verdict; only a PASS needs coverage.
   if [ "$kind" = "phase" ]; then
@@ -640,7 +688,8 @@ verdict_validate_file() {
       fi
     fi
   fi
-  jq -n --arg path "$path" --argjson records "$n" '{valid:true, path:$path, records:$records}'
+  jq -n --arg path "$path" --argjson records "$n" --argjson legacy_records "$legacy_records" \
+    '{valid:true, path:$path, records:$records, legacy_records:$legacy_records}'
   return 0
 }
 

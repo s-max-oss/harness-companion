@@ -276,6 +276,8 @@ dwm_expand() {
 dwm_emit_manifest() {
   local project_dir="$1" out_file="$2"
   shift 2
+  project_dir="$(cd "$project_dir" 2>/dev/null && pwd)" || return 2
+  out_file="$(cd "$(dirname "$out_file")" 2>/dev/null && pwd)/$(basename "$out_file")" || return 2
   local excludes=("$@")
   local tmp
   tmp="$(mktemp)"
@@ -421,6 +423,8 @@ dwm_emit_manifest() {
 dwm_compare_manifest() {
   local project_dir="$1" recorded="$2"
   shift 2
+  project_dir="$(cd "$project_dir" 2>/dev/null && pwd)" || return 2
+  recorded="$(cd "$(dirname "$recorded")" 2>/dev/null && pwd)/$(basename "$recorded")" || return 2
   local excludes=("$@")
   local cur_file
   cur_file="$(mktemp)"

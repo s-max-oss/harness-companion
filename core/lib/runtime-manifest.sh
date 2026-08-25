@@ -72,11 +72,14 @@ _runtime_file_sha256() {
     return 1
   fi
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$f" 2>/dev/null | awk '{print $1}'
+    # Hash stdin rather than a named Windows path. GNU sha256sum prefixes the
+    # digest with a backslash when its filename needs escaping, so `awk $1`
+    # would otherwise return `\<digest>` for D:\... paths.
+    sha256sum < "$f" 2>/dev/null | awk '{print $1}'
     return $?
   fi
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$f" 2>/dev/null | awk '{print $1}'
+    shasum -a 256 < "$f" 2>/dev/null | awk '{print $1}'
     return $?
   fi
   return 1

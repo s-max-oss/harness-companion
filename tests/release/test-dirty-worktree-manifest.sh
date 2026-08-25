@@ -1587,6 +1587,19 @@ check "T55c: failed registration leaves no second path" 0 "$(jq -s '[.[] | selec
 check "T55d: restored registry still matches private anchor" 0 "$(_runtime_verify_registry_anchor "$D" "$MF" >/dev/null 2>&1; echo $?)"
 check "T55e: successful rollback removes recovery backup" 0 "$(find "$D/.git" -maxdepth 1 -type f -name 'runtime-manifest-backup.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
 
+# ---- T56: Windows drive-letter project spelling is byte-identical ----------
+if command -v cygpath >/dev/null 2>&1; then
+  D="$(mktemp -d "$TMPDIR/t56-XXXX")"
+  setup_repo "$D"
+  OUT="$(mf "$D" t56-windows-root)"
+  dwm_emit_manifest "$D" "$OUT"
+  WIN_D="$(cygpath -w "$D")"
+  RES="$(dwm_compare_manifest "$WIN_D" "$OUT")"
+  check "T56a: Windows drive-letter project root normalizes before hashing" true "$(printf '%s' "$RES" | jq -r '.valid')"
+  T56_SHA="$(_runtime_file_sha256 "$WIN_D/.harness/logs/runs/run-1.ndjson")"
+  check "T56b: named Windows path hash has no escape prefix" 64 "${#T56_SHA}"
+fi
+
 echo ""
 echo "Dirty-Worktree-Manifest Results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

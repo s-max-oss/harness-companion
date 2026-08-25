@@ -496,7 +496,14 @@ fi
 # log_artifact MUST resolve inside project_dir after '.'/'..' and symlinks are
 # collapsed. These fixtures all record a CORRECT log_sha256 so only the
 # containment step can reject — proving containment (not a sha mismatch) fires.
-OUTSIDE_ESC="$(mktemp -d)"
+# TMPDIR may retain its inherited export attribute after the assignment near
+# the top of this test. A bare `mktemp -d` would then create the alleged
+# "outside" directory *inside* the project fixture, making valid=true the
+# correct containment result. Use an explicit sibling template so this is a
+# real outside-project negative on every host.
+OUTSIDE_PARENT="$(dirname "$TMPDIR")"
+OUTSIDE_ESC="$(mktemp -d "$OUTSIDE_PARENT/validate-run-log-outside-XXXXXX")"
+trap 'rm -rf "$TMPDIR" "$OUTSIDE_ESC"' EXIT
 printf 'outside log\n' > "$OUTSIDE_ESC/outside.log"
 OUTSIDE_ESC_SHA="$(sha256sum "$OUTSIDE_ESC/outside.log" | awk '{print $1}')"
 

@@ -476,6 +476,14 @@ if [ -f "$CODEX_RECEIPT" ]; then
     assert_fail "G5.M21 receipt status is code-complete-runtime-e2e-pending" " — got $RCP_STATUS"
   fi
 
+  EXPECTED_INTEGRITY_KEYS="$(find "$TMP_RCPT_SANDBOX/.codex" -type f ! -name install-receipt.json ! -name VERSION -printf '%P\n' | tr '\\' '/' | tr -d '\r' | LC_ALL=C sort)"
+  ACTUAL_INTEGRITY_KEYS="$(python3 -c "import json; print('\\n'.join(sorted(json.load(open('$PY_RECEIPT')).get('integrity',{}).get('files',{}).keys())))" 2>/dev/null | tr -d '\r' || echo "")"
+  if [ "$EXPECTED_INTEGRITY_KEYS" = "$ACTUAL_INTEGRITY_KEYS" ]; then
+    assert_pass "G5.M21 integrity receipt has exact installed-file key set"
+  else
+    assert_fail "G5.M21 integrity receipt has exact installed-file key set"
+  fi
+
   # Same-version reinstall: upgrade_history should be empty
   bash "$INSTALL" --repo "$TMP_RCPT_SANDBOX" >/dev/null 2>&1
   HIST_LEN="$(python3 -c "import json; print(len(json.load(open('$PY_RECEIPT')).get('upgrade_history',[])))" 2>/dev/null || echo "error")"
@@ -525,6 +533,64 @@ fi
 
 bash "$TMP_TAR_SRC/adapters/codex/uninstall.sh" --repo "$TMP_TAR_SANDBOX" >/dev/null 2>&1
 rm -rf "$TMP_TAR_SANDBOX" "$TMP_TAR_SRC"
+
+echo ""
+echo "=== G5.M23: Missing VERSION fails closed ==="
+
+TMP_BAD_VERSION_SANDBOX="$(mktemp -d)"
+TMP_BAD_VERSION_SRC="$(mktemp -d)"
+cp -r "$ROOT_DIR"/* "$TMP_BAD_VERSION_SRC/" 2>/dev/null
+rm -rf "$TMP_BAD_VERSION_SRC/.git" 2>/dev/null || true
+rm -f "$TMP_BAD_VERSION_SRC/VERSION"
+bash "$TMP_BAD_VERSION_SRC/adapters/codex/install.sh" --repo "$TMP_BAD_VERSION_SANDBOX" >/dev/null 2>&1
+BAD_VERSION_RC=$?
+if [ "$BAD_VERSION_RC" -ne 0 ]; then
+  assert_pass "G5.M23 missing VERSION returns non-zero"
+else
+  assert_fail "G5.M23 missing VERSION returns non-zero"
+fi
+if [ ! -e "$TMP_BAD_VERSION_SANDBOX/.codex" ]; then
+  assert_pass "G5.M23 missing VERSION writes no install target"
+else
+  assert_fail "G5.M23 missing VERSION writes no install target"
+fi
+printf '2.0.0-rc.2\n2.0.0\n' > "$TMP_BAD_VERSION_SRC/VERSION"
+bash "$TMP_BAD_VERSION_SRC/adapters/codex/install.sh" --repo "$TMP_BAD_VERSION_SANDBOX" >/dev/null 2>&1
+BAD_MULTILINE_VERSION_RC=$?
+if [ "$BAD_MULTILINE_VERSION_RC" -ne 0 ]; then
+  assert_pass "G5.M23 multi-line VERSION returns non-zero"
+else
+  assert_fail "G5.M23 multi-line VERSION returns non-zero"
+fi
+if [ ! -e "$TMP_BAD_VERSION_SANDBOX/.codex" ]; then
+  assert_pass "G5.M23 malformed VERSION writes no install target"
+else
+  assert_fail "G5.M23 malformed VERSION writes no install target"
+fi
+printf '2.0.0-01\n' > "$TMP_BAD_VERSION_SRC/VERSION"
+bash "$TMP_BAD_VERSION_SRC/adapters/codex/install.sh" --repo "$TMP_BAD_VERSION_SANDBOX" >/dev/null 2>&1
+BAD_LEADING_ZERO_VERSION_RC=$?
+if [ "$BAD_LEADING_ZERO_VERSION_RC" -ne 0 ]; then
+  assert_pass "G5.M23 numeric prerelease leading zero returns non-zero"
+else
+  assert_fail "G5.M23 numeric prerelease leading zero returns non-zero"
+fi
+rm -rf "$TMP_BAD_VERSION_SANDBOX" "$TMP_BAD_VERSION_SRC"
+
+echo ""
+echo "=== G5.M24: Integrity regeneration failure propagates ==="
+
+TMP_BAD_INTEGRITY_SANDBOX="$(mktemp -d)"
+mkdir -p "$TMP_BAD_INTEGRITY_SANDBOX/.codex"
+printf '{"integrity":42}\n' > "$TMP_BAD_INTEGRITY_SANDBOX/.codex/install-receipt.json"
+bash "$INSTALL" --repo "$TMP_BAD_INTEGRITY_SANDBOX" >/dev/null 2>&1
+BAD_INTEGRITY_RC=$?
+if [ "$BAD_INTEGRITY_RC" -ne 0 ]; then
+  assert_pass "G5.M24 malformed integrity object returns non-zero"
+else
+  assert_fail "G5.M24 malformed integrity object returns non-zero"
+fi
+rm -rf "$TMP_BAD_INTEGRITY_SANDBOX"
 
 # ============================================================
 echo ""

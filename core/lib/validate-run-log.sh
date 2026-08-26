@@ -257,6 +257,25 @@ _vl_canonical_path() {
   printf '%s/%s' "$d" "$base"
 }
 
+# Canonical identity used for binding run_started.project_root to the project
+# supplied by the validator caller.  MSYS can represent the same Windows path
+# as /d/foo, D:/foo, or with a different drive-letter case, so normalize via
+# cygpath and compare case-insensitively only for drive-letter paths.
+_vl_project_identity() {
+  local p="$1" resolved
+  resolved="$(_vl_canonical_path "$p")" || return 1
+  if command -v cygpath >/dev/null 2>&1; then
+    resolved="$(cygpath -m "$resolved" 2>/dev/null || printf '%s' "$resolved")"
+  fi
+  case "$resolved" in
+    [A-Za-z]:/*) resolved="$(printf '%s' "$resolved" | tr '[:upper:]' '[:lower:]')" ;;
+  esac
+  while [ "$resolved" != "/" ] && [ "${resolved%/}" != "$resolved" ]; do
+    resolved="${resolved%/}"
+  done
+  printf '%s' "$resolved"
+}
+
 # ---- validate_run_log -------------------------------------------------------
 # The canonical 16-step validation.
 # Args: <run_id> [project_dir]
@@ -490,39 +509,35 @@ validate_run_log() {
               run_id: $run_id, command_id: $cid, path: $path}'
           return 1
         fi
-        # 5c: log_sha256 — for any command with exit_code != 127 the recorded
-        # log_sha256 MUST be a non-null 64-hex string that matches a fresh
-        # recomputation. The exit_code==127 (missing-tool) sentinel is the
-        # ONLY path that may carry log_artifact="" + log_sha256=null — see
-        # the comment block above.
-        if [ -z "$ec" ] || [ "$ec" != "127" ]; then
-          if [ -z "$sha" ] || [ "$sha" = "null" ]; then
-            jq -n --arg run_id "$run_id" --arg cid "$cid" --arg ec "$ec" --arg path "$la" \
-              '{valid: false, reason: "log_sha256_missing",
-                run_id: $run_id, command_id: $cid, exit_code: $ec, path: $path}'
-            return 1
-          fi
-          if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{64}$'; then
-            jq -n --arg run_id "$run_id" --arg cid "$cid" --arg ec "$ec" --arg sha "$sha" \
-              '{valid: false, reason: "log_sha256_not_64hex",
-                run_id: $run_id, command_id: $cid, exit_code: $ec, log_sha256: $sha}'
-            return 1
-          fi
-          actual_sha="$(sha256sum "$abs_la" 2>/dev/null | awk '{print $1}')"
-          if [ -z "$actual_sha" ]; then
-            jq -n --arg run_id "$run_id" --arg cid "$cid" --arg path "$la" \
-              '{valid: false, reason: "log_sha256_recompute_failed",
-                run_id: $run_id, command_id: $cid, path: $path}'
-            return 1
-          fi
-          if [ "$actual_sha" != "$sha" ]; then
-            jq -n --arg run_id "$run_id" --arg cid "$cid" \
-              --arg expected "$sha" --arg actual "$actual_sha" --arg path "$la" \
-              '{valid: false, reason: "log_sha256_mismatch",
-                run_id: $run_id, command_id: $cid,
-                expected_sha256: $expected, actual_sha256: $actual, path: $path}'
-            return 1
-          fi
+        # 5c: every non-empty artifact — including a command that really ran
+        # and returned 127 — requires a real matching hash.  The missing-tool
+        # sentinel is exact: artifact="", hash=null, exit_code=127.
+        if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" --arg ec "$ec" --arg path "$la" \
+            '{valid: false, reason: "log_sha256_missing",
+              run_id: $run_id, command_id: $cid, exit_code: $ec, path: $path}'
+          return 1
+        fi
+        if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{64}$'; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" --arg ec "$ec" --arg sha "$sha" \
+            '{valid: false, reason: "log_sha256_not_64hex",
+              run_id: $run_id, command_id: $cid, exit_code: $ec, log_sha256: $sha}'
+          return 1
+        fi
+        actual_sha="$(sha256sum "$abs_la" 2>/dev/null | awk '{print $1}')"
+        if [ -z "$actual_sha" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" --arg path "$la" \
+            '{valid: false, reason: "log_sha256_recompute_failed",
+              run_id: $run_id, command_id: $cid, path: $path}'
+          return 1
+        fi
+        if [ "$actual_sha" != "$sha" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" \
+            --arg expected "$sha" --arg actual "$actual_sha" --arg path "$la" \
+            '{valid: false, reason: "log_sha256_mismatch",
+              run_id: $run_id, command_id: $cid,
+              expected_sha256: $expected, actual_sha256: $actual, path: $path}'
+          return 1
         fi
       else
         # log_artifact is empty. The ONLY legitimate empty case is the
@@ -532,6 +547,12 @@ validate_run_log() {
           jq -n --arg run_id "$run_id" --arg cid "$cid" --arg ec "$ec" \
             '{valid: false, reason: "log_artifact_missing",
               run_id: $run_id, command_id: $cid, exit_code: $ec}'
+          return 1
+        fi
+        if [ "$sha" != "null" ]; then
+          jq -n --arg run_id "$run_id" --arg cid "$cid" --arg sha "$sha" \
+            '{valid: false, reason: "missing_tool_sentinel_hash_not_null",
+              run_id: $run_id, command_id: $cid, log_sha256: $sha}'
           return 1
         fi
       fi
@@ -720,6 +741,46 @@ validate_run_log() {
     return 1
   fi
 
+  # 14e: terminal claims are derived from the command events, never trusted.
+  # A non-zero command cannot be relabelled as passed by forging terminal
+  # counters, failed IDs, or overall_result.
+  local derived_passed derived_failed derived_failed_ids terminal_failed_ids terminal_event overall
+  derived_passed="$(printf '%s' "$cmd_events" | jq '[.[] | select(.exit_code == 0)] | length')"
+  derived_failed="$(printf '%s' "$cmd_events" | jq '[.[] | select(.exit_code != 0)] | length')"
+  if [ "$pa" != "$derived_passed" ] || [ "$fa" != "$derived_failed" ]; then
+    jq -n --arg run_id "$run_id" \
+      --argjson claimed_passed "$pa" --argjson actual_passed "$derived_passed" \
+      --argjson claimed_failed "$fa" --argjson actual_failed "$derived_failed" \
+      '{valid: false, reason: "terminal_command_result_mismatch", run_id: $run_id,
+        claimed_passed: $claimed_passed, actual_passed: $actual_passed,
+        claimed_failed: $claimed_failed, actual_failed: $actual_failed}'
+    return 1
+  fi
+  terminal_event="$(printf '%s' "$terminal" | jq -r '.event')"
+  overall="$(printf '%s' "$terminal" | jq -r '.overall_result')"
+  if { [ "$terminal_event" = "run_completed" ] && [ "$overall" = "passed" ]; } && [ "$derived_failed" != "0" ]; then
+    jq -n --arg run_id "$run_id" '{valid: false, reason: "passed_run_contains_failed_command", run_id: $run_id}'
+    return 1
+  fi
+  if [ "$terminal_event" = "run_completed" ] && [ "$overall" = "no_checks" ] && [ "$cmd_count" != "0" ]; then
+    jq -n --arg run_id "$run_id" '{valid: false, reason: "no_checks_run_contains_commands", run_id: $run_id}'
+    return 1
+  fi
+  if [ "$terminal_event" = "run_failed" ]; then
+    if [ "$derived_failed" = "0" ]; then
+      jq -n --arg run_id "$run_id" '{valid: false, reason: "failed_run_without_failed_command", run_id: $run_id}'
+      return 1
+    fi
+    derived_failed_ids="$(printf '%s' "$cmd_events" | jq -c '[.[] | select(.exit_code != 0) | .command_id] | sort')"
+    terminal_failed_ids="$(printf '%s' "$terminal" | jq -c '[.failed_command_ids[]] | sort')"
+    if [ "$derived_failed_ids" != "$terminal_failed_ids" ]; then
+      jq -n --arg run_id "$run_id" --argjson claimed "$terminal_failed_ids" --argjson actual "$derived_failed_ids" \
+        '{valid: false, reason: "failed_command_ids_mismatch", run_id: $run_id,
+          claimed_failed_command_ids: $claimed, actual_failed_command_ids: $actual}'
+      return 1
+    fi
+  fi
+
   # ---- 15: Origin–confirmation invariants ----
   local origin_err_count
   origin_err_count="$(printf '%s' "$cmd_events" | jq '
@@ -733,7 +794,26 @@ validate_run_log() {
     return 1
   fi
 
-  # ---- 16: association run_id would be checked by caller ----
+  # ---- 16: bind the recorded project root to this validator invocation ----
+  local recorded_root expected_root recorded_identity expected_identity
+  recorded_root="$(printf '%s' "$run_started" | jq -r '.project_root')"
+  expected_root="$(cd "$project_dir" 2>/dev/null && pwd)" || expected_root=""
+  recorded_identity="$(_vl_project_identity "$recorded_root" 2>/dev/null)" || recorded_identity=""
+  expected_identity="$(_vl_project_identity "$expected_root" 2>/dev/null)" || expected_identity=""
+  if [ -z "$recorded_identity" ] || [ -z "$expected_identity" ]; then
+    jq -n --arg run_id "$run_id" --arg recorded "$recorded_root" --arg expected "$project_dir" \
+      '{valid: false, reason: "project_root_resolve_failed", run_id: $run_id,
+        recorded_project_root: $recorded, expected_project_root: $expected}'
+    return 1
+  fi
+  if [ "$recorded_identity" != "$expected_identity" ]; then
+    jq -n --arg run_id "$run_id" --arg recorded "$recorded_identity" --arg expected "$expected_identity" \
+      '{valid: false, reason: "project_root_mismatch", run_id: $run_id,
+        recorded_project_root: $recorded, expected_project_root: $expected}'
+    return 1
+  fi
+
+  # Association run_id is checked by callers that receive an association.
   # (Per design §3.1 step 16: assoc.run_id == run_id. This function doesn't
   # receive an association object — callers verify that separately.)
 

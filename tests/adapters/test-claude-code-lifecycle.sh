@@ -125,6 +125,9 @@ L2_RCP_VERSION="$(jq -r '.version // empty' "$L2_RECEIPT" 2>/dev/null || echo ""
 assert "L2.2 receipt version matches VERSION" "$VERSION" "$L2_RCP_VERSION"
 L2_RCP_SKILL="$(jq -r '.skill // empty' "$L2_RECEIPT" 2>/dev/null || echo "")"
 assert "L2.3 receipt skill is harness-companion" "harness-companion" "$L2_RCP_SKILL"
+L2_EXPECTED_KEYS="$(find "$L1_TARGET" -type f ! -name install-receipt.json ! -name VERSION -printf '%P\n' | tr '\\' '/' | tr -d '\r' | LC_ALL=C sort)"
+L2_ACTUAL_KEYS="$(jq -r '.integrity.files | keys[]' "$L2_RECEIPT" 2>/dev/null | tr -d '\r' | LC_ALL=C sort)"
+assert "L2.4 integrity receipt has exact installed-file key set" "$L2_EXPECTED_KEYS" "$L2_ACTUAL_KEYS"
 echo ""
 
 # ---- L3: Same-version reinstall → no upgrade_history append ------------------
@@ -293,6 +296,49 @@ L10_NO_RCPT_RC=$?
 popd >/dev/null
 assert "L10.1 uninstall without receipt is refused (exit != 0)" "1" "$L10_NO_RCPT_RC"
 assert "L10.2 target still exists when receipt missing" "YES" "$([ -d "$L10_TARGET" ] && echo YES || echo NO)"
+echo ""
+
+# ---- L11: Incomplete archive fails before target mutation -------------------
+echo "=== L11: Missing VERSION fails closed ==="
+
+L11_SANDBOX="$(safe_mktemp)"
+L11_SRC="$(safe_mktemp)"
+cp -r "$ROOT_DIR"/* "$L11_SRC/" 2>/dev/null
+rm -rf "$L11_SRC/.git" 2>/dev/null || true
+rm -f "$L11_SRC/VERSION"
+pushd "$L11_SANDBOX" >/dev/null
+bash "$L11_SRC/adapters/claude-code/install.sh" --project >/dev/null 2>&1
+L11_RC=$?
+popd >/dev/null
+assert "L11.1 missing VERSION returns non-zero" "1" "$([ "$L11_RC" -ne 0 ] && echo 1 || echo 0)"
+assert "L11.2 missing VERSION writes no install target" "NO" "$([ -e "$L11_SANDBOX/.claude/skills/harness-companion" ] && echo YES || echo NO)"
+printf '2.0.0-rc.2\n2.0.0\n' > "$L11_SRC/VERSION"
+pushd "$L11_SANDBOX" >/dev/null
+bash "$L11_SRC/adapters/claude-code/install.sh" --project >/dev/null 2>&1
+L11_MULTILINE_RC=$?
+popd >/dev/null
+assert "L11.3 multi-line VERSION returns non-zero" "1" "$([ "$L11_MULTILINE_RC" -ne 0 ] && echo 1 || echo 0)"
+assert "L11.4 malformed VERSION writes no install target" "NO" "$([ -e "$L11_SANDBOX/.claude/skills/harness-companion" ] && echo YES || echo NO)"
+printf '2.0.0-01\n' > "$L11_SRC/VERSION"
+pushd "$L11_SANDBOX" >/dev/null
+bash "$L11_SRC/adapters/claude-code/install.sh" --project >/dev/null 2>&1
+L11_LEADING_ZERO_RC=$?
+popd >/dev/null
+assert "L11.5 numeric prerelease leading zero returns non-zero" "1" "$([ "$L11_LEADING_ZERO_RC" -ne 0 ] && echo 1 || echo 0)"
+echo ""
+
+# ---- L12: Integrity regeneration failure propagates -------------------------
+echo "=== L12: Integrity regeneration failure propagates ==="
+
+L12_SANDBOX="$(safe_mktemp)"
+L12_TARGET="$L12_SANDBOX/.claude/skills/harness-companion"
+mkdir -p "$L12_TARGET"
+printf '{"integrity":42}\n' > "$L12_TARGET/install-receipt.json"
+pushd "$L12_SANDBOX" >/dev/null
+bash "$ROOT_DIR/adapters/claude-code/install.sh" --project >/dev/null 2>&1
+L12_RC=$?
+popd >/dev/null
+assert "L12.1 malformed integrity object returns non-zero" "1" "$([ "$L12_RC" -ne 0 ] && echo 1 || echo 0)"
 echo ""
 
 # ---- Summary -----------------------------------------------------------------

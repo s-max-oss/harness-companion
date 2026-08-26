@@ -38,11 +38,16 @@ ADAPTER_DIR="$SCRIPT_DIR"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ---- Read version (BUG-2: single source of truth) ------------------------------
-if [ -f "$REPO_ROOT/VERSION" ]; then
-  VERSION="$(cat "$REPO_ROOT/VERSION" | head -1 | tr -d '[:space:]')"
-else
-  echo "[WARN] No VERSION file at repo root — using fallback '2.0.0'" >&2
-  VERSION="2.0.0"
+if [ ! -f "$REPO_ROOT/VERSION" ] || [ -L "$REPO_ROOT/VERSION" ]; then
+  echo "[ERROR] VERSION file missing or not a regular source file: $REPO_ROOT/VERSION" >&2
+  exit 1
+fi
+VERSION_LINES="$(awk 'END { print NR }' "$REPO_ROOT/VERSION" 2>/dev/null)"
+VERSION="$(tr -d '\r' < "$REPO_ROOT/VERSION")"
+SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+if [ "$VERSION_LINES" != "1" ] || [[ "$VERSION" == *$'\n'* ]] || ! printf '%s' "$VERSION" | grep -qE "$SEMVER_RE"; then
+  echo "[ERROR] VERSION must contain exactly one valid SemVer value" >&2
+  exit 1
 fi
 
 # ---- Detect archive/tarball install (no .git) ----------------------------------
@@ -307,17 +312,17 @@ PYEOF
   regenerate_integrity() {
     local receipt_file="$1"
     local target_dir="$2"
-    if ! command -v sha256sum >/dev/null 2>&1; then
-      echo "  [WARN] sha256sum not available — skipping integrity regeneration" >&2
-      return 0
-    fi
     if [ ! -f "$receipt_file" ]; then
-      echo "  [WARN] receipt file missing — skipping integrity regeneration" >&2
-      return 0
+      echo "  [ERROR] receipt file missing; cannot regenerate integrity: $receipt_file" >&2
+      return 1
+    fi
+    if [ ! -d "$target_dir" ]; then
+      echo "  [ERROR] install target missing; cannot regenerate integrity: $target_dir" >&2
+      return 1
     fi
     if command -v python3 >/dev/null 2>&1; then
       TARGET_DIR="$target_dir" RECEIPT_FILE="$receipt_file" python3 - <<'PYEOF'
-import hashlib, json, os, sys
+import hashlib, json, os
 target_dir = os.environ["TARGET_DIR"]
 receipt_file = os.environ["RECEIPT_FILE"]
 SKIP = {"install-receipt.json", "VERSION"}
@@ -329,45 +334,59 @@ for root, dirs, fnames in os.walk(target_dir):
         rel = os.path.relpath(full, target_dir).replace(os.sep, "/")
         if rel in SKIP:
             continue
-        try:
-            with open(full, "rb") as f:
-                h = hashlib.sha256(f.read()).hexdigest()
-            files[rel] = h
-        except OSError:
-            continue
-try:
-    with open(receipt_file, "r", encoding="utf-8") as f:
-        r = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
-    r = {}
+        with open(full, "rb") as f:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        files[rel] = digest.hexdigest()
+with open(receipt_file, "r", encoding="utf-8") as f:
+    r = json.load(f)
 r.setdefault("integrity", {})
 r["integrity"]["algorithm"] = "sha256"
 r["integrity"]["files"] = files
 tmp = receipt_file + ".tmp.integ"
-with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(r, f, indent=2)
-    f.write("\n")
-os.replace(tmp, receipt_file)
+try:
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(r, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, receipt_file)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+with open(receipt_file, "r", encoding="utf-8") as f:
+    written = json.load(f)
+if written.get("integrity", {}).get("algorithm") != "sha256" or written.get("integrity", {}).get("files") != files:
+    raise RuntimeError("integrity receipt post-validation failed")
 PYEOF
       return $?
     fi
-    # Fallback: jq-based path
-    local f path hash files_json="{}"
-    while IFS= read -r f; do
+    if ! command -v jq >/dev/null 2>&1 || ! echo '{}' | jq -e . >/dev/null 2>&1; then
+      echo "  [ERROR] integrity regeneration requires python3 or working jq" >&2
+      return 1
+    fi
+    local hasher=""
+    if command -v sha256sum >/dev/null 2>&1; then hasher="sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then hasher="shasum"
+    else echo "  [ERROR] integrity regeneration requires python3, sha256sum, or shasum" >&2; return 1
+    fi
+    local f path hash files_json="{}" list_file
+    list_file="$(mktemp)" || return 1
+    if ! find "$target_dir" -type f -print0 > "$list_file"; then rm -f "$list_file"; return 1; fi
+    while IFS= read -r -d '' f; do
       path="${f#$target_dir/}"
       path="$(printf '%s' "$path" | tr '\\' '/')"
       case "$path" in
         install-receipt.json|VERSION) continue ;;
       esac
-      hash="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"
-      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
-        files_json="$(jq --arg p "$path" --arg h "$hash" '.[$p] = $h' <<<"$files_json")"
-      fi
-    done < <(find "$target_dir" -type f 2>/dev/null | sort)
-    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
-      jq --argjson files "$files_json" '.integrity.files = $files | .integrity.algorithm = "sha256"' "$receipt_file" > "$receipt_file.tmp" \
-        && mv "$receipt_file.tmp" "$receipt_file"
-    fi
+      if [ "$hasher" = "sha256sum" ]; then hash="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"
+      else hash="$(shasum -a 256 "$f" 2>/dev/null | awk '{print $1}')"; fi
+      if ! printf '%s' "$hash" | grep -qE '^[0-9a-f]{64}$'; then rm -f "$list_file"; return 1; fi
+      files_json="$(jq --arg p "$path" --arg h "$hash" '.[$p] = $h' <<<"$files_json")" || { rm -f "$list_file"; return 1; }
+    done < "$list_file"
+    rm -f "$list_file"
+    jq --argjson files "$files_json" '.integrity.files = $files | .integrity.algorithm = "sha256"' "$receipt_file" > "$receipt_file.tmp" \
+      && mv "$receipt_file.tmp" "$receipt_file" \
+      && jq -e --argjson files "$files_json" '.integrity.algorithm == "sha256" and .integrity.files == $files' "$receipt_file" >/dev/null
   }
 
   # Helper: build fresh receipt
@@ -468,7 +487,10 @@ PYEOF
     fi
 
     # F14.2: regenerate integrity.files by walking the installed tree
-    regenerate_integrity "$RECEIPT" "$CODEX_DIR"
+    regenerate_integrity "$RECEIPT" "$CODEX_DIR" || {
+      echo "  [ERROR] integrity regeneration failed; installation is not trustworthy" >&2
+      exit 1
+    }
   else
     # Existing receipt: check version for upgrade
     OLD_VERSION=""
@@ -488,7 +510,10 @@ PYEOF
           && mv "$RECEIPT.tmp" "$RECEIPT"
       fi
       # F14.2/G0-rev2: regenerate integrity on same-version reinstall
-      regenerate_integrity "$RECEIPT" "$CODEX_DIR"
+      regenerate_integrity "$RECEIPT" "$CODEX_DIR" || {
+        echo "  [ERROR] integrity regeneration failed; installation is not trustworthy" >&2
+        exit 1
+      }
     elif [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$VERSION" ]; then
       # Cross-version upgrade: update version, source, installed_at; append upgrade_history
       echo "  [receipt] Upgrade: $OLD_VERSION → $VERSION — appending upgrade_history"
@@ -542,7 +567,10 @@ PYEOF
       fi
 
       # F14.2: regenerate integrity.files after upgrade mutation
-      regenerate_integrity "$RECEIPT" "$CODEX_DIR"
+      regenerate_integrity "$RECEIPT" "$CODEX_DIR" || {
+        echo "  [ERROR] integrity regeneration failed; installation is not trustworthy" >&2
+        exit 1
+      }
     else
       # Can't determine old version — update what we can
       echo "  [receipt] Unknown prior version — updating installed_at"
@@ -550,6 +578,10 @@ PYEOF
         jq --arg ts "$INSTALLED_AT" '.installed_at = $ts' "$RECEIPT" > "$RECEIPT.tmp" \
           && mv "$RECEIPT.tmp" "$RECEIPT"
       fi
+      regenerate_integrity "$RECEIPT" "$CODEX_DIR" || {
+        echo "  [ERROR] integrity regeneration failed; installation is not trustworthy" >&2
+        exit 1
+      }
     fi
 
     # F7: Validate receipt is still valid JSON after mutation

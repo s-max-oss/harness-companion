@@ -11,7 +11,8 @@
 #   brief   : bash scripts/harness-init.sh <dir> --brief <json> --non-interactive
 #             — Agent passes a resolved Brief; missing required fields are rejected.
 #   resume  : re-run in an already-initialized project — skips existing files.
-#   update  : --update [--apply] — 3-way SHA compare (dry-run prints a plan only).
+#   update  : --update [--apply --plan-token <sha256>] — 3-way SHA compare.
+#             Dry-run prints the token that binds a later apply to the same inputs.
 #   render  : --render-brief — regenerate PROJECT_BRIEF.md from PROJECT_BRIEF.json.
 #
 # Output manifest (§6.2a): #1-#11 minimal; #12-#14 only with --full.
@@ -41,6 +42,7 @@ RENDER_BRIEF="false"
 HOST="claude"
 MODE="minimal"
 FORCE_CONFIG="false"
+PLAN_TOKEN=""
 STAGE_DIR=""
 CHANGED_PATHS=()
 declare -A EXPECTED_KIND=()
@@ -62,6 +64,26 @@ sha256_file() {
   else
     echo ""
   fi
+}
+
+sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 2>/dev/null | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+path_state() {
+  local p="$1" digest
+  if [ -L "$p" ]; then printf 'symlink'; return 0; fi
+  if [ -d "$p" ]; then printf 'directory'; return 0; fi
+  if [ ! -e "$p" ]; then printf 'missing'; return 0; fi
+  digest="$(sha256_file "$p")"
+  [ -n "$digest" ] || return 1
+  printf 'file:%s' "$digest"
 }
 
 # map the 9-value detected_type to the 6-value config.json `project_type`.
@@ -428,15 +450,64 @@ do_update() {
   esac
 
   if [ "$STATE" = "legacy-unmanaged" ]; then
+    local legacy_material legacy_digest legacy_path legacy_state
+    legacy_material="state=legacy-unmanaged
+target=$TARGET
+host=$HOST
+mode=$MODE
+detected_type=$DTYPE
+source_version=$VERSION
+captured_rev=$CAPTURED_REV
+force_config=$FORCE_CONFIG"
+    for legacy_path in .harness/config.json .harness/.template-snapshot.json .harness/PROJECT_BRIEF.json .harness/PROJECT_BRIEF.md feature_list.json AGENTS.md CLAUDE.md init.sh claude-progress.md codex-progress.md; do
+      legacy_state="$(path_state "$TARGET/$legacy_path")" || { echo "error: could not bind update plan: $legacy_path" >&2; return 1; }
+      legacy_material="$legacy_material
+$legacy_path|$legacy_state"
+    done
+    legacy_digest="$(printf '%s' "$legacy_material" | sha256_text)"
+    [ -n "$legacy_digest" ] || { echo "error: could not hash update plan" >&2; return 1; }
     echo "=== Update plan ($( [ "$APPLY" = "true" ] && echo apply || echo 'dry-run — no writes' )) ==="
     echo "  would-create: .harness/.template-snapshot.json (legacy migration; existing files remain unclaimed)"
-    if [ "$APPLY" != "true" ]; then echo "Re-run with --apply to write."; return 0; fi
+    if [ "$APPLY" != "true" ]; then
+      echo "Plan token: $legacy_digest"
+      echo "Re-run with --apply --plan-token $legacy_digest to write."
+      return 0
+    fi
+    if [ "$UPDATE" = "true" ] && { [ -z "$PLAN_TOKEN" ] || [ "$PLAN_TOKEN" != "$legacy_digest" ]; }; then
+      echo "error: update plan token missing or stale; rerun --update dry-run" >&2
+      return 2
+    fi
     return 3  # caller falls through to the migration-safe fresh renderer
   fi
 
-  local snap="$TARGET/.harness/.template-snapshot.json" snapshot_base_sha
+  local snap="$TARGET/.harness/.template-snapshot.json" snapshot_base_sha plan_material plan_digest
+  local brief_path_state brief_md_state
   snapshot_base_sha="$(sha256_file "$snap")"
   [ -n "$snapshot_base_sha" ] || { echo "error: could not hash snapshot" >&2; return 1; }
+  brief_path_state="$(path_state "$TARGET/.harness/PROJECT_BRIEF.json")" || { echo "error: could not bind PROJECT_BRIEF.json" >&2; return 1; }
+  brief_md_state="$(path_state "$TARGET/.harness/PROJECT_BRIEF.md")" || { echo "error: could not bind PROJECT_BRIEF.md" >&2; return 1; }
+  plan_material="state=$STATE
+target=$TARGET
+host=$HOST
+mode=$MODE
+detected_type=$DTYPE
+source_version=$VERSION
+captured_rev=$CAPTURED_REV
+force_config=$FORCE_CONFIG
+snapshot=$snapshot_base_sha
+brief_path=$brief_path_state
+brief_md=$brief_md_state"
+  if [ -n "$BRIEF_PATH" ]; then
+    local brief_input_sha
+    brief_input_sha="$(sha256_file "$BRIEF_PATH")"
+    [ -n "$brief_input_sha" ] || { echo "error: could not hash Brief input" >&2; return 1; }
+    plan_material="$plan_material
+brief_input=$brief_input_sha"
+  fi
+  if [ "$BRIEF_STDIN" = "true" ] && [ "$UPDATE" = "true" ]; then
+    echo "error: explicit --update does not support --brief-stdin; use a stable --brief file" >&2
+    return 2
+  fi
   local plan="" wrote_any=false
   local k src desired sha_snap sha_now sha_tmpl
   SNAP_ENTRIES="$(jq -c '.templates' "$snap")" || return 2
@@ -448,6 +519,8 @@ do_update() {
     [ -f "$TARGET/$k" ] && sha_now="$(sha256_file "$TARGET/$k")" || sha_now=""
     if [ -f "$TARGET/$k" ] && [ -z "$sha_now" ]; then rm -rf "$STAGE_DIR"; echo "error: could not hash target: $k" >&2; return 1; fi
     [ -n "$desired" ] && [ -f "$TEMPLATES_DIR/$desired" ] && sha_tmpl="$(sha256_file "$TEMPLATES_DIR/$desired")" || sha_tmpl=""
+    plan_material="$plan_material
+$k|source=$src|desired=$desired|snapshot=$sha_snap|current=${sha_now:-missing}|template=${sha_tmpl:-missing}"
 
     if [ -z "$sha_now" ]; then
       if [ -z "$sha_tmpl" ]; then
@@ -487,12 +560,22 @@ do_update() {
     fi
   done
 
+  plan_digest="$(printf '%s' "$plan_material" | sha256_text)"
+  [ -n "$plan_digest" ] || { rm -rf "$STAGE_DIR"; echo "error: could not hash update plan" >&2; return 1; }
+
   if [ "$APPLY" != "true" ]; then
     echo "=== Update plan (dry-run — no writes) ==="
     printf '%s\n' "$plan" | sed '/^$/d'
-    echo "Re-run with --apply to write."
+    echo "Plan token: $plan_digest"
+    echo "Re-run with --apply --plan-token $plan_digest to write."
     rm -rf "$STAGE_DIR"
     return 0
+  fi
+
+  if [ "$UPDATE" = "true" ] && { [ -z "$PLAN_TOKEN" ] || [ "$PLAN_TOKEN" != "$plan_digest" ]; }; then
+    rm -rf "$STAGE_DIR"
+    echo "error: update plan token missing or stale; rerun --update dry-run" >&2
+    return 2
   fi
 
   if [ "$wrote_any" = "true" ]; then
@@ -540,6 +623,12 @@ while [ $# -gt 0 ]; do
     --minimal)          MODE="minimal" ;;
     --full)             MODE="full" ;;
     --force-config)     FORCE_CONFIG="true" ;;
+    --plan-token=*)     PLAN_TOKEN="${arg#--plan-token=}" ;;
+    --plan-token)
+      shift
+      [ $# -gt 0 ] || { echo "error: --plan-token requires a value" >&2; exit 2; }
+      PLAN_TOKEN="$1"
+      ;;
     --brief=*)          BRIEF_PATH="${arg#--brief=}" ;;
     --brief)
       shift
@@ -571,6 +660,10 @@ done
 
 if [ "$HOST" != "claude" ] && [ "$HOST" != "codex" ]; then
   echo "harness-init.sh: invalid --host '$HOST' (must be claude|codex)" >&2
+  exit 2
+fi
+if [ -n "$PLAN_TOKEN" ] && ! printf '%s' "$PLAN_TOKEN" | grep -qE '^[0-9a-f]{64}$'; then
+  echo "harness-init.sh: invalid --plan-token (must be 64 lowercase hex characters)" >&2
   exit 2
 fi
 

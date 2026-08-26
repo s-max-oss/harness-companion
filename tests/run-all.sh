@@ -63,18 +63,58 @@ mapfile -t TESTS < <(find "$ROOT/tests" -name 'test-*.sh' | LC_ALL=C sort)
 TOTAL=0
 PASS_ALL=0
 FAILS=""
-for t in "${TESTS[@]}"; do
-  TOTAL=$((TOTAL+1))
-  rel="${t#"$ROOT"/}"
+
+record_result() {
+  local rel="$1" rc="$2" output="$3"
   echo "========== RUNNING $rel =========="
-  run_test "$rel"
-  rc=$?
+  cat "$output"
   if [ "$rc" -eq 0 ]; then
     PASS_ALL=$((PASS_ALL+1))
   else
     FAILS="$FAILS $rel(rc=$rc)"
   fi
   echo
+}
+
+# The core contracts are fixture-isolated, but on Windows/MSYS their process
+# startup cost makes a fully sequential run exceed the auditable 7200-second
+# command ceiling before the release archive can finish. Run only those core
+# contracts two at a time. Adapter/install/release tests remain serialized
+# because they exercise host-level installation and archive resources.
+i=0
+while [ "$i" -lt "${#TESTS[@]}" ]; do
+  t1="${TESTS[$i]}"
+  rel1="${t1#"$ROOT"/}"
+  if [[ "$rel1" == tests/core/* ]] && [ $((i + 1)) -lt "${#TESTS[@]}" ]; then
+    t2="${TESTS[$((i + 1))]}"
+    rel2="${t2#"$ROOT"/}"
+  else
+    rel2=""
+  fi
+
+  if [[ "$rel2" == tests/core/* ]]; then
+    out1="$(mktemp)"
+    out2="$(mktemp)"
+    run_test "$rel1" >"$out1" 2>&1 &
+    pid1=$!
+    run_test "$rel2" >"$out2" 2>&1 &
+    pid2=$!
+    wait "$pid1"; rc1=$?
+    wait "$pid2"; rc2=$?
+    TOTAL=$((TOTAL + 2))
+    record_result "$rel1" "$rc1" "$out1"
+    record_result "$rel2" "$rc2" "$out2"
+    rm -f "$out1" "$out2"
+    i=$((i + 2))
+  else
+    out1="$(mktemp)"
+    run_test "$rel1" >"$out1" 2>&1
+    rc1=$?
+    TOTAL=$((TOTAL + 1))
+    record_result "$rel1" "$rc1" "$out1"
+    rm -f "$out1"
+    i=$((i + 1))
+  fi
 done
 echo "========== FULL SUITE DONE =========="
 echo "SUITES: $PASS_ALL/$TOTAL passed"

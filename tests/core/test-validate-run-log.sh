@@ -95,7 +95,10 @@ assert_invalid() {
 
 install_golden() {
   local run_id="$1" golden_name="$2"
-  cp "$GOLDEN_DIR/$golden_name" "$TMPDIR/.harness/logs/runs/${run_id}.ndjson"
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '%s' "$line" | jq -c --arg root "$TMPDIR" \
+      'if .event == "run_started" then .project_root = $root else . end'
+  done < "$GOLDEN_DIR/$golden_name" > "$TMPDIR/.harness/logs/runs/${run_id}.ndjson"
 }
 
 # Codex r6: structural tests (Steps 12-15) build hand-crafted fixtures whose
@@ -362,13 +365,13 @@ assert_invalid "planned != executed + skipped" "t17" "planned_count_invariant"
 
 # 14c: planned > required_command_ids.length is VALID (optional commands allowed)
 # required=["c1","c2"] (length=2), all required completed + 1 optional (c3),
-# terminal says planned=3 (because optional command exists), executed=2, passed=1, failed=1, skipped=1
+# terminal says planned=3 (because optional command exists), executed=2, passed=2, failed=0, skipped=1
 # v2 fix: required_command_ids is a subset of planned — planned >= required is OK.
 cat > "$TMPDIR/.harness/logs/runs/t18.ndjson" <<EOF
-{"event":"run_started","schema_version":2,"run_id":"t18","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1","c2"],"capability_level":1,"feature_id":null}
-$(_cmd_completed t18 c1 '["echo"]' configured not_required 1)
+{"event":"run_started","schema_version":2,"run_id":"t18","started_at":"2026-01-01T00:00:00Z","project_root":"$TMPDIR","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1","c2"],"capability_level":1,"feature_id":null}
+$(_cmd_completed t18 c1 '["echo"]' configured not_required 0)
 $(_cmd_completed t18 c2 '["echo"]' configured not_required 0)
-{"event":"run_completed","schema_version":2,"run_id":"t18","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":3,"executed_commands":2,"passed_commands":1,"failed_commands":1,"skipped_commands":1}
+{"event":"run_completed","schema_version":2,"run_id":"t18","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":3,"executed_commands":2,"passed_commands":2,"failed_commands":0,"skipped_commands":1}
 EOF
 assert_valid "planned > required (optional commands) is valid" "t18"
 
@@ -482,7 +485,7 @@ if command -v cygpath >/dev/null 2>&1; then
   WIN_ABS="$(cygpath -m "$TMPDIR/.harness/logs/runs/winpath/win.log")"
   WIN_SHA="$(sha256sum "$TMPDIR/.harness/logs/runs/winpath/win.log" | awk '{print $1}')"
   cat > "$TMPDIR/.harness/logs/runs/winpath.ndjson" <<EOF
-{"event":"run_started","schema_version":2,"run_id":"winpath","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
+{"event":"run_started","schema_version":2,"run_id":"winpath","started_at":"2026-01-01T00:00:00Z","project_root":"$TMPDIR","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
 {"event":"command_completed","schema_version":2,"run_id":"winpath","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":0,"started_at":"2026-01-01T00:00:00Z","duration_ms":100,"log_artifact":"$WIN_ABS","log_sha256":"$WIN_SHA"}
 {"event":"run_completed","schema_version":2,"run_id":"winpath","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":0}
 EOF
@@ -593,12 +596,52 @@ mv "$TMPDIR/.harness/config.json.bak" "$TMPDIR/.harness/config.json"
 # step 5d. The terminal event is `run_failed` (not `run_completed`) because
 # harness-verify.sh lines 607-639 emit run_failed when failed_commands > 0.
 mkdir -p "$TMPDIR/.harness/logs/runs"
-cat > "$TMPDIR/.harness/logs/runs/forgery7.ndjson" <<'EOF'
-{"event":"run_started","schema_version":2,"run_id":"forgery7","started_at":"2026-01-01T00:00:00Z","project_root":"/x","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["typecheck"],"capability_level":1,"feature_id":null}
+cat > "$TMPDIR/.harness/logs/runs/forgery7.ndjson" <<EOF
+{"event":"run_started","schema_version":2,"run_id":"forgery7","started_at":"2026-01-01T00:00:00Z","project_root":"$TMPDIR","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["typecheck"],"capability_level":1,"feature_id":null}
 {"event":"command_completed","schema_version":2,"run_id":"forgery7","command_id":"typecheck","command":["npx","tsc","--noEmit"],"command_origin":"configured","confirmation":"not_required","exit_code":127,"started_at":"2026-01-01T00:00:00Z","duration_ms":0,"log_artifact":"","log_sha256":null}
 {"event":"run_failed","schema_version":2,"run_id":"forgery7","completed_at":"2026-01-01T00:00:00Z","overall_result":"failed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":0,"failed_commands":1,"skipped_commands":0,"failed_command_ids":["typecheck"]}
 EOF
 assert_valid "5b/5c/5d: legitimate missing-tool sentinel (empty log_artifact, null log_sha256) accepted" "forgery7"
+
+# Terminal truth is derived from command exit codes. A failed command cannot be
+# relabelled as passed with self-consistent but false terminal counters.
+cat > "$TMPDIR/.harness/logs/runs/forgery8.ndjson" <<EOF
+{"event":"run_started","schema_version":2,"run_id":"forgery8","started_at":"2026-01-01T00:00:00Z","project_root":"$TMPDIR","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
+$(_cmd_completed forgery8 c1 '["echo"]' configured not_required 1)
+{"event":"run_completed","schema_version":2,"run_id":"forgery8","completed_at":"2026-01-01T00:00:00Z","overall_result":"passed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":1,"failed_commands":0,"skipped_commands":0}
+EOF
+assert_invalid "14e: nonzero command cannot be relabelled passed" "forgery8" "terminal_command_result_mismatch"
+
+cat > "$TMPDIR/.harness/logs/runs/forgery9.ndjson" <<EOF
+{"event":"run_started","schema_version":2,"run_id":"forgery9","started_at":"2026-01-01T00:00:00Z","project_root":"$TMPDIR","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
+$(_cmd_completed forgery9 c1 '["echo"]' configured not_required 2)
+{"event":"run_failed","schema_version":2,"run_id":"forgery9","completed_at":"2026-01-01T00:00:00Z","overall_result":"failed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":0,"failed_commands":1,"skipped_commands":0,"failed_command_ids":["other"]}
+EOF
+assert_invalid "14e: failed_command_ids must equal failed command events" "forgery9" "failed_command_ids_mismatch"
+
+mkdir -p "$TMPDIR/.harness/logs/runs/forgery10"
+printf 'real exit-127 log\n' > "$TMPDIR/.harness/logs/runs/forgery10/c1.log"
+cat > "$TMPDIR/.harness/logs/runs/forgery10.ndjson" <<EOF
+{"event":"run_started","schema_version":2,"run_id":"forgery10","started_at":"2026-01-01T00:00:00Z","project_root":"$TMPDIR","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
+{"event":"command_completed","schema_version":2,"run_id":"forgery10","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":127,"started_at":"2026-01-01T00:00:00Z","duration_ms":0,"log_artifact":".harness/logs/runs/forgery10/c1.log","log_sha256":null}
+{"event":"run_failed","schema_version":2,"run_id":"forgery10","completed_at":"2026-01-01T00:00:00Z","overall_result":"failed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":0,"failed_commands":1,"skipped_commands":0,"failed_command_ids":["c1"]}
+EOF
+assert_invalid "5c: exit 127 with a real artifact still requires its hash" "forgery10" "log_sha256_missing"
+
+cat > "$TMPDIR/.harness/logs/runs/forgery11.ndjson" <<EOF
+{"event":"run_started","schema_version":2,"run_id":"forgery11","started_at":"2026-01-01T00:00:00Z","project_root":"$TMPDIR","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":["c1"],"capability_level":1,"feature_id":null}
+{"event":"command_completed","schema_version":2,"run_id":"forgery11","command_id":"c1","command":["echo"],"command_origin":"configured","confirmation":"not_required","exit_code":127,"started_at":"2026-01-01T00:00:00Z","duration_ms":0,"log_artifact":"","log_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}
+{"event":"run_failed","schema_version":2,"run_id":"forgery11","completed_at":"2026-01-01T00:00:00Z","overall_result":"failed","workspace_fingerprint_verified":"fp","planned_commands":1,"executed_commands":1,"passed_commands":0,"failed_commands":1,"skipped_commands":0,"failed_command_ids":["c1"]}
+EOF
+assert_invalid "5c: missing-tool sentinel requires null hash" "forgery11" "missing_tool_sentinel_hash_not_null"
+
+OTHER_ROOT="$OUTSIDE_ESC/project-root"
+mkdir -p "$OTHER_ROOT"
+cat > "$TMPDIR/.harness/logs/runs/forgery12.ndjson" <<EOF
+{"event":"run_started","schema_version":2,"run_id":"forgery12","started_at":"2026-01-01T00:00:00Z","project_root":"$OTHER_ROOT","workspace_fingerprint_initial":"fp","config_sha256":"cs","required_command_ids":[],"capability_level":1,"feature_id":null}
+{"event":"run_completed","schema_version":2,"run_id":"forgery12","completed_at":"2026-01-01T00:00:00Z","overall_result":"no_checks","workspace_fingerprint_verified":"fp","planned_commands":0,"executed_commands":0,"passed_commands":0,"failed_commands":0,"skipped_commands":0}
+EOF
+assert_invalid "16: recorded project_root must match validator project" "forgery12" "project_root_mismatch"
 
 # ============================================================================
 # Summary

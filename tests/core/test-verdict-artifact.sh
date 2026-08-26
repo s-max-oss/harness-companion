@@ -59,9 +59,9 @@ build_no_checks_run() {
   local d="$1" rid="$2" fid="${3:-}"
   mkdir -p "$d/.harness/logs/runs"
   local r1 r2
-  r1="$(jq -cn --arg rid "$rid" --arg fid "${fid:-}" \
+  r1="$(jq -cn --arg rid "$rid" --arg fid "${fid:-}" --arg root "$d" \
     '{schema_version:1, event:"run_started", run_id:$rid,
-      started_at:"2026-08-08T00:00:00Z", project_root:"<test>",
+      started_at:"2026-08-08T00:00:00Z", project_root:$root,
       workspace_fingerprint_initial:"fp", config_sha256:"cfg",
       feature_id:($fid | if . == "" then null else . end),
       required_command_ids:[], capability_level:0}')"

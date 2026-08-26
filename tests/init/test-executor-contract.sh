@@ -26,6 +26,11 @@ brief() {
   }' > "$path"
 }
 
+plan_token() {
+  local target="$1"; shift
+  bash "$INIT" "$target" --update "$@" 2>/dev/null | sed -n 's/^Plan token: //p' | tail -1
+}
+
 # 1. Brief drives every typed output even when the target has no repo markers.
 T1="$TMP/brief-python"; mkdir -p "$T1"; brief "$TMP/python.json" python
 if bash "$INIT" "$T1" --brief "$TMP/python.json" --non-interactive >/dev/null 2>&1; then
@@ -84,7 +89,8 @@ fi
 # 4. Update recreates a missing tracked file and retains every snapshot entry.
 COUNT_BEFORE="$(jq '.templates|length' "$T1/.harness/.template-snapshot.json")"
 rm "$T1/CLAUDE.md"
-if bash "$INIT" "$T1" --update --apply >/dev/null 2>&1; then
+T1_UPDATE_TOKEN="$(plan_token "$T1")"
+if bash "$INIT" "$T1" --update --apply --plan-token "$T1_UPDATE_TOKEN" >/dev/null 2>&1; then
   check "update recreates missing tracked file" test -f "$T1/CLAUDE.md"
   check "update retains snapshot entries" test "$(jq '.templates|length' "$T1/.harness/.template-snapshot.json")" -eq "$COUNT_BEFORE"
 else
@@ -95,7 +101,8 @@ fi
 printf '\nforce-protected\n' >> "$T1/init.sh"
 INIT_SHA="$(sha256sum "$T1/init.sh" | awk '{print $1}')"
 printf '{"project_type":"broken"}\n' > "$T1/.harness/config.json"
-if bash "$INIT" "$T1" --force-config >/dev/null 2>&1; then
+T1_FORCE_TOKEN="$(plan_token "$T1" --force-config)"
+if bash "$INIT" "$T1" --update --apply --force-config --plan-token "$T1_FORCE_TOKEN" >/dev/null 2>&1; then
   check "force-config restores only config" test "$(jq -r .project_type "$T1/.harness/config.json")" = python
   check "force-config protects init.sh" test "$(sha256sum "$T1/init.sh" | awk '{print $1}')" = "$INIT_SHA"
 else
@@ -109,10 +116,10 @@ printf 'user agents\n' > "$T6/AGENTS.md"
 printf '{"schema_version":1}\n' > "$T6/feature_list.json"
 printf '#!/bin/bash\n' > "$T6/init.sh"
 LEGACY_BEFORE="$(find "$T6" -type f -print0 | sort -z | xargs -0 sha256sum)"
-bash "$INIT" "$T6" --update >/dev/null 2>&1
+T6_TOKEN="$(plan_token "$T6")"
 LEGACY_AFTER="$(find "$T6" -type f -print0 | sort -z | xargs -0 sha256sum)"
 check "legacy update dry-run writes zero bytes" test "$LEGACY_BEFORE" = "$LEGACY_AFTER"
-if bash "$INIT" "$T6" --update --apply >/dev/null 2>&1; then
+if bash "$INIT" "$T6" --update --apply --plan-token "$T6_TOKEN" >/dev/null 2>&1; then
   check "legacy apply creates snapshot" test -f "$T6/.harness/.template-snapshot.json"
   if jq -e '.templates | has("AGENTS.md") or has("feature_list.json") or has("init.sh")' "$T6/.harness/.template-snapshot.json" >/dev/null; then
     bad "legacy snapshot does not backfill provenance"
@@ -121,6 +128,19 @@ if bash "$INIT" "$T6" --update --apply >/dev/null 2>&1; then
   fi
 else
   bad "legacy update apply" "executor exited non-zero"
+fi
+
+# 6b. A dry-run token is invalid as soon as any bound target changes. In
+# particular, --force-config cannot overwrite edits made after confirmation.
+printf '{"project_type":"stale-plan"}\n' > "$T1/.harness/config.json"
+STALE_TOKEN="$(plan_token "$T1" --force-config)"
+printf '{"project_type":"edited-after-plan"}\n' > "$T1/.harness/config.json"
+STALE_SHA="$(sha256sum "$T1/.harness/config.json" | awk '{print $1}')"
+if bash "$INIT" "$T1" --update --apply --force-config --plan-token "$STALE_TOKEN" >/dev/null 2>&1; then
+  bad "stale update token rejected"
+else
+  ok "stale update token rejected"
+  check "stale token preserves post-plan edit" test "$(sha256sum "$T1/.harness/config.json" | awk '{print $1}')" = "$STALE_SHA"
 fi
 
 # 7. Structurally incomplete snapshot is rejected before any mutation.

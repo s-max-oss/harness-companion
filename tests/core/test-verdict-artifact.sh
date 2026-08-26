@@ -363,22 +363,27 @@ run_same_id_concurrency() {
   base="$(git -C "$d" rev-parse HEAD~1 2>/dev/null || git -C "$d" rev-parse HEAD)"
   head="$(git -C "$d" rev-parse HEAD)"
   local workers=8
+  # Windows/MSYS has a much smaller practical process budget than POSIX hosts:
+  # every lock poll and Git/JQ validation is a spawned process. Four live
+  # contenders still exercise same-ID serialization, rollback safety, and
+  # attempt continuity without turning the release suite into a process-table
+  # exhaustion test. Linux/macOS retain the full eight-way stress level.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) workers=4 ;;
+  esac
   local saved_backend="$_LR_BACKEND"
   local saved_poll="$POLL_INTERVAL_S"
   _LR_BACKEND="$backend"
   # Every writer deliberately holds the same-ID lock while performing real
   # Git object checks, lifecycle validation, and a nested runtime-manifest
-  # transaction.  On Windows/MSYS those subprocesses are expensive enough
-  # that writers 7-8 can legitimately wait longer than 120 seconds even
-  # though the lock is making forward progress.  Keep all eight contenders
-  # and every continuity assertion; only give the serialized contract enough
-  # wall-clock budget to complete on the slowest supported host.
-  export LOCK_TIMEOUT_S=300
-  # MSYS implements sleep and several metadata probes as subprocesses. Eight
-  # contenders polling every 100 ms can exhaust its process table before the
-  # serialized owner releases the lock. A 500 ms poll retains genuine 8-way
-  # contention while avoiding a host-specific fork storm.
-  export POLL_INTERVAL_S=0.5
+  # transaction. Give the serialized contract enough wall-clock budget to
+  # complete on the slowest supported host.
+  export LOCK_TIMEOUT_S=180
+  # MSYS implements sleep and several metadata probes as subprocesses. Even
+  # four contenders polling every 100 ms can create avoidable process pressure.
+  # A 250 ms poll retains genuine same-ID contention while avoiding a
+  # host-specific fork storm.
+  export POLL_INTERVAL_S=0.25
   i=1
   while [ "$i" -le "$workers" ]; do
     verdict_append_record "$d" feature F-CONV-01 "$(feature_rec "$d" F-CONV-01 1 FAIL "" "$base" "$head")" \

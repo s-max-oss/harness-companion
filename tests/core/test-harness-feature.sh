@@ -647,9 +647,23 @@ fi
 echo ""
 echo "=== E2: failure branch releases the registry lock (P0-4, Codex item 9) ==="
 
+# Backend-independent release assertion. The mkdir backend removes the lock
+# directory; the Linux flock backend intentionally keeps flock.lock as its
+# reusable kernel-lock target, but must remove the .lr_owner sidecar. Treating
+# the reusable flock container itself as an active lock is a false positive.
+lock_is_released() {
+  local lock_dir="$1"
+  if [ -f "$lock_dir/flock.lock" ]; then
+    [ ! -e "$lock_dir/.lr_owner" ] && [ ! -L "$lock_dir/.lr_owner" ]
+  else
+    [ ! -d "$lock_dir" ]
+  fi
+}
+
 # P0-4 (Codex item 9): a failing command that acquires the registry lock and
 # then returns EARLY (before an explicit release_lock) must still release the
-# lockdir. The EXIT trap is the safety net, but it references $LOCK_DIR — which
+# active ownership. The EXIT trap is the safety net, but it references
+# $LOCK_DIR — which
 # was historically `local` to cmd_add/cmd_status. A `local` goes out of scope
 # when the function returns, so the trap fired `release_lock ""` (usage error,
 # swallowed by `|| true`) and LEAKED the lockdir, leaving the next command to
@@ -665,11 +679,11 @@ set +e
 "$FEATURE_SCRIPT" add "$P" "F-EXIST" >/dev/null 2>&1
 RC1=$?
 set -e
-LOCK1="yes"; [ -d "$P/.harness/.registry.lock" ] || LOCK1="no"
-if [ "$RC1" != "0" ] && [ "$LOCK1" = "no" ]; then
-  assert_pass "E2: duplicate-ID add fails (rc=$RC1) AND releases the lockdir"
+LOCK1="active"; lock_is_released "$P/.harness/.registry.lock" && LOCK1="released"
+if [ "$RC1" != "0" ] && [ "$LOCK1" = "released" ]; then
+  assert_pass "E2: duplicate-ID add fails (rc=$RC1) AND releases active ownership"
 else
-  assert_fail "E2: duplicate-ID add must fail and release the lockdir" "rc=$RC1 lockdir_present=$LOCK1"
+  assert_fail "E2: duplicate-ID add must fail and release active ownership" "rc=$RC1 lock_state=$LOCK1"
 fi
 
 # (2) invalid status transition — cmd_status returns 3 inside the lock.
@@ -679,11 +693,11 @@ set +e
 "$FEATURE_SCRIPT" status "$P" "F-T" "passing" >/dev/null 2>&1
 RC2=$?
 set -e
-LOCK2="yes"; [ -d "$P/.harness/.registry.lock" ] || LOCK2="no"
-if [ "$RC2" != "0" ] && [ "$LOCK2" = "no" ]; then
-  assert_pass "E2: invalid transition fails (rc=$RC2) AND releases the lockdir"
+LOCK2="active"; lock_is_released "$P/.harness/.registry.lock" && LOCK2="released"
+if [ "$RC2" != "0" ] && [ "$LOCK2" = "released" ]; then
+  assert_pass "E2: invalid transition fails (rc=$RC2) AND releases active ownership"
 else
-  assert_fail "E2: invalid transition must fail and release the lockdir" "rc=$RC2 lockdir_present=$LOCK2"
+  assert_fail "E2: invalid transition must fail and release active ownership" "rc=$RC2 lock_state=$LOCK2"
 fi
 
 # ----------------------------------------------------------------------------

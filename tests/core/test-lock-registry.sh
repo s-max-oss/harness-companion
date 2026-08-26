@@ -318,7 +318,12 @@ rm -rf "$T10/lock"
 
 # Process A acquires and holds the lock for 2 seconds, then releases.
 (
-  TOK_A="$(acquire_lock "$T10/lock" 2)" && {
+  # Acquire in this background shell, not in a command-substitution child.
+  # The mkdir backend records BASHPID for stale-owner detection; capturing
+  # acquire_lock via $(...) would record the short-lived child's PID, which
+  # exits immediately and makes a live lock look stale on Linux.
+  acquire_lock "$T10/lock" 2 >/dev/null && {
+    TOK_A="$LOCK_REGISTRY_TOKEN"
     # Hold the lock — write a flag file B can poll for confirmation.
     echo "A holds lock token=$TOK_A" > "$T10/a_holds"
     sleep 2

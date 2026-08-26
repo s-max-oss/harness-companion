@@ -1,0 +1,14 @@
+{
+  "name": "harness-companion",
+  "version": "2.0.0-rc.2",
+  "description": "Harness Engineering skill — evidence-backed feature pipeline for reliable AI coding environments",
+  "author": {
+    "name": "harness-engineering"
+  },
+  "homepage": "https://github.com/s-max-oss/harness-companion",
+  "repository": "https://github.com/s-max-oss/harness-companion",
+  "license": "MIT",
+  "keywords": ["harness", "engineering", "feature-tracking", "evidence", "audit"],
+  "skills": ["./"],
+  "hooks": "./adapters/claude-code/hooks/hooks.json"
+}

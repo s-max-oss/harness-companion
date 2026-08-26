@@ -50,6 +50,21 @@ source "$SKILL_DIR/lib/harness-config.sh"
 source "$SKILL_DIR/lib/passing.sh"
 # shellcheck source=lib/lock-registry.sh
 source "$SKILL_DIR/lib/lock-registry.sh"
+# shellcheck source=lib/validate-feature-registry.sh
+source "$SKILL_DIR/lib/validate-feature-registry.sh"
+# shellcheck source=lib/registry-journal.sh
+source "$SKILL_DIR/lib/registry-journal.sh"
+
+# _sha256_of_string <content> — used to record post-mutation SHA in journal.
+_sha256_of_string() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  else
+    printf 'null'
+  fi
+}
 
 # Keep -e off so command failures are captured, not shell-killing.
 set +e
@@ -149,11 +164,28 @@ _acquire_lock_in_caller() {
   # directory and break acquire_lock's atomic-mkdir primitive.
   local parent_dir
   parent_dir="$(dirname "$lock_dir")"
+  # Same-host orphan recovery: an empty parent with no metadata files is an
+  # orphaned bootstrap half-step from a crashed sibling (e.g. runtime-manifest
+  # released its child leaf but left the parent empty). The mkdir-acquire
+  # backend cannot stale-recover from an empty parent (no metadata to
+  # evaluate; the 10s timeout burns down). Remove it so this caller can
+  # claim the leaf. Safe: empty parent = no holder can exist on any path.
+  if [ -d "$parent_dir" ] && [ -z "$(ls -A "$parent_dir" 2>/dev/null)" ]; then
+    rmdir "$parent_dir" 2>/dev/null || true
+  fi
   if [ ! -d "$parent_dir" ]; then
     mkdir -p "$parent_dir" 2>/dev/null || true
   fi
-  if ! acquire_lock "$lock_dir" 10; then
-    echo "harness-feature: lock_timeout — could not acquire registry lock after 10s" >&2
+  # Same empty-leaf recovery for lock_dir itself.
+  if [ -d "$lock_dir" ] && [ -z "$(ls -A "$lock_dir" 2>/dev/null)" ]; then
+    rmdir "$lock_dir" 2>/dev/null || true
+  fi
+  # Default bounded wait is 10s (human-scale for interactive CLI mutation);
+  # LOCK_TIMEOUT_S env override allows tests to give a wider contention budget
+  # on slow filesystems (e.g. MSYS) without changing production defaults.
+  local lock_timeout="${LOCK_TIMEOUT_S:-10}"
+  if ! acquire_lock "$lock_dir" "$lock_timeout" >/dev/null; then
+    echo "harness-feature: lock_timeout — could not acquire registry lock after ${lock_timeout}s" >&2
     return 7
   fi
   return 0
@@ -172,9 +204,17 @@ cmd_list() {
     return 2
   fi
 
-  local rev total passing in_progress blocked not_started unverified deprecated
+  # FAIL-CLOSED (P0-6): validate the registry with the canonical validator
+  # BEFORE printing anything — list must never render counts/rows built from an
+  # invalid registry. A passing feature without evidence, a WIP overrun, an
+  # empty features array, etc. all fail here and list exits 1.
+  if ! validate_feature_registry "$fl" "$dir"; then
+    echo "Error: feature_list.json failed canonical registry validation" >&2
+    return 1
+  fi
+
+  local rev passing in_progress blocked not_started unverified deprecated
   rev="$(_read_revision "$fl")"
-  total="$(jq '.features | length' "$fl")"
   passing="$(jq '[.features[] | select(.status=="passing")] | length' "$fl")"
   in_progress="$(jq '[.features[] | select(.status=="in_progress")] | length' "$fl")"
   blocked="$(jq '[.features[] | select(.status=="blocked")] | length' "$fl")"
@@ -184,12 +224,8 @@ cmd_list() {
 
   echo "Features in $(basename "$dir") (revision: $rev):"
   echo ""
-  if [ "$total" = "0" ]; then
-    echo "  (no features defined)"
-    echo ""
-    echo "Add one with: harness-feature.sh add $dir <id> [title]"
-    return 0
-  fi
+  # Validation guarantees non-empty features; the empty branch is unreachable
+  # (an empty features array fails the canonical validator, exit 1 above).
   printf "  %-22s %-13s %s\n" "ID" "Status" "Evidence"
   printf "  %-22s %-13s %s\n" "----------------------" "-------------" "--------"
   while IFS=$'\t' read -r id status n_ev; do
@@ -216,19 +252,31 @@ cmd_add() {
     echo "Error: feature_list.json not found in $dir" >&2
     return 2
   fi
-  if jq -e --arg id "$id" '.features[] | select(.id == $id)' "$fl" >/dev/null 2>&1; then
-    echo "Error: feature '$id' already exists." >&2
-    return 1
-  fi
-
   # Acquire lock for the mutation. acquire_lock must NOT be wrapped in $()
   # — the flock backend keeps the kernel lock via FD 9 in this shell; a
   # subshell would release it. Token is exposed via $LOCK_REGISTRY_TOKEN.
-  local LOCK_DIR="$dir/.harness/.registry.lock"
+  # P0-4 (Codex item 9): LOCK_DIR must NOT be `local`. The EXIT trap below fires
+  # at SCRIPT exit — after this function has returned and its locals are out of
+  # scope. A `local` LOCK_DIR would expand to empty in the trap, so the trap
+  # would call `release_lock ""` (usage error, swallowed by `|| true`) and LEAK
+  # the lockdir on every early-return failure branch (duplicate-ID, invalid
+  # transition, WIP overrun, not-found, etc.). A global keeps the trap's release
+  # working even when the command fails and returns before explicit release.
+  LOCK_DIR="$dir/.harness/.registry.lock"
   if ! _acquire_lock_in_caller "$LOCK_DIR"; then
     return 7
   fi
   trap 'release_lock "$LOCK_DIR" >/dev/null 2>&1 || true' EXIT
+
+  # P0-4: the duplicate-ID check MUST run INSIDE the lock, against the CURRENT
+  # registry. Two concurrent same-ID adds would both pass an unlocked pre-check
+  # (TOCTOU) and then both write a duplicate-feature registry. Under the lock
+  # the second re-read sees the first process's committed feature and FAILS
+  # closed (return 1) — never a duplicate-feature registry.
+  if jq -e --arg id "$id" '.features[] | select(.id == $id)' "$fl" >/dev/null 2>&1; then
+    echo "Error: feature '$id' already exists." >&2
+    return 1
+  fi
 
   local today
   today="$(date +%Y-%m-%d)"
@@ -251,10 +299,36 @@ cmd_add() {
     return 1
   fi
 
+  # Contract 3: bind the deterministic expected post-state SHA (sha of the exact
+  # content we are about to atomic-write) BEFORE journaling the pending line, so
+  # recovery can roll-forward ONLY on that exact SHA.
+  local post_sha
+  post_sha="$(_sha256_of_string "$new_content")"
+  [ -z "$post_sha" ] && post_sha="null"
+
+  # P0-M2: journal two-phase — pending → atomic_write → committed.
+  journal_init "$dir" || { release_lock "$LOCK_DIR" >/dev/null 2>&1 || true; trap - EXIT; return 1; }
+  local op_key
+  if ! op_key="$(journal_record_pending "$dir" "add" "$id" "" "not_started" --revision "$next_rev" --post-sha "$post_sha")"; then
+    echo "harness-feature: journal pending failed (revision unchanged)" >&2
+    release_lock "$LOCK_DIR" >/dev/null 2>&1 || true; trap - EXIT; return 1
+  fi
+
   if ! atomic_write_json "$fl" "$new_content"; then
     echo "harness-feature: atomic_write_json failed for $fl (revision unchanged)" >&2
-    return 1
+    release_lock "$LOCK_DIR" >/dev/null 2>&1 || true; trap - EXIT; return 1
   fi
+
+  # Contract 3 (fail-closed): a committed-append failure after the registry was
+  # already updated MUST fail the command (never warn-and-continue). The pending
+  # line now carries expected_post_sha so the NEXT journal_init recovery can
+  # roll-forward exactly.
+  journal_record_committed "$dir" "$op_key" "$post_sha" || {
+    echo "harness-feature: journal committed failed (registry already updated — pending orphan will roll-forward on next mutation)" >&2
+    release_lock "$LOCK_DIR" >/dev/null 2>&1 || true
+    trap - EXIT
+    return 1
+  }
 
   release_lock "$LOCK_DIR" >/dev/null 2>&1 || true
   trap - EXIT
@@ -304,7 +378,14 @@ cmd_status() {
   fi
 
   # Acquire lock — all read-modify-write is serialized.
-  local LOCK_DIR="$dir/.harness/.registry.lock"
+  # P0-4 (Codex item 9): LOCK_DIR must NOT be `local`. The EXIT trap below fires
+  # at SCRIPT exit — after this function has returned and its locals are out of
+  # scope. A `local` LOCK_DIR would expand to empty in the trap, so the trap
+  # would call `release_lock ""` (usage error, swallowed by `|| true`) and LEAK
+  # the lockdir on every early-return failure branch (duplicate-ID, invalid
+  # transition, WIP overrun, not-found, etc.). A global keeps the trap's release
+  # working even when the command fails and returns before explicit release.
+  LOCK_DIR="$dir/.harness/.registry.lock"
   if ! _acquire_lock_in_caller "$LOCK_DIR"; then
     return 7
   fi
@@ -393,10 +474,26 @@ cmd_status() {
       echo "harness-feature: jq status mutation failed (revision unchanged)" >&2
       return 1
     fi
+    # Contract 3: bind expected post-state SHA before pending (see cmd_add).
+    local post_sha
+    post_sha="$(_sha256_of_string "$new_content")"
+    [ -z "$post_sha" ] && post_sha="null"
+    journal_init "$dir" || { release_lock "$LOCK_DIR" >/dev/null 2>&1 || true; trap - EXIT; return 1; }
+    local op_key
+    if ! op_key="$(journal_record_pending "$dir" "status" "$id" "$current_status" "$new_status" --revision "$next_rev" --post-sha "$post_sha")"; then
+      echo "harness-feature: journal pending failed (revision unchanged)" >&2
+      release_lock "$LOCK_DIR" >/dev/null 2>&1 || true; trap - EXIT; return 1
+    fi
     if ! atomic_write_json "$fl" "$new_content"; then
       echo "harness-feature: atomic_write_json failed (revision unchanged)" >&2
-      return 1
+      release_lock "$LOCK_DIR" >/dev/null 2>&1 || true; trap - EXIT; return 1
     fi
+    journal_record_committed "$dir" "$op_key" "$post_sha" || {
+      echo "harness-feature: journal committed failed (registry already updated — pending orphan will roll-forward on next mutation)" >&2
+      release_lock "$LOCK_DIR" >/dev/null 2>&1 || true
+      trap - EXIT
+      return 1
+    }
   else
     jq_program='(.features[] | select(.id == $id) | .status) = $status
                 | .revision = $rev
@@ -408,10 +505,28 @@ cmd_status() {
       echo "harness-feature: jq status mutation failed (revision unchanged)" >&2
       return 1
     fi
+    # Contract 3: bind expected post-state SHA before pending (see cmd_add).
+    local post_sha
+    post_sha="$(printf '%s' "$new_content" | sha256sum 2>/dev/null | awk '{print $1}')"
+    [ -z "$post_sha" ] && { command -v shasum >/dev/null 2>&1 \
+      && post_sha="$(printf '%s' "$new_content" | shasum -a 256 | awk '{print $1}')"; } || true
+    [ -z "$post_sha" ] && post_sha="null"
+    journal_init "$dir" || { release_lock "$LOCK_DIR" >/dev/null 2>&1 || true; trap - EXIT; return 1; }
+    local op_key
+    if ! op_key="$(journal_record_pending "$dir" "status" "$id" "$current_status" "$new_status" --revision "$next_rev" --post-sha "$post_sha")"; then
+      echo "harness-feature: journal pending failed (revision unchanged)" >&2
+      release_lock "$LOCK_DIR" >/dev/null 2>&1 || true; trap - EXIT; return 1
+    fi
     if ! atomic_write_json "$fl" "$new_content"; then
       echo "harness-feature: atomic_write_json failed (revision unchanged)" >&2
-      return 1
+      release_lock "$LOCK_DIR" >/dev/null 2>&1 || true; trap - EXIT; return 1
     fi
+    journal_record_committed "$dir" "$op_key" "$post_sha" || {
+      echo "harness-feature: journal committed failed (registry already updated — pending orphan will roll-forward on next mutation)" >&2
+      release_lock "$LOCK_DIR" >/dev/null 2>&1 || true
+      trap - EXIT
+      return 1
+    }
   fi
 
   release_lock "$LOCK_DIR" >/dev/null 2>&1 || true

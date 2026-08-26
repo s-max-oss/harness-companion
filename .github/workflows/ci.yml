@@ -2,15 +2,21 @@ name: harness-companion CI
 
 # CI for the harness-companion standalone repository.
 #
-# Runs on every push to master and every PR targeting master. Executes:
+# Runs on every push to master, every PR targeting master, AND every push of
+# a v* tag. Executes:
 #   1. Core regression suite (tests/core/test-*.sh)
 #   2. Claude Code adapter contract suite (tests/adapters/test-claude-code-contract.sh)
 #   3. Codex adapter contract suite (tests/adapters/test-codex-contract.sh)
 #   4. Codex install-modes suite (tests/adapters/test-codex-install-modes.sh)
 #   5. Migration / v1-compat suite (tests/migration/test-v1-compat.sh)
+#   5b. Claude Code lifecycle suite (tests/adapters/test-claude-code-lifecycle.sh)
+#   5c. BUG-3 hook-path matrix suite (tests/adapters/test-bug3-matrix.sh) — Windows-only
 #   6. Official Codex validate_plugin.py against the plugin root (blocking)
+#   6b. `claude plugin validate` against the repo root (blocking when available)
 #   7. Release archive gate — git archive + representative inner smoke tests + validator
 #      (HARNESS_VALIDATOR_SKIP_OK=1 because Phase 6 already validates the plugin)
+#      On tag pushes, Phase 7 also runs Phase D' which downloads the real
+#      GitHub tag archive (GITHUB_TAG env var) and verifies integrity.
 #   8. Negative gate tests — prove gates exit non-zero on mktemp/fixture/validator failure
 #
 # Phase 6 has THREE outcomes surfaced via step output:
@@ -32,6 +38,7 @@ name: harness-companion CI
 on:
   push:
     branches: [master]
+    tags: ['v*']
   pull_request:
     branches: [master]
 
@@ -112,6 +119,87 @@ jobs:
         run: bash tests/migration/test-v1-compat.sh
 
       # ------------------------------------------------------------------
+      # Phase 5b — Claude Code lifecycle (BUG-1/2/3 regression)
+      # ------------------------------------------------------------------
+      - name: Phase 5b — Claude Code lifecycle
+        run: bash tests/adapters/test-claude-code-lifecycle.sh
+
+      # ------------------------------------------------------------------
+      # Phase 5c — BUG-3 hook-path matrix (Windows-only, skipped on Linux)
+      # ------------------------------------------------------------------
+      - name: Phase 5c — BUG-3 hook-path matrix
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ] || [ "$RUNNER_OS" = "macOS" ]; then
+            bash tests/adapters/test-bug3-matrix.sh
+          else
+            echo "::notice::BUG-3 matrix is Windows-specific — skipped on $RUNNER_OS"
+          fi
+
+      # ------------------------------------------------------------------
+      # Phase 5d — version-sync FAIL-CLOSED gate (all 9 items must pass)
+      #
+      # P0-7: the install + test sequence lives in ONE place —
+      # scripts/version-sync-gate.sh — and is the SAME method the local
+      # full-suite runner (tests/run-all.sh) uses, so local and CI can never
+      # diverge. The gate installs to a throwaway temp dir (never a real
+      # install path), passes the real --installed-target to
+      # test-version-sync.sh so items #6 (receipt) and #7 (target VERSION) are
+      # verified against the installed copy, cleans up, and exits with the
+      # test's rc (never the rm rc). Item #8 requires each README to
+      # independently match the version when both README files exist.
+      # ------------------------------------------------------------------
+      - name: Phase 5d — version-sync FAIL-CLOSED
+        id: phase5d
+        run: |
+          set +e
+          echo "Phase 5d: shared version-sync gate (scripts/version-sync-gate.sh)"
+          bash scripts/version-sync-gate.sh "$GITHUB_WORKSPACE"
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "phase5d_result=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "phase5d_result=failed" >> "$GITHUB_OUTPUT"
+            echo "::error::version-sync FAIL-CLOSED gate failed (rc=$rc) — repo artifacts disagree on version"
+          fi
+          # Exit with the gate's rc (NOT the rc of whatever ran last inside the
+          # step body). The step output (phase5d_result) records pass/fail for
+          # the summary step; the step's own exit code blocks the pipeline.
+          exit "$rc"
+
+      # ------------------------------------------------------------------
+      # Install PyYAML (deterministic, pinned) — MUST run before Phase 5e
+      # because the E2 behavior tests import yaml. Earlier ordering put this
+      # step before Phase 6 (validate_plugin.py) and Phase 5e silently
+      # received whichever PyYAML happened to be on the runner (which can
+      # be none or a version outside the pin). Pinning 6.x here guarantees
+      # Phase 5e runs against the same interpreter version as Phase 6.
+      # ------------------------------------------------------------------
+      - name: Install PyYAML (deterministic, pinned)
+        run: python3 -m pip install --quiet "PyYAML>=6.0,<7.0"
+
+      # ------------------------------------------------------------------
+      # Phase 5e — E2 tag-trigger behavior tests (G0-rev5 v3)
+      #
+      # Covers E2_parse_tag_trigger against positive patterns (v*, vX.Y.Z,
+      # v[N]+Y.Z glob), new negatives (vbogus*, v[, fake true:, fake yes:),
+      # and PyYAML-missing fail-closed. Independent of test-release-archive.sh.
+      # ------------------------------------------------------------------
+      - name: Phase 5e — E2 tag-trigger behavior tests
+        id: phase5e
+        run: |
+          set +e
+          bash tests/release/test-e2-tag-trigger.sh
+          rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "phase5e_result=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "phase5e_result=failed" >> "$GITHUB_OUTPUT"
+            echo "::error::E2 tag-trigger behavior tests FAILED (rc=$rc) — E2 contract regression"
+            exit "$rc"
+          fi
+          exit $rc
+
+      # ------------------------------------------------------------------
       # Phase 6 — Official Codex validate_plugin.py (BLOCKING when found)
       #
       # Lifecycle: clone → locate validator → run → exit (blocking) → cleanup.
@@ -127,9 +215,6 @@ jobs:
       #   skipped — validator not located (summary step reads this value,
       #             NOT step outcome, to distinguish skipped from passed)
       # ------------------------------------------------------------------
-      - name: Install PyYAML (deterministic, pinned)
-        run: python3 -m pip install --quiet "PyYAML>=6.0,<7.0"
-
       - name: Phase 6 — Codex validate_plugin.py
         id: phase6
         run: |
@@ -196,6 +281,31 @@ jobs:
           fi
 
       # ------------------------------------------------------------------
+      # Phase 6b — `claude plugin validate` (BLOCKING when available)
+      # ------------------------------------------------------------------
+      - name: Phase 6b — claude plugin validate
+        id: phase6b
+        run: |
+          set +e
+          if ! command -v claude >/dev/null 2>&1; then
+            echo "::warning::claude CLI not on PATH — phase SKIPPED (NOT counted as passed)"
+            echo "phase6b_result=skipped" >> "$GITHUB_OUTPUT"
+            echo "phase6b_detail=claude CLI not found" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Validating .claude-plugin/plugin.json via claude plugin validate --strict"
+          if timeout 30 claude plugin validate . --strict >/dev/null 2>&1; then
+            echo "phase6b_result=passed" >> "$GITHUB_OUTPUT"
+            echo "phase6b_detail=claude plugin validate --strict exit 0" >> "$GITHUB_OUTPUT"
+          else
+            rc=$?
+            echo "::error::claude plugin validate exited $rc — phase FAILED (CI BLOCKED)"
+            echo "phase6b_result=failed" >> "$GITHUB_OUTPUT"
+            echo "phase6b_detail=claude plugin validate exit $rc" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      # ------------------------------------------------------------------
       # Phase 7 — Release archive gate
       #
       # Runs test-release-archive.sh which:
@@ -228,6 +338,22 @@ jobs:
             exit 1
           fi
           echo "Phase 6 passed — release archive gate permitted (HARNESS_VALIDATOR_SKIP_OK=1)"
+          # On TRUE tag pushes, propagate GITHUB_TAG so Phase D' downloads the real
+          # GitHub release archive. NOT exported on branch pushes. The previous
+          # implementation unconditionally set GITHUB_TAG to the branch name on
+          # branch pushes, which made Phase D' attempt a non-existent
+          # archive/refs/tags/<branch>.zip and fall back to local git archive —
+          # silently masking the fact that the tag-publish path was untested.
+          GITHUB_TAG=""
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            GITHUB_TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          export GITHUB_TAG
+          if [ -n "$GITHUB_TAG" ]; then
+            echo "Phase 7 — running with GITHUB_TAG=$GITHUB_TAG (Phase D' will download real release archive)"
+          else
+            echo "Phase 7 — branch push (GITHUB_REF_TYPE=$GITHUB_REF_TYPE), GITHUB_TAG unset; Phase D' will use local git archive"
+          fi
           if HARNESS_VALIDATOR_SKIP_OK=1 bash tests/release/test-release-archive.sh; then
             echo "phase7_result=passed" >> "$GITHUB_OUTPUT"
           else
@@ -263,11 +389,18 @@ jobs:
           echo "Phase 6 (validate_plugin.py):"
           echo "  result: ${{ steps.phase6.outputs.phase6_result }}"
           echo "  detail: ${{ steps.phase6.outputs.phase6_detail }}"
+          echo "Phase 6b (claude plugin validate):"
+          echo "  result: ${{ steps.phase6b.outputs.phase6b_result }}"
+          echo "  detail: ${{ steps.phase6b.outputs.phase6b_detail }}"
           echo "Phase 7 (release archive gate):"
           echo "  result: ${{ steps.phase7.outputs.phase7_result }}"
           echo "  detail: ${{ steps.phase7.outputs.phase7_detail }}"
           echo "Phase 8 (negative gate tests):   ${{ steps.phase8.outcome }}"
-          echo "Phases 2/3/4/5 see raw output above."
+          echo "Phase 5d (version-sync):"
+          echo "  result: ${{ steps.phase5d.outputs.phase5d_result }}"
+          echo "Phase 5e (E2 tag-trigger behavior):"
+          echo "  result: ${{ steps.phase5e.outputs.phase5e_result }}"
+          echo "Phases 2/3/4/5/5b/5c see raw output above."
           case "${{ steps.phase6.outputs.phase6_result }}" in
             skipped)
               echo "::warning::Phase 6 (validate_plugin.py) was SKIPPED — NOT the same as passed. Release-gate record must note this."

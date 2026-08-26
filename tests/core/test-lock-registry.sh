@@ -67,6 +67,7 @@ write_lock_meta() {
   printf '%s\n' "$host" > "$d/hostname"
   printf '%s\n' "$ts" > "$d/timestamp"
   printf '%s\n' "$tok" > "$d/token"
+  printf '%s\n' "$tok" > "$d/.ready"
 }
 
 # ============================================================================
@@ -317,7 +318,12 @@ rm -rf "$T10/lock"
 
 # Process A acquires and holds the lock for 2 seconds, then releases.
 (
-  TOK_A="$(acquire_lock "$T10/lock" 2)" && {
+  # Acquire in this background shell, not in a command-substitution child.
+  # The mkdir backend records BASHPID for stale-owner detection; capturing
+  # acquire_lock via $(...) would record the short-lived child's PID, which
+  # exits immediately and makes a live lock look stale on Linux.
+  acquire_lock "$T10/lock" 2 >/dev/null && {
+    TOK_A="$LOCK_REGISTRY_TOKEN"
     # Hold the lock — write a flag file B can poll for confirmation.
     echo "A holds lock token=$TOK_A" > "$T10/a_holds"
     sleep 2
@@ -539,6 +545,216 @@ WAITER_EOF
   fi
   rm -rf "$T13/lock" "$T13/holder_started" "$T13/waiter_started.waited"
 fi
+source "$CORE_LIB/runtime-manifest.sh"
+
+# ============================================================================
+# T14: flock nested distinct locks keep the outer lock held
+# ============================================================================
+# verdict_append_record holds a same-ID lock and then runtime_register acquires
+# a different runtime-manifest lock in the same shell. Releasing the inner lock
+# must not release the outer lock. This catches any regression to a shared
+# fixed FD (historically FD 9).
+echo ""
+echo "=== T14: flock nested locks use independent FDs (skipped if flock absent) ==="
+T14="$TMPROOT/t14"
+mkdir -p "$T14"
+rm -rf "$T14/outer" "$T14/inner"
+if ! command -v flock >/dev/null 2>&1; then
+  echo "SKIP: T14: flock(1) not installed on this platform — test skipped (Linux-only)"
+else
+  NESTED_HOLDER="$T14/nested-holder.sh"
+  NESTED_WAITER="$T14/nested-waiter.sh"
+  cat > "$NESTED_HOLDER" <<'NESTED_HOLDER_EOF'
+#!/bin/bash
+set -uo pipefail
+export LOCK_REGISTRY_BACKEND=flock
+source "$CORE_LIB/lock-registry.sh"
+OUTER="$1"
+INNER="$2"
+READY="$3"
+acquire_lock "$OUTER" 5 >/dev/null || exit 7
+outer_token="$LOCK_REGISTRY_TOKEN"
+acquire_lock "$INNER" 5 >/dev/null || exit 8
+inner_token="$LOCK_REGISTRY_TOKEN"
+release_lock "$INNER" "$inner_token" || exit 9
+date +%s > "$READY"
+sleep 3
+release_lock "$OUTER" "$outer_token" || exit 10
+NESTED_HOLDER_EOF
+  cat > "$NESTED_WAITER" <<'NESTED_WAITER_EOF'
+#!/bin/bash
+set -uo pipefail
+export LOCK_REGISTRY_BACKEND=flock
+source "$CORE_LIB/lock-registry.sh"
+OUTER="$1"
+RESULT="$2"
+started="$(date +%s)"
+acquire_lock "$OUTER" 10 >/dev/null || exit 7
+finished="$(date +%s)"
+printf '%s\n' "$((finished - started))" > "$RESULT"
+release_lock "$OUTER" "$LOCK_REGISTRY_TOKEN" || exit 8
+NESTED_WAITER_EOF
+  chmod +x "$NESTED_HOLDER" "$NESTED_WAITER"
+
+  ( CORE_LIB="$CORE_LIB" bash "$NESTED_HOLDER" "$T14/outer" "$T14/inner" "$T14/inner_released" ) &
+  NESTED_HOLDER_PID=$!
+  WAITED=0
+  while [ ! -f "$T14/inner_released" ] && [ "$WAITED" -lt 50 ]; do
+    sleep 0.1
+    WAITED=$((WAITED + 1))
+  done
+  if [ ! -f "$T14/inner_released" ]; then
+    assert_fail "T14: nested holder did not release inner lock" "no sentinel"
+    kill -9 "$NESTED_HOLDER_PID" 2>/dev/null || true
+  else
+    ( CORE_LIB="$CORE_LIB" bash "$NESTED_WAITER" "$T14/outer" "$T14/waited" ) &
+    NESTED_WAITER_PID=$!
+    wait "$NESTED_HOLDER_PID"; NESTED_HOLDER_RC=$?
+    wait "$NESTED_WAITER_PID"; NESTED_WAITER_RC=$?
+    NESTED_WAIT="$(cat "$T14/waited" 2>/dev/null || echo 0)"
+    if [ "$NESTED_HOLDER_RC" = "0" ] && [ "$NESTED_WAITER_RC" = "0" ] && [ "${NESTED_WAIT:-0}" -ge 2 ] 2>/dev/null; then
+      assert_pass "T14: releasing inner flock leaves outer flock held (waited=${NESTED_WAIT}s)"
+    else
+      assert_fail "T14: nested flock independence" "waited=$NESTED_WAIT holder_rc=$NESTED_HOLDER_RC waiter_rc=$NESTED_WAITER_RC"
+    fi
+  fi
+  rm -rf "$T14/outer" "$T14/inner"
+fi
+
+# ============================================================================
+# T15: an atomically published claim always has complete readable metadata
+# ============================================================================
+echo ""
+echo "=== T15: published claim metadata is complete ==="
+T15="$TMPROOT/t15"
+T15_LEAF="$T15/.harness/.registry.lock/runtime-manifest"
+mkdir -p "$T15/.harness/.registry.lock"
+if _runtime_acquire "$T15"; then
+  T15_TOKEN="$LOCK_REGISTRY_TOKEN"
+  if [ -f "$T15_LEAF/.claim" ] && _lr_read_meta "$T15_LEAF" \
+      && [ "$LR_META_PROTOCOL" = "claim" ] \
+      && [ "$LR_META_TOKEN" = "$T15_TOKEN" ] \
+      && [ -f "$LR_META_DIR/.ready" ]; then
+    assert_pass "T15: visible atomic claim resolves to complete owner metadata"
+  else
+    assert_fail "T15: published claim metadata" "missing, incomplete, or token mismatch"
+  fi
+  _runtime_release "$T15" || assert_fail "T15: release complete claim" "rc=$?"
+else
+  assert_fail "T15: acquire runtime claim" "rc=$?"
+fi
+
+# ============================================================================
+# T16: a crashed creator's unpublished private candidate never blocks
+# ============================================================================
+echo ""
+echo "=== T16: unpublished private candidate does not block ==="
+T16="$TMPROOT/t16"
+T16_LEAF="$T16/lock"
+T16_ORPHAN="${T16_LEAF}.claim.orphan0123456789abcdef"
+mkdir -p "$T16_ORPHAN"
+printf '%s\n' 999999 > "$T16_ORPHAN/pid"
+if acquire_lock "$T16_LEAF" 3 >/dev/null; then
+  T16_TOKEN="$LOCK_REGISTRY_TOKEN"
+  if _lr_read_meta "$T16_LEAF" && [ "$LR_META_TOKEN" = "$T16_TOKEN" ] \
+      && [ -d "$T16_ORPHAN" ]; then
+    assert_pass "T16: unpublished partial candidate is invisible to ownership"
+  else
+    assert_fail "T16: acquire beside orphan candidate" "metadata mismatch or orphan removed"
+  fi
+  release_lock "$T16_LEAF" "$T16_TOKEN" || assert_fail "T16: release acquired claim" "rc=$?"
+else
+  assert_fail "T16: orphan candidate must not block" "rc=$?"
+fi
+
+# ============================================================================
+# T17: claim release cleanup is confined to the old owner's private metadata
+# ============================================================================
+echo ""
+echo "=== T17: release cannot delete a successor lock ==="
+T17="$TMPROOT/t17"
+T17_LEAF="$T17/lock"
+mkdir -p "$T17"
+if acquire_lock "$T17_LEAF" 3 >/dev/null; then
+  T17_OLD_TOKEN="$LOCK_REGISTRY_TOKEN"
+  T17_NEW_TOKEN="successortoken0123456789abcdef"
+  T17_NEW_META="${T17_LEAF}.claim.${T17_NEW_TOKEN}"
+  T17_INJECTED=0
+  rm() {
+    if [ "$T17_INJECTED" = "0" ] && [ "${*: -1}" = "${T17_LEAF}/.claim" ]; then
+      command rm "$@" || return $?
+      mkdir "$T17_NEW_META" || return 91
+      _lr_write_meta "$T17_NEW_META" "${BASHPID:-$$}" "" "$(_lr_my_hostname)" "$(_lr_now)" "$T17_NEW_TOKEN" || return 92
+      ln "$T17_NEW_META/.ready" "$T17_LEAF/.claim" || return 93
+      T17_INJECTED=1
+      return 0
+    fi
+    command rm "$@"
+  }
+  release_lock "$T17_LEAF" "$T17_OLD_TOKEN"
+  T17_RELEASE_RC=$?
+  unset -f rm
+  if [ "$T17_RELEASE_RC" = "0" ] && _lr_read_meta "$T17_LEAF" && [ "$LR_META_TOKEN" = "$T17_NEW_TOKEN" ]; then
+    assert_pass "T17: predecessor private cleanup preserves successor claim"
+  else
+    assert_fail "T17: successor survives predecessor release" "release_rc=$T17_RELEASE_RC injected=$T17_INJECTED"
+  fi
+  release_lock "$T17_LEAF" "$T17_NEW_TOKEN" || assert_fail "T17: successor release" "rc=$?"
+else
+  assert_fail "T17: acquire predecessor lock" "rc=$?"
+fi
+
+# ============================================================================
+# T18: a non-directory shared path is an obstacle, never followed/replaced
+# ============================================================================
+echo ""
+echo "=== T18: shared lock path obstacle fails closed ==="
+T18="$TMPROOT/t18"
+mkdir -p "$T18"
+printf '%s\n' obstacle > "$T18/lock"
+if acquire_lock "$T18/lock" 2 >/dev/null 2>&1; then
+  T18_TOKEN="$LOCK_REGISTRY_TOKEN"
+  release_lock "$T18/lock" "$T18_TOKEN" >/dev/null 2>&1 || true
+  assert_fail "T18: regular-file lock obstacle rejected" "unexpected acquisition"
+elif [ -f "$T18/lock" ] && [ "$(cat "$T18/lock")" = "obstacle" ]; then
+  assert_pass "T18: regular-file lock obstacle rejected without replacement"
+else
+  assert_fail "T18: obstacle preserved" "shared path changed"
+fi
+
+# ============================================================================
+# T19: flock unlock+close double failure is not post-release rc8
+# ============================================================================
+echo ""
+echo "=== T19: flock double release failure retains retryable ownership ==="
+T19="$TMPROOT/t19"
+mkdir -p "$T19/lock"
+T19_TOKEN="flockdoublefailure0123456789"
+printf '%s\n' "$T19_TOKEN" > "$T19/lock/.lr_owner"
+: > "$T19/lock/flock.lock"
+eval "exec 19>>\"$T19/lock/flock.lock\""
+T19_INDEX="$_LR_FLOCK_NEXT_INDEX"
+_LR_FLOCK_DIRS[$T19_INDEX]="$T19/lock"
+_LR_FLOCK_FDS[$T19_INDEX]=19
+_LR_FLOCK_TOKENS[$T19_INDEX]="$T19_TOKEN"
+_LR_FLOCK_NEXT_INDEX=$((_LR_FLOCK_NEXT_INDEX + 1))
+FLOCK_ORIGINAL="$(declare -f flock 2>/dev/null || true)"
+CLOSE_ORIGINAL="$(declare -f _lr_flock_close_fd)"
+flock() { return 1; }
+_lr_flock_close_fd() { return 1; }
+_lr_flock_release "$T19/lock" "$T19_TOKEN" >/dev/null 2>&1
+T19_RC=$?
+unset -f flock _lr_flock_close_fd
+[ -z "$FLOCK_ORIGINAL" ] || eval "$FLOCK_ORIGINAL"
+eval "$CLOSE_ORIGINAL"
+if [ "$T19_RC" = "7" ] && [ "${_LR_FLOCK_FDS[$T19_INDEX]:-}" = "19" ] \
+   && [ "$(cat "$T19/lock/.lr_owner" 2>/dev/null)" = "$T19_TOKEN" ]; then
+  assert_pass "T19: double failure returns hard failure and preserves mapping/sidecar"
+else
+  assert_fail "T19: double failure remains retryable" "rc=$T19_RC fd=${_LR_FLOCK_FDS[$T19_INDEX]:-missing}"
+fi
+eval "exec 19>&-"
+unset "_LR_FLOCK_DIRS[$T19_INDEX]" "_LR_FLOCK_FDS[$T19_INDEX]" "_LR_FLOCK_TOKENS[$T19_INDEX]"
 
 # ============================================================================
 # Summary

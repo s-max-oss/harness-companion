@@ -49,7 +49,20 @@ validate_config_schema() {
   local config="$1"
   local schema="${2:-}"
 
-  if [ -z "$config" ] || [ ! -f "$config" ]; then
+  if [ -z "$config" ]; then
+    echo "validate_config_schema: config path is empty" >&2
+    return 1
+  fi
+  # Codex r4: a SYMLINK at the config path is tampering, not a config file.
+  # `[ -f ]` follows symlinks, so a symlink → valid-config would otherwise
+  # be accepted, allowing verification policy to be redirected to an
+  # attacker-controlled file. Reject before any follow-the-link test
+  # (matches the DWM symlink_rejected / plan_symlink treatment).
+  if [ -L "$config" ]; then
+    echo "validate_config_schema: '$config' is a symlink (config must be a regular file)" >&2
+    return 1
+  fi
+  if [ ! -f "$config" ]; then
     echo "validate_config_schema: config file not found: '$config'" >&2
     return 1
   fi
@@ -185,10 +198,13 @@ validate_config_schema() {
         return 1
       fi
     fi
-    # Optional: timeout_seconds must be positive integer
+    # Optional: timeout_seconds must be a strict positive integer <= 7200 (the
+    # schema maximum). Float values like 300.5 are rejected — the cap is an
+    # integer-second contract; fractional values would silently round down at
+    # the harness-verify boundary and violate the auditable effective timeout.
     if jq -e ".verification.commands[$i] | has(\"timeout_seconds\")" "$config" >/dev/null 2>&1; then
-      if ! jq -e ".verification.commands[$i].timeout_seconds | type == \"number\" and . > 0" "$config" >/dev/null 2>&1; then
-        echo "validate_config_schema: command[$i] ('$cmd_id') timeout_seconds must be positive number" >&2
+      if ! jq -e ".verification.commands[$i].timeout_seconds | type == \"number\" and (. % 1 == 0) and . >= 1 and . <= 7200" "$config" >/dev/null 2>&1; then
+        echo "validate_config_schema: command[$i] ('$cmd_id') timeout_seconds must be an integer in [1, 7200]" >&2
         return 1
       fi
     fi

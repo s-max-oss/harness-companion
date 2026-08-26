@@ -119,7 +119,17 @@ seed_feature() {
   }
 }
 EOF
-      bash "$ROOT_DIR/core/harness-verify.sh" "$id" --write >/dev/null 2>&1 || true
+      # P0-14: a PASS run inside a git project MUST record its vcs_revision
+      # (fail-closed: git project + no stored rev is never passing-eligible).
+      # An unborn HEAD records `vcs_revision: null`, so commit the seed tree
+      # first — this mirrors the real flow (verify only after first commit)
+      # and gives the evidence run a genuine revision to match.
+      git add -A
+      git commit -qm "seed evidence base"
+      if ! bash "$ROOT_DIR/core/harness-verify.sh" "$id" --write; then
+        echo "seed_feature: harness-verify failed for feature '$id'" >&2
+        return 1
+      fi
       # harness-verify --write doesn't change status; if seed asked for a
       # non-in_progress starting state, set it now (and bump revision).
       if [ "$state" != "in_progress" ]; then
@@ -138,14 +148,16 @@ EOF
 echo ""
 echo "=== F1+F2: state validation ==="
 
-# F1a: list accepts valid initial state (no features yet, returns 0)
+# F1a: list on an EMPTY registry (features:[]) FAILS CLOSED (P0-6) — list
+# validates the registry with the canonical validator before printing, and an
+# empty features array is invalid there → exit 1, no listing rendered.
 P="$TMPROOT/f1a"
 setup_project "$P"
 run_hf list "$P"
-if [ "$RC" = "0" ]; then
-  assert_pass "F1a: list subcommand on empty project exits 0"
+if [ "$RC" = "1" ] && printf '%s' "$OUT" | grep -q "failed canonical registry validation"; then
+  assert_pass "F1a: list on empty registry fails closed (rc=1, no listing)"
 else
-  assert_fail "F1a: list on empty project" "rc=$RC"
+  assert_fail "F1a: list on empty registry" "rc=$RC out=$OUT"
 fi
 
 # F1b: all 6 states recognized by the validator (not exited with 1 "Invalid status")
@@ -204,6 +216,12 @@ idx=0
 for row in "${LEGAL_EDGES[@]}"; do
   idx=$((idx + 1))
   read -r FROM TO OVERRIDE EXPECTED_STATUS <<<"$row"
+  # `read` splits on IFS whitespace, so a row's `''` marker arrives as a
+  # non-empty 2-char literal — NOT an empty string. Normalize it here so a
+  # "no override" row genuinely runs without --override. Otherwise the spurious
+  # override silently routes an ineligible→passing transition to 'unverified'
+  # (rc=0) instead of failing loudly (rc=5), masking eligibility regressions.
+  if [ "$OVERRIDE" = "''" ]; then OVERRIDE=""; fi
   P="$TMPROOT/f3_$idx"
   # Seed with evidence iff target=passing (to satisfy the evidence gate)
   if [ "$TO" = "passing" ]; then
@@ -238,7 +256,7 @@ for row in "${LEGAL_EDGES[@]}"; do
       assert_pass "F3[${idx}]: $FROM → $TO (revision +1)"
     fi
   else
-    assert_fail "F3[${idx}]: $FROM → $TO" "rc=$RC post_status=$POST_STATUS diff=$DIFF rev_after=$REV_AFTER"
+    assert_fail "F3[${idx}]: $FROM → $TO" "rc=$RC post_status=$POST_STATUS diff=$DIFF rev_after=$REV_AFTER out=$OUT"
   fi
 done
 
@@ -282,6 +300,7 @@ idx=0
 for row in "${ILLEGAL_EDGES[@]}"; do
   idx=$((idx + 1))
   read -r FROM TO OVERRIDE <<<"$row"
+  if [ "$OVERRIDE" = "''" ]; then OVERRIDE=""; fi   # same `''` literal normalization as F3
   P="$TMPROOT/f4_$idx"
   seed_feature "$P" a "$FROM" 0
   REV_BEFORE="$(read_revision "$P")"
@@ -348,6 +367,41 @@ if [ "$RC" = "5" ] && [ "$REV_AFTER" = "$REV_BEFORE" ]; then
   assert_pass "F6: passing without evidence rejected (rc=5, revision unchanged)"
 else
   assert_fail "F6: passing without evidence should fail" "rc=$RC rev_after=$REV_AFTER"
+fi
+
+# F6b (P0-14): git project whose evidence run records NO vcs_revision (unborn
+# HEAD → harness-verify stamps vcs_revision null) → passing MUST be rejected
+# with rc=5 and leave status unchanged. This pins the F3[5] regression: such a
+# run is never passing-eligible, and the failure must NOT be silently routed to
+# 'unverified' (the pre-fix F3 driver passed a spurious --override "''" which
+# masked this exactly this way).
+P="$TMPROOT/f6b"
+setup_project "$P" 1 '[{"id":"a","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]'
+(
+  cd "$P" || exit 1
+  git init --quiet
+  git config user.email "t@t"
+  git config user.name "t"
+  # Leave the repo UNCOMMITTED on purpose → harness-verify records vcs_revision null
+  cat > ".harness/config.json" <<'EOF'
+{
+  "project_type": "generic",
+  "verification": {
+    "commands": [
+      {"id":"smoke","command":["bash","-c","echo ok && exit 0"],"required_for_passing":true,"command_origin":"configured","confirmation":"not_required"}
+    ]
+  }
+}
+EOF
+  bash "$ROOT_DIR/core/harness-verify.sh" a --write >/dev/null 2>&1 || true
+)
+REV_BEFORE="$(read_revision "$P")"
+run_hf status "$P" a passing
+REV_AFTER="$(read_revision "$P")"
+if [ "$RC" = "5" ] && [ "$REV_AFTER" = "$REV_BEFORE" ] && [ "$(read_status "$P" a)" = "in_progress" ]; then
+  assert_pass "F6b: git project, evidence run without vcs_revision → passing rejected rc=5 (P0-14 fail-closed)"
+else
+  assert_fail "F6b: git project, evidence run without vcs_revision" "rc=$RC rev_after=$REV_AFTER post=$(read_status "$P" a)"
 fi
 
 # ----------------------------------------------------------------------------
@@ -463,6 +517,17 @@ echo "=== F11: concurrent mutations serialize ==="
 
 # F11: 5 parallel status mutations on different features — final revision
 # must be exactly N + 5 (no losses, no double-writes).
+# This test is about serialization correctness (all applied, no losses), NOT
+# timeout semantics. Two machine-dependent hazards would otherwise make it
+# flaky on slow filesystems (MSYS):
+#   (1) the 10s default lock budget: 5-way serialized contention can exceed it
+#       for late-starting writers, who legitimately fail closed (exit 7) and
+#       have their mutation dropped → revision < +5;
+#   (2) a bounded poll loop shorter than the serialization time reads state
+#       while a writer is still queued → under-counts revision.
+# So we give the contention scenario a generous budget AND wait for every
+# process (each self-terminates at its lock deadline, so `wait` is bounded).
+export LOCK_TIMEOUT_S=120
 P="$TMPROOT/f11"
 FEATURES=""
 for i in 1 2 3 4 5; do
@@ -479,18 +544,12 @@ for i in 1 2 3 4 5; do
   PIDS+=($!)
 done
 
-# Wait for all with timeout.
-WAITED=0
-while [ "${#PIDS[@]}" -gt 0 ] && [ "$WAITED" -lt 30 ]; do
-  NEW_PIDS=()
-  for pid in "${PIDS[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
-      NEW_PIDS+=("$pid")
-    fi
-  done
-  PIDS=("${NEW_PIDS[@]}")
-  sleep 0.5
-  WAITED=$((WAITED + 1))
+# Wait for ALL writers to finish before asserting. Each writer self-terminates
+# at its lock deadline (≤ LOCK_TIMEOUT_S), so waiting on every PID is bounded;
+# a fixed short poll cap would instead read state mid-serialization on slow
+# machines (see comment above).
+for pid in "${PIDS[@]}"; do
+  wait "$pid" 2>/dev/null || true
 done
 
 REV_AFTER="$(read_revision "$P")"
@@ -508,14 +567,17 @@ if [ "$DIFF" = "5" ] && [ "$ALL_BLOCKED" = "true" ]; then
 else
   assert_fail "F11: parallel mutations must serialize" "rev_before=$REV_BEFORE rev_after=$REV_AFTER diff=$DIFF all_blocked=$ALL_BLOCKED"
 fi
+unset LOCK_TIMEOUT_S
 
 # ----------------------------------------------------------------------------
 echo ""
 echo "=== F12+F13: list and add ==="
 
-# F12: list shows summary
+# F12: list shows summary (registry must be VALID for list to render — the
+# passing feature carries an evidence association and ids are uppercase, per the
+# canonical validator).
 P="$TMPROOT/f12"
-FEATURES='[{"id":"a","status":"passing","evidence_associations":[],"legacy_audit_evidence":[]},{"id":"b","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]'
+FEATURES='[{"id":"F-A","status":"passing","evidence_associations":[{"run_id":"r1","command_id":"smoke"}],"legacy_audit_evidence":[]},{"id":"F-B","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]'
 setup_project "$P" 50 "$FEATURES"
 run_hf list "$P"
 if [ "$RC" = "0" ] \
@@ -535,6 +597,107 @@ if [ "$RC" = "0" ] && [ "$(read_status "$P" feat-x)" = "not_started" ] && [ "$(r
   assert_pass "F13: add creates feature with status=not_started, revision +1"
 else
   assert_fail "F13: add" "rc=$RC status=$(read_status "$P" feat-x) rev=$(read_revision "$P")"
+fi
+
+# ----------------------------------------------------------------------------
+echo ""
+echo "=== E: concurrent same-ID adds → exactly one succeeds (P0-4) ==="
+
+# E: two concurrent `add <dir> <same-new-id>` must serialize under the registry
+# lock — the duplicate-ID check MUST run INSIDE the lock against the CURRENT
+# registry (P0-4). Without that, an unlocked TOCTOU pre-check lets BOTH processes
+# pass (neither sees the other's not-yet-written feature) and BOTH write a
+# duplicate-feature registry. Under the lock, the loser re-reads after the winner
+# commits, sees the feature, and fails closed (return 1). Assertions:
+#   (1) exactly one of the two exits 0, the other exits nonzero;
+#   (2) the registry carries the feature EXACTLY once (never a duplicate-feature
+#       registry) and revision advanced by exactly +1;
+#   (3) the journal records EXACTLY one pending+committed add pair (the loser
+#       fails before journal_init, so it appends nothing).
+# Generous lock budget (like F11) so the loser waits for the lock instead of
+# timing out (exit 7) on a slow MSYS filesystem.
+export LOCK_TIMEOUT_S=120
+P="$TMPROOT/p0-4"
+setup_project "$P" 7 "[]"
+( "$FEATURE_SCRIPT" add "$P" "E-ADD" >/dev/null 2>&1 ) &
+P1=$!
+( "$FEATURE_SCRIPT" add "$P" "E-ADD" >/dev/null 2>&1 ) &
+P2=$!
+set +e
+wait "$P1" 2>/dev/null; RC1=$?
+wait "$P2" 2>/dev/null; RC2=$?
+set -e
+unset LOCK_TIMEOUT_S
+
+N_OK=0
+[ "$RC1" -eq 0 ] && N_OK=$((N_OK + 1))
+[ "$RC2" -eq 0 ] && N_OK=$((N_OK + 1))
+COUNT="$(jq '[.features[] | select(.id == "E-ADD")] | length' "$P/feature_list.json" 2>/dev/null || echo -1)"
+REV_AFTER="$(read_revision "$P")"
+JPEND="$(jq -sr '[.[] | select(.op == "add" and .pending == true)] | length' "$P/.harness/registry-journal.ndjson" 2>/dev/null || echo -1)"
+JCOMMIT="$(jq -sr '[.[] | select(.op == "commit" and .pending == false)] | length' "$P/.harness/registry-journal.ndjson" 2>/dev/null || echo -1)"
+
+if [ "$N_OK" = "1" ] && [ "$COUNT" = "1" ] && [ "$REV_AFTER" = "8" ] && [ "$JPEND" = "1" ] && [ "$JCOMMIT" = "1" ]; then
+  assert_pass "E: concurrent same-ID adds → exactly one success, one committed add pair, no duplicate feature"
+else
+  assert_fail "E: concurrent same-ID add must serialize under the lock" "rc1=$RC1 rc2=$RC2 ok=$N_OK count=$COUNT rev=$REV_AFTER pending=$JPEND commit=$JCOMMIT"
+fi
+
+# ----------------------------------------------------------------------------
+echo ""
+echo "=== E2: failure branch releases the registry lock (P0-4, Codex item 9) ==="
+
+# Backend-independent release assertion. The mkdir backend removes the lock
+# directory; the Linux flock backend intentionally keeps flock.lock as its
+# reusable kernel-lock target, but must remove the .lr_owner sidecar. Treating
+# the reusable flock container itself as an active lock is a false positive.
+lock_is_released() {
+  local lock_dir="$1"
+  if [ -f "$lock_dir/flock.lock" ]; then
+    [ ! -e "$lock_dir/.lr_owner" ] && [ ! -L "$lock_dir/.lr_owner" ]
+  else
+    [ ! -d "$lock_dir" ]
+  fi
+}
+
+# P0-4 (Codex item 9): a failing command that acquires the registry lock and
+# then returns EARLY (before an explicit release_lock) must still release the
+# active ownership. The EXIT trap is the safety net, but it references
+# $LOCK_DIR — which
+# was historically `local` to cmd_add/cmd_status. A `local` goes out of scope
+# when the function returns, so the trap fired `release_lock ""` (usage error,
+# swallowed by `|| true`) and LEAKED the lockdir, leaving the next command to
+# stall on a stale lock. The fix makes LOCK_DIR a global so the trap releases
+# on every early-return path. Assert the lockdir is GONE after each failing
+# command, never a lingering `.harness/.registry.lock`.
+#
+# (1) duplicate-ID add — cmd_add returns 1 inside the lock (the canonical P0-4
+#     same-ID race loser path).
+P="$TMPROOT/p0-4-lock1"
+setup_project "$P" 3 "[{\"id\":\"F-EXIST\",\"status\":\"not_started\",\"evidence_associations\":[],\"legacy_audit_evidence\":[]}]"
+set +e
+"$FEATURE_SCRIPT" add "$P" "F-EXIST" >/dev/null 2>&1
+RC1=$?
+set -e
+LOCK1="active"; lock_is_released "$P/.harness/.registry.lock" && LOCK1="released"
+if [ "$RC1" != "0" ] && [ "$LOCK1" = "released" ]; then
+  assert_pass "E2: duplicate-ID add fails (rc=$RC1) AND releases active ownership"
+else
+  assert_fail "E2: duplicate-ID add must fail and release active ownership" "rc=$RC1 lock_state=$LOCK1"
+fi
+
+# (2) invalid status transition — cmd_status returns 3 inside the lock.
+P="$TMPROOT/p0-4-lock2"
+setup_project "$P" 4 "[{\"id\":\"F-T\",\"status\":\"not_started\",\"evidence_associations\":[],\"legacy_audit_evidence\":[]}]"
+set +e
+"$FEATURE_SCRIPT" status "$P" "F-T" "passing" >/dev/null 2>&1
+RC2=$?
+set -e
+LOCK2="active"; lock_is_released "$P/.harness/.registry.lock" && LOCK2="released"
+if [ "$RC2" != "0" ] && [ "$LOCK2" = "released" ]; then
+  assert_pass "E2: invalid transition fails (rc=$RC2) AND releases active ownership"
+else
+  assert_fail "E2: invalid transition must fail and release active ownership" "rc=$RC2 lock_state=$LOCK2"
 fi
 
 # ----------------------------------------------------------------------------

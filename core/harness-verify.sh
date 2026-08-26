@@ -38,9 +38,20 @@ source "$SKILL_DIR/lib/passing.sh"
 source "$SKILL_DIR/lib/atomic_write.sh"
 # shellcheck source=lib/lock-registry.sh
 source "$SKILL_DIR/lib/lock-registry.sh"
+# shellcheck source=lib/registry-journal.sh
+source "$SKILL_DIR/lib/registry-journal.sh"
+# shellcheck source=lib/runtime-manifest.sh
+source "$SKILL_DIR/lib/runtime-manifest.sh"
 
 # Keep -e off so command failures are captured, not shell-killing
 set +e
+
+register_run_or_die() {
+  if ! runtime_register_run "$PROJECT_DIR" "$RUN_ID"; then
+    echo "FATAL: failed to register runtime artifacts for run '$RUN_ID'" >&2
+    exit 2
+  fi
+}
 
 FEATURE_ID=""
 TARGET="."
@@ -149,12 +160,14 @@ CONFIG_SHA="$(hc_config_sha256 "$PROJECT_DIR")"
 # ---- Build required_command_ids (only required_for_passing commands) ----
 REQUIRED_IDS=()
 while IFS= read -r cid; do
+  cid="${cid%$'\r'}"
   [ -n "$cid" ] && REQUIRED_IDS+=("$cid")
 done <<<"$(hc_required_ids)"
 
 # ---- Build all command IDs (entire verification plan) ----
 ALL_IDS=()
 while IFS= read -r cid; do
+  cid="${cid%$'\r'}"
   [ -n "$cid" ] && ALL_IDS+=("$cid")
 done <<<"$(hc_command_ids)"
 
@@ -220,8 +233,15 @@ FAILED=0
 SKIPPED=0
 FAILED_IDS=()
 EXECUTED=0
+NOT_APPLICABLE_IDS=()
 
-while IFS= read -r cmd_id; do
+# Use a file descriptor to isolate the loop from commands that read stdin.
+# The <<< here-string would be consumed by test scripts, truncating the loop
+# after ~5 commands. We open the command list on fd 3 and read from there,
+# while every executed command gets </dev/null so it cannot steal the list.
+exec 3<<<"$(printf '%s\n' "${ALL_IDS[@]}")"
+
+while IFS= read -r -u 3 cmd_id; do
   [ -z "$cmd_id" ] && continue
   CMD_JSON="$(hc_command_for "$cmd_id")"
   if [ -z "$CMD_JSON" ]; then continue; fi
@@ -233,6 +253,11 @@ while IFS= read -r cmd_id; do
 
   if [ "$APPLIES" != "true" ]; then
     echo "[skip] $cmd_id: not_applicable (predicate false)"
+    # E5 unification: a required command with predicate=false is not_applicable.
+    # It is tracked here and EXCLUDED from the effective required set at the
+    # coverage gate (and by validate-run-log step 13). Every OTHER required
+    # command that is skipped for any other reason still fails the gate.
+    NOT_APPLICABLE_IDS+=("$cmd_id")
     SKIPPED=$((SKIPPED + 1))
     continue
   fi
@@ -350,7 +375,9 @@ while IFS= read -r cmd_id; do
             failed_commands: $failed_commands,
             skipped_commands: $skipped_commands
           }')"
-        ev_write_terminal "$RUN_ID" "$ABORT_EVENT" || true
+        if ev_write_terminal "$RUN_ID" "$ABORT_EVENT"; then
+          register_run_or_die
+        fi
         echo "FATAL: failed to write command_completed event for $cmd_id" >&2
         exit 2
       fi
@@ -365,7 +392,8 @@ while IFS= read -r cmd_id; do
   # Prepare log artifact path
   LOG_FILE="$RUN_DIR/${cmd_id}.log"
 
-  # Resolve timeout
+  # Resolve timeout from the configured contract (no env-var override — the
+  # effective timeout is always written into the run's auditable config_sha256).
   TIMEOUT_SECS="$(printf '%s' "$CMD_JSON" | jq -r '.timeout_seconds // 300')"
 
   START_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -375,10 +403,10 @@ while IFS= read -r cmd_id; do
 
   EXIT_CODE=0
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${TIMEOUT_SECS}s" "${ARGV[@]}" >"$LOG_FILE" 2>&1
+    timeout "${TIMEOUT_SECS}s" "${ARGV[@]}" </dev/null >"$LOG_FILE" 2>&1
     EXIT_CODE=$?
   else
-    "${ARGV[@]}" >"$LOG_FILE" 2>&1
+    "${ARGV[@]}" </dev/null >"$LOG_FILE" 2>&1
     EXIT_CODE=$?
   fi
 
@@ -452,7 +480,9 @@ while IFS= read -r cmd_id; do
         failed_commands: $failed_commands,
         skipped_commands: $skipped_commands
       }')"
-    ev_write_terminal "$RUN_ID" "$ABORT_EVENT" || true
+    if ev_write_terminal "$RUN_ID" "$ABORT_EVENT"; then
+      register_run_or_die
+    fi
     echo "FATAL: failed to write command_completed event for $cmd_id" >&2
     exit 2
   fi
@@ -465,7 +495,26 @@ while IFS= read -r cmd_id; do
     FAILED=$((FAILED + 1))
     FAILED_IDS+=("$cmd_id")
   fi
-done <<<"$(printf '%s\n' "${ALL_IDS[@]}")"
+done
+
+# Close fd 3
+exec 3<&-
+
+# ---- Effective required set (P0-3) ----
+# effective required = required_command_ids − not_applicable_command_ids.
+# Computed ONCE here, before terminal dispatch, so every downstream consumer
+# (the no_checks decision below and the required-coverage gate) uses the SAME
+# value. A required command with predicate=false is not_applicable and
+# contributes nothing to the effective set; a required command that is
+# applicable but never executed still counts, and the coverage gate fails on it.
+EFFECTIVE_REQUIRED=()
+for req_id in "${REQUIRED_IDS[@]}"; do
+  [ -z "$req_id" ] && continue
+  if printf '%s\n' "${NOT_APPLICABLE_IDS[@]}" | grep -qxF "$req_id"; then
+    continue
+  fi
+  EFFECTIVE_REQUIRED+=("$req_id")
+done
 
 # ---- Compute workspace fingerprint (verified) ----
 # Terminal event append must NOT change fingerprint (harness artifacts excluded)
@@ -474,6 +523,12 @@ WORKSPACE_FP_VERIFIED="$(compute_workspace_fingerprint "$PROJECT_DIR")"
 # ---- Write terminal event ----
 PLANNED="${#ALL_IDS[@]}"
 COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# E5 unification: serialize the not_applicable command ids for every terminal
+# event. Present on ALL terminals so the coverage check downstream (both the
+# gate here and validate-run-log step 13) can compute the effective required
+# set = required_command_ids − not_applicable_command_ids.
+NA_JSON="$(printf '%s\n' "${NOT_APPLICABLE_IDS[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')"
 
 echo ""
 echo "───────────────────────────────────────"
@@ -492,6 +547,7 @@ if [ "$PLANNED" -eq 0 ]; then
     --argjson passed_commands "$PASSED" \
     --argjson failed_commands "$FAILED" \
     --argjson skipped_commands "$SKIPPED" \
+    --argjson not_applicable_command_ids "$NA_JSON" \
     '{
       event: $event,
       schema_version: $schema_version,
@@ -503,19 +559,26 @@ if [ "$PLANNED" -eq 0 ]; then
       executed_commands: $executed_commands,
       passed_commands: $passed_commands,
       failed_commands: $failed_commands,
-      skipped_commands: $skipped_commands
+      skipped_commands: $skipped_commands,
+      not_applicable_command_ids: $not_applicable_command_ids
     }')"
 
   if ! ev_write_terminal "$RUN_ID" "$TERMINAL"; then
     echo "FATAL: failed to write run_completed (no_checks) terminal event" >&2
     exit 2
   fi
+  register_run_or_die
   echo "Result: no_checks (0 verification steps configured)"
   echo "Add verification commands to .harness/config.json to enable passing eligibility."
-elif [ "${#REQUIRED_IDS[@]}" -eq 0 ]; then
-  # ---- no_checks path (commands exist, but none are required_for_passing) ----
-  # Design §2.3 + §9.1 step 4: no_checks is decided by required_command_ids.length == 0,
-  # NOT by total planned commands. Optional-only configs produce no_checks.
+elif [ "${#EFFECTIVE_REQUIRED[@]}" -eq 0 ]; then
+  # ---- no_checks path (0 EFFECTIVE required steps) ----
+  # P0-3: the no_checks decision is the EFFECTIVE required set, NOT the raw
+  # required list. Two distinct reasons land here:
+  #   (a) no required commands at all (optional-only config), OR
+  #   (b) every required command was not_applicable (predicate=false) — the run
+  #       executed no applicable required check and MUST NOT report "passed".
+  # Either way the terminal is overall_result="no_checks" and the exit is
+  # NON-passing (1) — never a passed run with zero effective checks.
   TERMINAL="$(jq -n \
     --arg event "run_completed" \
     --argjson schema_version 2 \
@@ -528,6 +591,7 @@ elif [ "${#REQUIRED_IDS[@]}" -eq 0 ]; then
     --argjson passed_commands "$PASSED" \
     --argjson failed_commands "$FAILED" \
     --argjson skipped_commands "$SKIPPED" \
+    --argjson not_applicable_command_ids "$NA_JSON" \
     '{
       event: $event,
       schema_version: $schema_version,
@@ -539,15 +603,22 @@ elif [ "${#REQUIRED_IDS[@]}" -eq 0 ]; then
       executed_commands: $executed_commands,
       passed_commands: $passed_commands,
       failed_commands: $failed_commands,
-      skipped_commands: $skipped_commands
+      skipped_commands: $skipped_commands,
+      not_applicable_command_ids: $not_applicable_command_ids
     }')"
 
   if ! ev_write_terminal "$RUN_ID" "$TERMINAL"; then
     echo "FATAL: failed to write run_completed (no_checks) terminal event" >&2
     exit 2
   fi
-  echo "Result: no_checks (0 required verification steps — only optional commands configured)"
-  echo "Mark at least one command required_for_passing: true to enable passing eligibility."
+  register_run_or_die
+  if [ "${#REQUIRED_IDS[@]}" -eq 0 ]; then
+    echo "Result: no_checks (0 required verification steps — only optional commands configured)"
+    echo "Mark at least one command required_for_passing: true to enable passing eligibility."
+  else
+    echo "Result: no_checks (0 effective required steps — every required command was not_applicable)"
+    echo "A run with no applicable required checks is NOT passing."
+  fi
 
 elif [ "$FAILED" -gt 0 ]; then
   # ---- run_failed path ----
@@ -565,6 +636,7 @@ elif [ "$FAILED" -gt 0 ]; then
     --argjson passed_commands "$PASSED" \
     --argjson failed_commands "$FAILED" \
     --argjson skipped_commands "$SKIPPED" \
+    --argjson not_applicable_command_ids "$NA_JSON" \
     --argjson failed_command_ids "$FAILED_IDS_JSON" \
     '{
       event: $event,
@@ -578,31 +650,42 @@ elif [ "$FAILED" -gt 0 ]; then
       passed_commands: $passed_commands,
       failed_commands: $failed_commands,
       skipped_commands: $skipped_commands,
-      failed_command_ids: $failed_command_ids
+      failed_command_ids: $failed_command_ids,
+      not_applicable_command_ids: $not_applicable_command_ids
     }')"
 
   if ! ev_write_terminal "$RUN_ID" "$TERMINAL"; then
     echo "FATAL: failed to write run_failed terminal event" >&2
     exit 2
   fi
+  register_run_or_die
   echo "Result: FAILED ($FAILED command(s) failed)"
   echo "Failed: ${FAILED_IDS[*]}"
 
 else
-  # ---- run_completed (passed) path ----
-  TERMINAL="$(jq -n \
-    --arg event "run_completed" \
-    --argjson schema_version 2 \
-    --arg run_id "$RUN_ID" \
-    --arg completed_at "$COMPLETED_AT" \
-    --arg overall_result "passed" \
-    --arg workspace_fingerprint_verified "$WORKSPACE_FP_VERIFIED" \
-    --argjson planned_commands "$PLANNED" \
-    --argjson executed_commands "$EXECUTED" \
-    --argjson passed_commands "$PASSED" \
-    --argjson failed_commands "$FAILED" \
-    --argjson skipped_commands "$SKIPPED" \
-    '{
+  # ---- Required-coverage gate: every applicable required command MUST run ----
+  # E5 unification: a required command with predicate=false is "not_applicable"
+  # and is excluded from the effective required set (see NOT_APPLICABLE_IDS).
+  # But ANY other required command that was skipped/never-executed (e.g.
+  # detected+pending, or an earlier command consumed the loop's stdin) is an
+  # applicable-but-missed command and STILL fails the gate — the run is not
+  # passed while coverage of an applicable required command is incomplete.
+  # EFFECTIVE_REQUIRED was computed ONCE before terminal dispatch (see above),
+  # so this branch and the no_checks branch share the exact same set.
+  MISSING_REQUIRED=()
+  for req_id in "${EFFECTIVE_REQUIRED[@]}"; do
+    [ -z "$req_id" ] && continue
+    if ! grep -q "\"command_id\":\"$req_id\"" ".harness/logs/runs/${RUN_ID}.ndjson" 2>/dev/null; then
+      MISSING_REQUIRED+=("$req_id")
+    fi
+  done
+
+  if [ "${#MISSING_REQUIRED[@]}" -gt 0 ]; then
+    echo "[FAIL] Required-coverage gate: ${#MISSING_REQUIRED[@]} required command(s) not executed: ${MISSING_REQUIRED[*]}"
+    MISSING_JSON="$(printf '%s
+' "${MISSING_REQUIRED[@]}" | jq -R -s 'split("
+") | map(select(length > 0))')"
+    TERMINAL="$(jq -n --arg event "run_failed" --argjson schema_version 2 --arg run_id "$RUN_ID" --arg completed_at "$COMPLETED_AT" --arg overall_result "failed" --arg workspace_fingerprint_verified "$WORKSPACE_FP_VERIFIED" --argjson planned_commands "$PLANNED" --argjson executed_commands "$EXECUTED" --argjson passed_commands "$PASSED" --argjson failed_commands "$FAILED" --argjson skipped_commands "$SKIPPED" --argjson failed_command_ids "$MISSING_JSON" --argjson not_applicable_command_ids "$NA_JSON" '{
       event: $event,
       schema_version: $schema_version,
       run_id: $run_id,
@@ -613,13 +696,40 @@ else
       executed_commands: $executed_commands,
       passed_commands: $passed_commands,
       failed_commands: $failed_commands,
-      skipped_commands: $skipped_commands
+      skipped_commands: $skipped_commands,
+      failed_command_ids: $failed_command_ids,
+      not_applicable_command_ids: $not_applicable_command_ids
+    }')"
+    if ! ev_write_terminal "$RUN_ID" "$TERMINAL"; then
+      echo "FATAL: failed to write run_failed terminal event" >&2
+      exit 2
+    fi
+    echo "Result: FAILED (required-coverage: ${#MISSING_REQUIRED[@]} required command(s) never executed)"
+    register_run_or_die
+    exit 1
+  fi
+
+  # ---- run_completed (passed) path ----
+  TERMINAL="$(jq -n --arg event "run_completed" --argjson schema_version 2 --arg run_id "$RUN_ID" --arg completed_at "$COMPLETED_AT" --arg overall_result "passed" --arg workspace_fingerprint_verified "$WORKSPACE_FP_VERIFIED" --argjson planned_commands "$PLANNED" --argjson executed_commands "$EXECUTED" --argjson passed_commands "$PASSED" --argjson failed_commands "$FAILED" --argjson skipped_commands "$SKIPPED" --argjson not_applicable_command_ids "$NA_JSON" '{
+      event: $event,
+      schema_version: $schema_version,
+      run_id: $run_id,
+      completed_at: $completed_at,
+      overall_result: $overall_result,
+      workspace_fingerprint_verified: $workspace_fingerprint_verified,
+      planned_commands: $planned_commands,
+      executed_commands: $executed_commands,
+      passed_commands: $passed_commands,
+      failed_commands: $failed_commands,
+      skipped_commands: $skipped_commands,
+      not_applicable_command_ids: $not_applicable_command_ids
     }')"
 
   if ! ev_write_terminal "$RUN_ID" "$TERMINAL"; then
     echo "FATAL: failed to write run_completed (passed) terminal event" >&2
     exit 2
   fi
+  register_run_or_die
 
   # ---- Optionally update feature_list.json ----
   if [ "$WRITE" = "true" ]; then
@@ -642,12 +752,23 @@ else
     # Parent .harness/ is guaranteed to exist at this point (logs dir was
     # created above). The lock primitive uses plain mkdir for POSIX-atomic
     # mutual exclusion, so the parent must pre-exist.
+    # IMPORTANT: a sibling lock (runtime-manifest) holds a sub-leaf under
+    # this same parent. If that sibling recently released while holding the
+    # leaf, the leaf is gone — but it may have left the PARENT empty if
+    # nothing else was inside. The mkdir-acquire backend treats an empty
+    # leaf as "locked by unknown owner" (no metadata → stale-recovery
+    # can't evaluate), and the 10s timeout burns down. Detect that case
+    # (parent exists but empty) and rmdir it so the backend can claim it
+    # cleanly. Safe: empty parent = no other holder can exist on any path.
+    if [ -d "$LOCK_DIR" ] && [ -z "$(ls -A "$LOCK_DIR" 2>/dev/null)" ]; then
+      rmdir "$LOCK_DIR" 2>/dev/null || true
+    fi
     # IMPORTANT: do NOT wrap acquire_lock in $(...) — for the flock backend,
     # the FD that holds the kernel lock must outlive the subshell. Calling
     # acquire_lock directly keeps FD 9 open in this shell; the token is
     # exposed via $LOCK_REGISTRY_TOKEN. release_lock reads from env (or 2nd
     # arg).
-    acquire_lock "$LOCK_DIR" 10 || {
+    acquire_lock "$LOCK_DIR" 10 >/dev/null || {
       rc=$?
       echo "verify: lock_timeout — could not acquire registry lock after 10s" >&2
       exit "$rc"
@@ -661,17 +782,47 @@ else
     current_revision="$(jq -r '.revision // 0' "$FL" 2>/dev/null || echo 0)"
     next_revision=$(( current_revision + 1 ))
 
+    # P0-M2: the evidence-association mutation is itself a journaled mutation.
+    # journal_record_pending captures the pre-mutation SHA; the committed line
+    # records the post-mutation SHA so the DWM registry gate can prove this
+    # append is a legal, per-revision journaled mutation.
+    journal_init "$PROJECT_DIR" || { echo "verify: journal_init failed" >&2; exit 2; }
+
     if new_content="$(jq --arg fid "$FEATURE_ID" --argjson assoc "$ASSOC" \
         --arg today "$TODAY" --argjson rev "$next_revision" \
       '(.features[] | select(.id == $fid) | .evidence_associations) += [$assoc]
        | .revision = $rev
        | .last_updated = $today' \
       "$FL")"; then
+      # Contract 3: bind the deterministic expected post-state SHA (sha of the
+      # exact content about to be atomic-written) BEFORE journaling pending, so
+      # recovery can roll-forward only on that exact SHA.
+      # NOTE: this block runs at top-level script scope (not inside a function),
+      # so `local` is illegal here — plain assignments create globals, which is
+      # exactly what the journal pair (verify_op_key / verify_post_sha) needs.
+      verify_post_sha="$(printf '%s' "$new_content" | sha256sum 2>/dev/null | awk '{print $1}')"
+      [ -z "$verify_post_sha" ] && { command -v shasum >/dev/null 2>&1 \
+        && verify_post_sha="$(printf '%s' "$new_content" | shasum -a 256 | awk '{print $1}')"; } || true
+      [ -z "$verify_post_sha" ] && verify_post_sha="null"
+      verify_op_key="$(journal_record_pending "$PROJECT_DIR" "evidence_associate" \
+        "$FEATURE_ID" "" "" --run-id "$RUN_ID" --revision "$next_revision" --post-sha "$verify_post_sha")" || {
+        echo "verify: journal pending failed (registry unchanged)" >&2; exit 2; }
       atomic_write_json "$FL" "$new_content" || {
         echo "verify: atomic_write_json failed for $FL" >&2
         exit 2
       }
+      # Contract 3 (fail-closed): a committed-append failure after the registry
+      # was already updated MUST fail the run (never warn-and-continue). The
+      # pending line carries expected_post_sha so the next journal_init recovery
+      # rolls forward exactly.
+      journal_record_committed "$PROJECT_DIR" "$verify_op_key" "$verify_post_sha" || {
+        echo "verify: journal committed failed (registry already updated — pending orphan will roll-forward on next mutation)" >&2
+        exit 2
+      }
       echo "Association added to feature_list.json (revision → $next_revision)"
+    else
+      echo "verify: jq evidence mutation failed (registry unchanged)" >&2
+      exit 2
     fi
     # Release the lock now (trap is a safety net for unexpected exits).
     release_lock "$LOCK_DIR" >/dev/null 2>&1 || true

@@ -1,0 +1,4 @@
+# by-type/ holds per-type template overrides (see spec §8.4).
+# For each output file F, the renderer uses by-type/<type>/F if it exists,
+# else falls back to common/F. Types without a dedicated override fall back
+# to common/ entirely.

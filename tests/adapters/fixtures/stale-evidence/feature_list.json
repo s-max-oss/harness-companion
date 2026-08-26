@@ -2,7 +2,7 @@
   "version": "2",
   "schema_version": "2.0.0",
   "revision": 2,
-  "last_updated": "2026-08-03",
+  "last_updated": "2026-08-05",
   "features": [
     {
       "id": "feat-stale-001",
@@ -10,8 +10,8 @@
       "status": "passing",
       "evidence_associations": [
         {
-          "run_id": "20260803T014206Z-2560-26686",
-          "associated_at": "2026-08-03T01:42:14Z",
+          "run_id": "20260804T172548Z-1837-18800",
+          "associated_at": "2026-08-04T17:25:52Z",
           "associated_by": "user"
         }
       ],
@@ -23,8 +23,8 @@
       "status": "passing",
       "evidence_associations": [
         {
-          "run_id": "20260803T014216Z-3114-10779",
-          "associated_at": "2026-08-03T01:42:24Z",
+          "run_id": "20260804T172554Z-2203-6074",
+          "associated_at": "2026-08-04T17:25:59Z",
           "associated_by": "user"
         }
       ],

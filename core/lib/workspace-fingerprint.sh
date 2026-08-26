@@ -28,10 +28,36 @@
 # .harness/config.json: has its own staleness axis (config_sha256). Counting
 #   it in the workspace fingerprint would double-count and create confusion
 #   when --config or similar tool touches it.
+# .harness/reviews/: append-only Reviewer verdict artifacts (§5-b.6). New
+#   verdict files are runtime state written outside the verification lifecycle
+#   (via core/harness-verdict.sh); including them in the fingerprint would make
+#   every review a staleness breach.
+# .harness/branch-gate.json: stateful Phase 1 branch-baseline gate (P0-2).
+#   Recorded ONCE by a successful init (core/lib/branch-gate.sh). Including it
+#   in the fingerprint would make every ready-transition an Axis1 staleness
+#   breach — a successful init must not self-pollute the fingerprint.
+# .harness/registry-journal.ndjson: append-only mutation journal (P0-M2).
+#   Every feature_list.json mutation appends a line; the journal is runtime
+#   state written by harness-feature.sh itself, so including it in the
+#   fingerprint would make every feature status change a staleness breach.
+# .harness/runtime-manifest.jsonl: runtime-artifact byte-binding registry
+#   (Codex r7). Written by runtime_register / runtime_register_run during
+#   verification and review; it binds first-seen bytes of run NDJSON, command
+#   logs, and verdicts so the DWM gate can enforce immutability/append-only.
+#   It is runtime state written by the harness itself AFTER the run's
+#   fingerprint is captured, so including it in the fingerprint would make
+#   every self-registration a staleness breach (the same reason
+#   registry-journal.ndjson and reviews/ are excluded).
 BUILTIN_EXCLUDES=(
   ".harness/logs/"
+  ".harness/reviews/"
+  ".harness/acceptance/"
   ".harness/.registry.lock/"
+  ".harness/*.lock.claim.*/*"
   ".harness/*.tmp.*"
+  ".harness/branch-gate.json"
+  ".harness/registry-journal.ndjson"
+  ".harness/runtime-manifest.jsonl"
   "feature_list.json"
   ".harness/config.json"
 )
@@ -97,18 +123,25 @@ _glob_to_regex() {
   case "$raw" in *"*"*|*"?"*) has_wildcard=1 ;; esac
   case "$raw" in */) trailing_slash=1 ;; esac
 
-  local rx
-  # Step 1: escape ERE specials. Dots → [.] to suppress awk warnings.
-  rx="$(printf '%s' "$raw" | sed \
-    -e 's/\\/\\\\/g' \
-    -e 's/\./[.]/g' \
-    -e 's/[+^$(){}|]/\\&/g')"
+  # Pure-bash escape of ERE specials (no sed forks) — output is identical to
+  # the former `printf '%s' "$raw" | sed -e 's/\\/\\\\/g' -e 's/\./[.]/g' \
+  # -e 's/[+^$(){}|]/\\&/g'`. Backslash first, then dot (→ [.] to suppress awk
+  # warnings), then the + ^ $ ( ) { } | set, each prefixed with a backslash.
+  # Each replacement is literal in the pattern position, so no collation and
+  # no locale dependence (keeps P0-9 determinism).
+  local rx="$raw"
+  rx="${rx//\\/\\\\}"
+  rx="${rx//./[.]}"
+  local ch
+  for ch in '+' '^' '$' '(' ')' '{' '}' '|'; do
+    rx="${rx//"$ch"/\\$ch}"
+  done
 
-  # Step 2: convert glob wildcards
+  # Step 2: convert glob wildcards (glob * crosses '/', ERE [^/]* does not —
+  # keep the SAME [^/]* the sed version produced, not a bare '*')
   if [ "$has_wildcard" -eq 1 ]; then
-    rx="$(printf '%s' "$rx" | sed \
-      -e 's/\*/[^\/]*/g' \
-      -e 's/?/[^\/]/g')"
+    rx="${rx//\*/[^/]*}"
+    rx="${rx//\?/[^/]}"
   fi
 
   # Step 3: anchor
@@ -169,25 +202,27 @@ _filter_diff_excluded() {
   '
 }
 
+# Combined anchored ERE over BUILTIN_EXCLUDES + FINGERPRINT_EXCLUDES.
+# Built ONCE per compute (see _compute_workspace_fingerprint_inner) and reused
+# by _is_excluded. The previous per-pattern loop re-derived a regex (2 sed
+# forks) and spawned a grep for EVERY pattern on EVERY path — on MSYS each
+# fork+exec costs ~150 ms, so a dirty tree with many untracked files turned a
+# single staleness check into a multi-minute crawl (~1500 forks). Matching via
+# bash's built-in `[[ $path =~ $ere ]]` (POSIX ERE) spawns nothing and is
+# byte-identical to grep -E for this pattern set: dots become [.], wildcards
+# [^/]*, no collation-dependent classes, so it is also locale-independent.
+_FP_EXCLUDE_ERE=""
+
 # Check if a path matches any exclude glob pattern.
-# Returns 0 (true) if excluded. Uses _glob_to_regex for anchored matching
-# so "feature_list.json" does NOT match "myfeature_list.json.bak".
+# Returns 0 (true) if excluded. Uses the precomputed anchored ERE so
+# "feature_list.json" does NOT match "myfeature_list.json.bak".
 _is_excluded() {
   local path="$1"
-  local pattern rx
-  for pattern in "${BUILTIN_EXCLUDES[@]}"; do
-    rx="$(_glob_to_regex "$pattern")"
-    if printf '%s' "$path" | grep -qE "$rx" 2>/dev/null; then
-      return 0
-    fi
-  done
-  for pattern in "${FINGERPRINT_EXCLUDES[@]:-}"; do
-    [ -z "$pattern" ] && continue
-    rx="$(_glob_to_regex "$pattern")"
-    if printf '%s' "$path" | grep -qE "$rx" 2>/dev/null; then
-      return 0
-    fi
-  done
+  if [ -z "$_FP_EXCLUDE_ERE" ]; then
+    # Direct call outside a compute (e.g. a helper): derive once from the arrays.
+    _FP_EXCLUDE_ERE="$(_build_exclude_awk_pat)"
+  fi
+  [[ "$path" =~ $_FP_EXCLUDE_ERE ]] && return 0
   return 1
 }
 
@@ -239,6 +274,64 @@ _sha256_stdin() {
 # Output: fingerprint string on stdout
 compute_workspace_fingerprint() {
   local project_dir="${1:-.}"
+
+  # P0-9: Force canonical C locale for the ENTIRE computation so the
+  # fingerprint is byte-for-byte deterministic regardless of the caller's
+  # environment. Without this, `sort -z` collation (and character-class
+  # handling in awk/grep) differs between locales, so a non-C locale (e.g.
+  # zh_CN.UTF-8) could reorder untracked-file entries or match exclusions
+  # differently and change the SHA.
+  #
+  # `local LC_ALL=C` alone is NOT sufficient (P0-9 propagation bug): bash
+  # auto-exports a `local` variable ONLY when it shadows an inherited
+  # environment variable. When the caller has LC_ALL completely UNSET
+  # (`env -u LC_ALL LANG=zh_CN.UTF-8`), the local C assignment never reaches
+  # the `sort -z`/`awk` children, which silently fall back to LANG's collation
+  # and produce a DIFFERENT fingerprint. We therefore `export LC_ALL=C` for
+  # the duration and restore the caller's EXACT prior state (value AND export
+  # attribute) before returning, so the caller's environment is never polluted.
+  local _fp_saved_lc_val="${LC_ALL-}"
+  local _fp_lc_had_set=0 _fp_lc_in_env=0
+  [ -n "${LC_ALL+x}" ] && _fp_lc_had_set=1
+  env | grep -q '^LC_ALL=' && _fp_lc_in_env=1
+  export LC_ALL=C
+
+  local _fp_rc=0
+  _compute_workspace_fingerprint_inner "$project_dir"
+  _fp_rc=$?
+
+  # Restore the caller's exact LC_ALL state (value AND export attribute).
+  if [ "$_fp_lc_had_set" = 1 ]; then
+    if [ "$_fp_lc_in_env" = 1 ]; then
+      export LC_ALL="$_fp_saved_lc_val"
+    else
+      export -n LC_ALL 2>/dev/null || unset LC_ALL
+      LC_ALL="$_fp_saved_lc_val"
+    fi
+  else
+    unset LC_ALL 2>/dev/null
+  fi
+  return "$_fp_rc"
+}
+
+# The computation body — runs under the wrapper's exported LC_ALL=C. Kept as a
+# separate function so compute_workspace_fingerprint has a single restore point.
+#
+# P0-M1: every call re-derives BUILTIN_EXCLUDES + FINGERPRINT_EXCLUDES +
+# VERIFICATION_SCOPE from the CURRENT project's .harness/config.json (or the
+# hard-coded defaults if absent) and rebuilds the combined ERE. No caller-side
+# state carries across projects, so back-to-back fingerprint calls on two
+# different projects (regardless of git vs no-git) see independent sets.
+_compute_workspace_fingerprint_inner() {
+  local project_dir="${1:-.}"
+
+  # P0-M1: clear stale per-call state so two back-to-back calls on DIFFERENT
+  # projects cannot leak ERE/scope across the boundary. BUILTIN_EXCLUDES is a
+  # module-level constant; only FINGERPRINT_EXCLUDES / VERIFICATION_SCOPE /
+  # _FP_EXCLUDE_ERE are per-call.
+  FINGERPRINT_EXCLUDES=()
+  VERIFICATION_SCOPE=""
+  _FP_EXCLUDE_ERE=""
 
   # Load configurable excludes from .harness/config.json if present
   local config_file="$project_dir/.harness/config.json"
@@ -296,6 +389,8 @@ compute_workspace_fingerprint() {
     # passing eligibility the moment --write mutates them.
     local exclude_awk_pat=""
     exclude_awk_pat="$(_build_exclude_awk_pat)"
+    # Reuse the SAME combined ERE for _is_excluded (builtin =~, zero forks).
+    _FP_EXCLUDE_ERE="$exclude_awk_pat"
 
     if [ -z "$project_prefix" ]; then
       # ---- project_dir IS the git root — original behavior ----
@@ -389,6 +484,14 @@ compute_workspace_fingerprint() {
   # ---- No-git path ----
   # Hash configurable verification scope
   local scope_dir="$project_dir"
+
+  # P0-M1: rebuild the combined ERE from the FRESHLY-LOADED FINGERPRINT_EXCLUDES
+  # (and the constant BUILTIN_EXCLUDES) so the no-git path cannot accidentally
+  # inherit a stale regex from a previous compute in the same shell — and so
+  # two consecutive no-git computes on different projects observe independent
+  # exclude sets.
+  _FP_EXCLUDE_ERE="$(_build_exclude_awk_pat)"
+
   if [ -n "${VERIFICATION_SCOPE:-}" ]; then
     scope_dir="$project_dir/$VERIFICATION_SCOPE"
     if [ ! -d "$scope_dir" ]; then

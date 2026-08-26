@@ -166,19 +166,19 @@ if [ -f "$TMP_REPO/.codex/adapters/codex/hooks/session-start.cmd" ]; then
 else
   assert_fail "G5.M7 --repo copies adapters/codex/hooks/session-start.cmd"
 fi
-if [ -f "$TMP_REPO/.codex/adapters/codex/UNSUPPORTED.md" ]; then
-  assert_pass "G5.M7 --repo copies adapters/codex/UNSUPPORTED.md (Phase 5b status doc)"
+if [ -f "$TMP_REPO/.codex/adapters/codex/PHASE5B_STATUS.md" ]; then
+  assert_pass "G5.M7 --repo copies adapters/codex/PHASE5B_STATUS.md (canonical wording)"
 else
-  assert_fail "G5.M7 --repo copies adapters/codex/UNSUPPORTED.md"
+  assert_fail "G5.M7 --repo copies adapters/codex/PHASE5B_STATUS.md"
 fi
 
-# G5.M8: install-receipt.json written + status=supported
+# G5.M8: install-receipt.json written + status=code-complete-runtime-e2e-pending (AC-9 rc.2)
 if [ -f "$TMP_REPO/.codex/install-receipt.json" ]; then
   assert_pass "G5.M8 --repo writes install-receipt.json"
   MODE_FIELD="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1], encoding='utf-8')); print(d.get('mode',''))" "$TMP_REPO/.codex/install-receipt.json" 2>/dev/null || echo "")"
   assert_eq "G5.M8 install-receipt.json mode=repo-local" "repo-local" "$MODE_FIELD"
   STATUS_FIELD="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1], encoding='utf-8')); print(d.get('status',''))" "$TMP_REPO/.codex/install-receipt.json" 2>/dev/null || echo "")"
-  assert_eq "G5.M8 install-receipt.json status=supported" "supported" "$STATUS_FIELD"
+  assert_eq "G5.M8 install-receipt.json status=code-complete-runtime-e2e-pending" "code-complete-runtime-e2e-pending" "$STATUS_FIELD"
 else
   assert_fail "G5.M8 --repo writes install-receipt.json"
 fi
@@ -413,6 +413,184 @@ if [ ! -f "$TMPHOME/.codex/config.toml" ]; then
 else
   assert_fail "G5.M19 uninstall --user does NOT create config.toml"
 fi
+
+# ============================================================
+# G5.M20–M22: rc.2 lifecycle coverage (BUG-1, BUG-2, tarball)
+# ============================================================
+
+echo ""
+echo "=== G5.M20: VERSION file ==="
+
+TMP_VERSION_SANDBOX="$(mktemp -d)"
+bash "$INSTALL" --repo "$TMP_VERSION_SANDBOX" >/dev/null 2>&1
+
+if [ -f "$TMP_VERSION_SANDBOX/.codex/VERSION" ]; then
+  assert_pass "G5.M20 VERSION file exists in target"
+  CODEX_VERSION="$(cat "$TMP_VERSION_SANDBOX/.codex/VERSION" 2>/dev/null || echo "")"
+  if [ -n "$CODEX_VERSION" ]; then
+    assert_pass "G5.M20 VERSION file is non-empty"
+  else
+    assert_fail "G5.M20 VERSION file is non-empty" " — got empty string"
+  fi
+else
+  assert_fail "G5.M20 VERSION file exists in target"
+  assert_fail "G5.M20 VERSION file is non-empty"
+fi
+
+bash "$UNINSTALL" --repo "$TMP_VERSION_SANDBOX" >/dev/null 2>&1
+rm -rf "$TMP_VERSION_SANDBOX"
+
+echo ""
+echo "=== G5.M21: Receipt upgrade contract ==="
+
+TMP_RCPT_SANDBOX="$(mktemp -d)"
+bash "$INSTALL" --repo "$TMP_RCPT_SANDBOX" >/dev/null 2>&1
+
+CODEX_RECEIPT="$TMP_RCPT_SANDBOX/.codex/install-receipt.json"
+# Convert to Windows path for python3 (MSYS /tmp/ not understood by native python3)
+PY_RECEIPT="$(cygpath -m "$CODEX_RECEIPT" 2>/dev/null || echo "$CODEX_RECEIPT")"
+
+if [ -f "$CODEX_RECEIPT" ]; then
+  assert_pass "G5.M21 receipt exists"
+
+  RCP_VERSION="$(python3 -c "import json; print(json.load(open('$PY_RECEIPT')).get('version',''))" 2>/dev/null || echo "")"
+  RCP_SKILL="$(python3 -c "import json; print(json.load(open('$PY_RECEIPT')).get('adapter',''))" 2>/dev/null || echo "")"
+  RCP_STATUS="$(python3 -c "import json; print(json.load(open('$PY_RECEIPT')).get('status',''))" 2>/dev/null || echo "")"
+
+  if [ -n "$RCP_VERSION" ]; then
+    assert_pass "G5.M21 receipt version is set ($RCP_VERSION)"
+  else
+    assert_fail "G5.M21 receipt version is set" " — empty"
+  fi
+
+  if [ "$RCP_SKILL" = "codex" ]; then
+    assert_pass "G5.M21 receipt adapter is codex"
+  else
+    assert_fail "G5.M21 receipt adapter is codex" " — got '$RCP_SKILL'"
+  fi
+
+  # Verify status is code-complete-runtime-e2e-pending (AC-9 canonical wording)
+  if [ "$RCP_STATUS" = "code-complete-runtime-e2e-pending" ]; then
+    assert_pass "G5.M21 receipt status is code-complete-runtime-e2e-pending"
+  else
+    assert_fail "G5.M21 receipt status is code-complete-runtime-e2e-pending" " — got $RCP_STATUS"
+  fi
+
+  EXPECTED_INTEGRITY_KEYS="$(find "$TMP_RCPT_SANDBOX/.codex" -type f ! -name install-receipt.json ! -name VERSION -printf '%P\n' | tr '\\' '/' | tr -d '\r' | LC_ALL=C sort)"
+  ACTUAL_INTEGRITY_KEYS="$(python3 -c "import json; print('\\n'.join(sorted(json.load(open('$PY_RECEIPT')).get('integrity',{}).get('files',{}).keys())))" 2>/dev/null | tr -d '\r' || echo "")"
+  if [ "$EXPECTED_INTEGRITY_KEYS" = "$ACTUAL_INTEGRITY_KEYS" ]; then
+    assert_pass "G5.M21 integrity receipt has exact installed-file key set"
+  else
+    assert_fail "G5.M21 integrity receipt has exact installed-file key set"
+  fi
+
+  # Same-version reinstall: upgrade_history should be empty
+  bash "$INSTALL" --repo "$TMP_RCPT_SANDBOX" >/dev/null 2>&1
+  HIST_LEN="$(python3 -c "import json; print(len(json.load(open('$PY_RECEIPT')).get('upgrade_history',[])))" 2>/dev/null || echo "error")"
+  if [ "$HIST_LEN" = "0" ]; then
+    assert_pass "G5.M21 same-version reinstall: upgrade_history empty"
+  else
+    assert_fail "G5.M21 same-version reinstall: upgrade_history empty" " — length=$HIST_LEN"
+  fi
+else
+  assert_fail "G5.M21 receipt exists"
+fi
+
+bash "$UNINSTALL" --repo "$TMP_RCPT_SANDBOX" >/dev/null 2>&1
+rm -rf "$TMP_RCPT_SANDBOX"
+
+echo ""
+echo "=== G5.M22: Tarball install (no .git) ==="
+
+TMP_TAR_SANDBOX="$(mktemp -d)"
+# Simulate tarball: copy source, remove .git
+TMP_TAR_SRC="$(mktemp -d)"
+cp -r "$ROOT_DIR"/* "$TMP_TAR_SRC/" 2>/dev/null
+rm -rf "$TMP_TAR_SRC/.git" 2>/dev/null || true
+
+bash "$TMP_TAR_SRC/adapters/codex/install.sh" --repo "$TMP_TAR_SANDBOX" >/dev/null 2>&1
+TAR_RECEIPT="$TMP_TAR_SANDBOX/.codex/install-receipt.json"
+PY_TAR_RECEIPT="$(cygpath -m "$TAR_RECEIPT" 2>/dev/null || echo "$TAR_RECEIPT")"
+
+if [ -f "$TAR_RECEIPT" ]; then
+  TAR_COMMIT="$(python3 -c "import json; print(json.load(open('$PY_TAR_RECEIPT')).get('source',{}).get('commit','MISSING'))" 2>/dev/null || echo "error")"
+  TAR_ORIGIN="$(python3 -c "import json; print(json.load(open('$PY_TAR_RECEIPT')).get('source',{}).get('origin','MISSING'))" 2>/dev/null || echo "error")"
+
+  if [ "$TAR_COMMIT" = "null" ] || [ "$TAR_COMMIT" = "None" ]; then
+    assert_pass "G5.M22 tarball source.commit is null"
+  else
+    assert_fail "G5.M22 tarball source.commit is null" " — got $TAR_COMMIT"
+  fi
+
+  if [ "$TAR_ORIGIN" = "archive" ]; then
+    assert_pass "G5.M22 tarball source.origin is archive"
+  else
+    assert_fail "G5.M22 tarball source.origin is archive" " — got $TAR_ORIGIN"
+  fi
+else
+  assert_fail "G5.M22 tarball receipt exists"
+fi
+
+bash "$TMP_TAR_SRC/adapters/codex/uninstall.sh" --repo "$TMP_TAR_SANDBOX" >/dev/null 2>&1
+rm -rf "$TMP_TAR_SANDBOX" "$TMP_TAR_SRC"
+
+echo ""
+echo "=== G5.M23: Missing VERSION fails closed ==="
+
+TMP_BAD_VERSION_SANDBOX="$(mktemp -d)"
+TMP_BAD_VERSION_SRC="$(mktemp -d)"
+cp -r "$ROOT_DIR"/* "$TMP_BAD_VERSION_SRC/" 2>/dev/null
+rm -rf "$TMP_BAD_VERSION_SRC/.git" 2>/dev/null || true
+rm -f "$TMP_BAD_VERSION_SRC/VERSION"
+bash "$TMP_BAD_VERSION_SRC/adapters/codex/install.sh" --repo "$TMP_BAD_VERSION_SANDBOX" >/dev/null 2>&1
+BAD_VERSION_RC=$?
+if [ "$BAD_VERSION_RC" -ne 0 ]; then
+  assert_pass "G5.M23 missing VERSION returns non-zero"
+else
+  assert_fail "G5.M23 missing VERSION returns non-zero"
+fi
+if [ ! -e "$TMP_BAD_VERSION_SANDBOX/.codex" ]; then
+  assert_pass "G5.M23 missing VERSION writes no install target"
+else
+  assert_fail "G5.M23 missing VERSION writes no install target"
+fi
+printf '2.0.0-rc.2\n2.0.0\n' > "$TMP_BAD_VERSION_SRC/VERSION"
+bash "$TMP_BAD_VERSION_SRC/adapters/codex/install.sh" --repo "$TMP_BAD_VERSION_SANDBOX" >/dev/null 2>&1
+BAD_MULTILINE_VERSION_RC=$?
+if [ "$BAD_MULTILINE_VERSION_RC" -ne 0 ]; then
+  assert_pass "G5.M23 multi-line VERSION returns non-zero"
+else
+  assert_fail "G5.M23 multi-line VERSION returns non-zero"
+fi
+if [ ! -e "$TMP_BAD_VERSION_SANDBOX/.codex" ]; then
+  assert_pass "G5.M23 malformed VERSION writes no install target"
+else
+  assert_fail "G5.M23 malformed VERSION writes no install target"
+fi
+printf '2.0.0-01\n' > "$TMP_BAD_VERSION_SRC/VERSION"
+bash "$TMP_BAD_VERSION_SRC/adapters/codex/install.sh" --repo "$TMP_BAD_VERSION_SANDBOX" >/dev/null 2>&1
+BAD_LEADING_ZERO_VERSION_RC=$?
+if [ "$BAD_LEADING_ZERO_VERSION_RC" -ne 0 ]; then
+  assert_pass "G5.M23 numeric prerelease leading zero returns non-zero"
+else
+  assert_fail "G5.M23 numeric prerelease leading zero returns non-zero"
+fi
+rm -rf "$TMP_BAD_VERSION_SANDBOX" "$TMP_BAD_VERSION_SRC"
+
+echo ""
+echo "=== G5.M24: Integrity regeneration failure propagates ==="
+
+TMP_BAD_INTEGRITY_SANDBOX="$(mktemp -d)"
+mkdir -p "$TMP_BAD_INTEGRITY_SANDBOX/.codex"
+printf '{"integrity":42}\n' > "$TMP_BAD_INTEGRITY_SANDBOX/.codex/install-receipt.json"
+bash "$INSTALL" --repo "$TMP_BAD_INTEGRITY_SANDBOX" >/dev/null 2>&1
+BAD_INTEGRITY_RC=$?
+if [ "$BAD_INTEGRITY_RC" -ne 0 ]; then
+  assert_pass "G5.M24 malformed integrity object returns non-zero"
+else
+  assert_fail "G5.M24 malformed integrity object returns non-zero"
+fi
+rm -rf "$TMP_BAD_INTEGRITY_SANDBOX"
 
 # ============================================================
 echo ""

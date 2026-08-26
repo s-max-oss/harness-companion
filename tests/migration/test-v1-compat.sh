@@ -271,13 +271,14 @@ else
 fi
 
 # ============================================================================
-# G7 — Plugin manifest version is 2.0.0-rc.1
+# G7 — Plugin manifest version matches VERSION file
 # ============================================================================
 echo ""
 echo "=== G7: Plugin manifest ==="
+EXPECTED_VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
 if [ -f "$ROOT_DIR/.codex-plugin/plugin.json" ]; then
   v=$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$ROOT_DIR/.codex-plugin/plugin.json" | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-  assert_eq "G7 plugin.json version" "2.0.0-rc.1" "$v"
+  assert_eq "G7 plugin.json version" "$EXPECTED_VERSION" "$v"
 else
   fail "G7 plugin.json exists" "missing file"
 fi
@@ -363,8 +364,8 @@ echo "=== G10: CHANGELOG.md ==="
 assert_file_exists "G10 CHANGELOG.md exists" "$ROOT_DIR/CHANGELOG.md"
 
 # Must reference the 2.x release line
-if grep -qE '2\.0\.0-rc\.1|2\.0\.0' "$ROOT_DIR/CHANGELOG.md" 2>/dev/null; then
-  pass "G10 CHANGELOG.md mentions 2.0.0 / 2.0.0-rc.1"
+if grep -qE '2\.0\.0-rc\.[12]|2\.0\.0' "$ROOT_DIR/CHANGELOG.md" 2>/dev/null; then
+  pass "G10 CHANGELOG.md mentions 2.0.0 / 2.0.0-rc.x"
 else
   fail "G10 CHANGELOG.md mentions 2.0.0" "no version reference"
 fi
@@ -374,12 +375,13 @@ fi
 # ============================================================================
 echo ""
 echo "=== G11: Version consistency ==="
+EXPECTED_VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null | tr -d '[:space:]')"
 for doc in README.md README.zh-CN.md SKILL.md CHANGELOG.md; do
   fp="$ROOT_DIR/$doc"
-  if [ -f "$fp" ] && grep -q "2.0.0-rc.1" "$fp" 2>/dev/null; then
-    pass "G11 $doc mentions 2.0.0-rc.1"
+  if [ -f "$fp" ] && grep -q "$EXPECTED_VERSION" "$fp" 2>/dev/null; then
+    pass "G11 $doc mentions $EXPECTED_VERSION"
   else
-    fail "G11 $doc mentions 2.0.0-rc.1" "missing"
+    fail "G11 $doc mentions $EXPECTED_VERSION" "missing"
   fi
 done
 
@@ -486,7 +488,7 @@ init_e2e() {
   fi
   # harness-verify.sh may legitimately exit non-zero on empty project (commands fail)
   # — we only assert it READ the scaffold successfully (got past config parse)
-  bash "$ROOT_DIR/scripts/harness-verify.sh" feature-001 "$tmp" >/dev/null 2>&1
+  bash "$ROOT_DIR/scripts/harness-verify.sh" F-001 "$tmp" >/dev/null 2>&1
   verify_rc=$?
   if [ "$verify_rc" -ne 0 ]; then
     # Non-zero is OK here (commands fail on empty project), but the script must
@@ -558,16 +560,18 @@ else
 fi
 
 # ============================================================================
-# G14 — Codex host produces codex-progress.md instead of CLAUDE.md
+# G14 — Codex host produces codex-progress.md AND CLAUDE.md (rc.3 §6.2a #10)
 # ============================================================================
 echo ""
-echo "=== G14: --host=codex produces codex-progress.md ==="
+echo "=== G14: --host=codex produces codex-progress.md + CLAUDE.md ==="
 TMP_CODEX=""
 safe_mktemp TMP_CODEX "G14 codex" || exit 1
 touch "$TMP_CODEX/package.json"
 bash "$ROOT_DIR/scripts/harness-init.sh" "$TMP_CODEX" --host=codex >/dev/null 2>&1
-if [ -f "$TMP_CODEX/codex-progress.md" ] && [ ! -f "$TMP_CODEX/CLAUDE.md" ]; then
-  pass "G14 --host=codex wrote codex-progress.md (and skipped CLAUDE.md)"
+# rc.3 §6.2a #10: CLAUDE.md is written for BOTH hosts (host-agnostic common
+# artifact); #11 (progress file) is the only host-specific artifact.
+if [ -f "$TMP_CODEX/codex-progress.md" ] && [ -f "$TMP_CODEX/CLAUDE.md" ]; then
+  pass "G14 --host=codex wrote codex-progress.md AND CLAUDE.md"
 else
   fail "G14 --host=codex" "codex-progress.md=$( [ -f "$TMP_CODEX/codex-progress.md" ] && echo Y || echo N ) CLAUDE.md=$( [ -f "$TMP_CODEX/CLAUDE.md" ] && echo Y || echo N )"
 fi

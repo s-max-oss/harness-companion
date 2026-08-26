@@ -33,17 +33,22 @@ if [ ! -x "$SESSION_START" ]; then
   exit 0
 fi
 
-# Regenerate fixtures so each NDJSON's workspace_fingerprint matches the
-# current fingerprint of the fixture directory. Required for the test package
-# to be portable to any copy path. See _regen-fixtures.sh for details.
+# G0-rev4: copy fixture root to temp so regeneration never mutates source fixtures.
+# Contract tests must not publish back to the source fixture tree.
+_TMP_FIXTURES="$(mktemp -d)"
+trap 'rm -rf "$_TMP_FIXTURES" "$TMPROOT"' EXIT
+cp -R "$FIXTURES_DIR/." "$_TMP_FIXTURES/" 2>/dev/null || true
+FIXTURES_DIR="$_TMP_FIXTURES"
+
+# Regenerate fixtures inside the temp copy only. The FIXTURES_DIR override
+# in _regen-fixtures.sh ensures all writes land in the temp copy.
 if [ -x "$TEST_DIR/_regen-fixtures.sh" ]; then
-  bash "$TEST_DIR/_regen-fixtures.sh" all >/dev/null 2>&1 || true
+  FIXTURES_DIR="$_TMP_FIXTURES" bash "$TEST_DIR/_regen-fixtures.sh" all >/dev/null 2>&1 || true
 fi
 
 PASSED=0
 FAILED=0
 TMPROOT="$(mktemp -d)"
-trap 'rm -rf "$TMPROOT"' EXIT
 
 assert() {
   local name="$1" expected="$2" actual="$3"
@@ -79,6 +84,17 @@ assert_grep_absent() {
   else
     PASSED=$((PASSED + 1))
     printf '  [PASS] %s\n' "$name"
+  fi
+}
+
+assert_file() {
+  local name="$1" path="$2"
+  if [ -f "$path" ]; then
+    PASSED=$((PASSED + 1))
+    printf '  [PASS] %s\n' "$name"
+  else
+    FAILED=$((FAILED + 1))
+    printf '  [FAIL] %s — file not found: %s\n' "$name" "$path"
   fi
 }
 
@@ -425,7 +441,9 @@ fi
 SS_PATH="$(jq -r '.hooks.SessionStart[0].hooks[0].command // empty' "$INSTALL_SETTINGS" 2>/dev/null)"
 STOP_PATH="$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$INSTALL_SETTINGS" 2>/dev/null)"
 case "$SS_PATH" in
-  *"harness-companion/scripts/hooks/session-start.sh"*)
+  # Codex r6 (block ⑥): canonical hook install path moved from
+  # scripts/hooks/ to adapters/claude-code/hooks/ — see install.sh HOOK_SS_CMD.
+  *"harness-companion/adapters/claude-code/hooks/session-start.sh"*)
     PASSED=$((PASSED+1))
     printf '  [PASS] G9.3 SessionStart hook command path points inside installed target\n' ;;
   *)
@@ -433,7 +451,7 @@ case "$SS_PATH" in
     printf '  [FAIL] G9.3 SessionStart hook path wrong: %s\n' "$SS_PATH" ;;
 esac
 case "$STOP_PATH" in
-  *"harness-companion/scripts/hooks/stop-handoff.sh"*)
+  *"harness-companion/adapters/claude-code/hooks/stop-handoff.sh"*)
     PASSED=$((PASSED+1))
     printf '  [PASS] G9.3 Stop hook command path points inside installed target\n' ;;
   *)
@@ -442,8 +460,8 @@ case "$STOP_PATH" in
 esac
 
 # G9.4: installed hooks can actually be invoked
-SS_HOOK="$INSTALL_TARGET/scripts/hooks/session-start.sh"
-STOP_HOOK="$INSTALL_TARGET/scripts/hooks/stop-handoff.sh"
+SS_HOOK="$INSTALL_TARGET/adapters/claude-code/hooks/session-start.sh"
+STOP_HOOK="$INSTALL_TARGET/adapters/claude-code/hooks/stop-handoff.sh"
 printf '{"session_id":"test","cwd":"%s","hook_event_name":"SessionStart"}\n' "$INSTALL_SANDBOX" \
   | bash "$SS_HOOK" >/dev/null 2>&1
 assert "G9.4 invoke installed session-start.sh exit 0" "0" "$?"
@@ -459,6 +477,36 @@ SS_COUNT="$(jq '.hooks.SessionStart | length' "$INSTALL_SETTINGS" 2>/dev/null)"
 STOP_COUNT="$(jq '.hooks.Stop | length' "$INSTALL_SETTINGS" 2>/dev/null)"
 assert "G9.5 SessionStart still 1 entry after re-install" "1" "$SS_COUNT"
 assert "G9.5 Stop still 1 entry after re-install" "1" "$STOP_COUNT"
+
+# G9.6: alternate-path install (BUG-3) — install in a different sandbox,
+# verify hook registration is correct (1 entry, not duplicated or mixed)
+ALT_SANDBOX="$(mktemp -d)"
+pushd "$ALT_SANDBOX" >/dev/null
+bash "$ROOT_DIR/adapters/claude-code/install.sh" --project >/dev/null 2>&1
+popd >/dev/null
+
+ALT_TARGET="$ALT_SANDBOX/.claude/skills/harness-companion"
+ALT_SETTINGS="$ALT_SANDBOX/.claude/settings.json"
+ALT_SS_COUNT="$(jq '.hooks.SessionStart | length' "$ALT_SETTINGS" 2>/dev/null)"
+ALT_STOP_COUNT="$(jq '.hooks.Stop | length' "$ALT_SETTINGS" 2>/dev/null)"
+assert "G9.6 alt-path SessionStart is 1 entry" "1" "$ALT_SS_COUNT"
+assert "G9.6 alt-path Stop is 1 entry" "1" "$ALT_STOP_COUNT"
+assert_file "G9.6 alt-path VERSION exists" "$ALT_TARGET/VERSION"
+
+# G9.7: uninstall from alternate sandbox — hooks deregistered, target removed
+pushd "$ALT_SANDBOX" >/dev/null
+bash "$ROOT_DIR/adapters/claude-code/uninstall.sh" --project >/dev/null 2>&1
+G97_UNINSTALL_RC=$?
+popd >/dev/null
+assert "G9.7 uninstall exit code" "0" "$G97_UNINSTALL_RC"
+
+G97_SS_AFTER="$(jq '.hooks.SessionStart | length' "$ALT_SETTINGS" 2>/dev/null)"
+G97_STOP_AFTER="$(jq '.hooks.Stop | length' "$ALT_SETTINGS" 2>/dev/null)"
+assert "G9.7 SessionStart hooks removed after uninstall" "0" "$G97_SS_AFTER"
+assert "G9.7 Stop hooks removed after uninstall" "0" "$G97_STOP_AFTER"
+assert "G9.7 target tree removed" "NO" "$([ -d "$ALT_TARGET" ] && echo YES || echo NO)"
+
+rm -rf "$ALT_SANDBOX" 2>/dev/null || true
 
 # ============================================================
 echo ""

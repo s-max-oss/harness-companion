@@ -26,17 +26,21 @@ ev_is_stale_by_fingerprint() {
     return 0  # missing log → stale
   fi
 
-  # Load fingerprint script if available
+  # Load fingerprint script if available. FAIL-CLOSED: a missing required
+  # dependency (workspace-fingerprint.sh or jq) means we cannot verify the
+  # fingerprint axis, so the evidence is stale — never silently "fresh".
   local fp_script
   fp_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/workspace-fingerprint.sh"
   if [ ! -f "$fp_script" ]; then
-    return 1  # can't check → not stale (fail-open)
+    echo "staleness: FAIL-CLOSED — workspace-fingerprint.sh missing; Axis1 treated as stale" >&2
+    return 0
   fi
   # shellcheck source=workspace-fingerprint.sh
   source "$fp_script"
 
   if ! command -v jq >/dev/null 2>&1; then
-    return 1
+    echo "staleness: FAIL-CLOSED — jq missing; Axis1 treated as stale" >&2
+    return 0
   fi
 
   local verified_fp current_fp
@@ -63,8 +67,10 @@ ev_is_stale_by_config() {
   if [ ! -f "$log_path" ]; then
     return 0
   fi
+  # FAIL-CLOSED: jq missing → cannot verify the config axis → stale.
   if ! command -v jq >/dev/null 2>&1; then
-    return 1
+    echo "staleness: FAIL-CLOSED — jq missing; Axis2 treated as stale" >&2
+    return 0
   fi
 
   local stored_sha
@@ -83,7 +89,8 @@ ev_is_stale_by_config() {
   elif command -v shasum >/dev/null 2>&1; then
     current_sha="sha256:$(shasum -a 256 "$config_path" | awk '{print $1}')"
   else
-    return 1  # can't hash → not stale (fail-open)
+    echo "staleness: FAIL-CLOSED — no sha tool; Axis2 treated as stale" >&2
+    return 0
   fi
 
   if [ "$stored_sha" != "$current_sha" ]; then
@@ -102,22 +109,40 @@ ev_is_stale_by_vcs() {
   if [ ! -f "$log_path" ]; then
     return 0
   fi
+  # FAIL-CLOSED: jq missing → cannot verify the VCS axis → stale.
   if ! command -v jq >/dev/null 2>&1; then
-    return 1
-  fi
-
-  if ! git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
-    return 1  # not a git repo → can't be VCS-stale
+    echo "staleness: FAIL-CLOSED — jq missing; Axis3 treated as stale" >&2
+    return 0
   fi
 
   local stored_rev
   stored_rev="$(jq -r 'select(.event == "run_started") | .vcs_revision // empty' "$log_path" 2>/dev/null | head -1)"
-  local current_rev
-  current_rev="$(git -C "$project_dir" rev-parse --short=12 HEAD 2>/dev/null || echo '')"
 
   if [ -z "$stored_rev" ] || [ "$stored_rev" = "null" ]; then
-    return 1  # no stored revision → can't compare
+    # P0-14: in a GIT project a missing revision is unverifiable → stale
+    # (fail-closed). Only non-git projects skip the axis — there is no revision
+    # to record or compare.
+    if command -v git >/dev/null 2>&1 && git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
+      echo "staleness: FAIL-CLOSED — git project but run has no vcs_revision; Axis3 treated as stale" >&2
+      return 0
+    fi
+    return 1  # non-git project → no stored revision → nothing to compare → not stale
   fi
+
+  # A stored revision exists, so the axis must be verifiable. FAIL-CLOSED:
+  # git missing or the project is not (any longer) a git repo → inconsistent,
+  # cannot confirm the recorded revision → stale.
+  if ! command -v git >/dev/null 2>&1; then
+    echo "staleness: FAIL-CLOSED — git missing; Axis3 treated as stale" >&2
+    return 0
+  fi
+  if ! git -C "$project_dir" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "staleness: FAIL-CLOSED — stored vcs_revision but not a git repo; Axis3 treated as stale" >&2
+    return 0
+  fi
+
+  local current_rev
+  current_rev="$(git -C "$project_dir" rev-parse --short=12 HEAD 2>/dev/null || echo '')"
 
   if [ "$stored_rev" != "$current_rev" ]; then
     return 0

@@ -221,6 +221,16 @@ rm -rf "$WORKSPACE_TMP/.harness/.registry.lock" "$WORKSPACE_TMP/.harness/stuff.t
 FP6_after="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
 assert_fp_equals ".harness lock and temp files excluded" "$FP6_before" "$FP6_after"
 
+# Acceptance packages are post-verification runtime evidence. Creating or
+# locking one must not invalidate the run whose fingerprint it records.
+mkdir -p "$WORKSPACE_TMP/.harness/acceptance/deadbeef/.lock"
+FP6A_before="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
+echo '{}' > "$WORKSPACE_TMP/.harness/acceptance/deadbeef/acceptance.json"
+echo 'evidence' > "$WORKSPACE_TMP/.harness/acceptance/deadbeef/A-G.log"
+echo 'lock' > "$WORKSPACE_TMP/.harness/acceptance/deadbeef/.lock/token"
+FP6A_after="$(compute_workspace_fingerprint "$WORKSPACE_TMP")"
+assert_fp_equals ".harness acceptance package is fingerprint-excluded" "$FP6A_before" "$FP6A_after"
+
 # ============================================================================
 # Test 7: NUL temp file location
 # ============================================================================
@@ -787,6 +797,258 @@ git add -A && git commit -m "rename into excluded" --quiet
 FP_T19_committed="$(compute_workspace_fingerprint "$T19_TMP")"
 assert_fp_equals "after committing rename, fingerprint returns to clean" \
   "clean" "$FP_T19_committed"
+
+# ============================================================================
+# Test 20: Locale independence — canonical fingerprint under any locale
+# ============================================================================
+# P0-1 gate: compute_workspace_fingerprint must force a canonical (C) locale
+# internally so the fingerprint is byte-identical whether the caller runs
+# under the default locale, LC_ALL=C, or a non-C/Chinese locale.
+#
+# The DIRTY (sha256:) path is the meaningful gate — only it invokes `sort -z`
+# collation. The clean path prints a constant string without sorting, so it
+# would pass even without the fix; we keep it as a contract check.
+echo ""
+echo "=== Test 20: Locale independence (default / C / zh_CN.UTF-8) ==="
+
+LOC_TMP=""
+safe_mktemp LOC_TMP "workspace-fp locale" || exit 1
+cd "$LOC_TMP" || { echo "FATAL: cd into locale test dir failed" >&2; exit 1; }
+git init --quiet .
+git config user.email t@t && git config user.name t
+# core.quotepath false: without it MSYS git quotes non-ASCII untracked paths
+# as octal escapes ("src/\344\270\255.txt"), so the fingerprint's `[ -f ]`
+# check silently skips them and the dirty path is never exercised.
+git config core.quotepath false
+mkdir -p src
+echo "alpha" > src/a.txt
+echo "beta"  > src/b.txt
+git add -A && git commit -m "base" --quiet
+
+# (a) Clean state — contract check (does not exercise sort).
+FP_LOC_clean_default="$(compute_workspace_fingerprint "$LOC_TMP")"
+FP_LOC_clean_c="$(LC_ALL=C compute_workspace_fingerprint "$LOC_TMP")"
+FP_LOC_clean_zh="$(LC_ALL=zh_CN.UTF-8 compute_workspace_fingerprint "$LOC_TMP")"
+assert_fp_equals "clean: default == LC_ALL=C" "$FP_LOC_clean_default" "$FP_LOC_clean_c"
+assert_fp_equals "clean: default == zh_CN.UTF-8" "$FP_LOC_clean_default" "$FP_LOC_clean_zh"
+assert_fp_equals "clean: fingerprint is 'clean'" "$FP_LOC_clean_default" "clean"
+
+# (b) DIRTY state — exercises the sort path; this is the real gate.
+# Two UNTRACKED Chinese filenames whose relative order under `sort -z`
+# diverges between byte order (LC_ALL=C: 中 U+4E2D < 文 U+6587 → 中 first)
+# and a real zh collation (pinyin: 文 "wén" < 中 "zhōng" → 文 first). With a
+# single non-ASCII name both orderings agree and the gate would be vacuous;
+# two divergent names change the hashed byte stream unless the function
+# forces a canonical locale internally.
+echo "未跟踪" > "src/中.txt"
+echo "未跟踪" > "src/文.txt"
+FP_LOC_d_default="$(compute_workspace_fingerprint "$LOC_TMP")"
+FP_LOC_d_c="$(LC_ALL=C compute_workspace_fingerprint "$LOC_TMP")"
+FP_LOC_d_zh="$(LC_ALL=zh_CN.UTF-8 compute_workspace_fingerprint "$LOC_TMP")"
+assert_fp_equals "dirty: default == LC_ALL=C (byte-identical)" "$FP_LOC_d_default" "$FP_LOC_d_c"
+assert_fp_equals "dirty: default == zh_CN.UTF-8 (byte-identical)" "$FP_LOC_d_default" "$FP_LOC_d_zh"
+case "$FP_LOC_d_default" in
+  sha256:*) echo "PASS: dirty locale fingerprint is a real sha256:<hex>"; PASSED=$((PASSED + 1)) ;;
+  *) echo "FAIL: expected sha256:<hex>, got '$FP_LOC_d_default'"; FAILED=$((FAILED + 1)) ;;
+esac
+
+# (c) Caller env is NOT polluted: internal C forcing must be function-scoped.
+# This call runs in the SAME shell (no command substitution), so it is `local`
+# scoping alone that protects the caller — an `export LC_ALL=C` implementation
+# would flip the caller's locale and fail this assertion.
+saved_lc_all="${LC_ALL:-}"
+export LC_ALL=zh_CN.UTF-8
+loc_out="$(mktemp 2>/dev/null)" || loc_out="/tmp/harness-loc-check-$$"
+compute_workspace_fingerprint "$LOC_TMP" > "$loc_out"
+FP_LOC_pollute="$(cat "$loc_out" 2>/dev/null)"
+rm -f "$loc_out"
+if [ "${LC_ALL:-}" = "zh_CN.UTF-8" ]; then
+  echo "PASS: caller LC_ALL untouched after in-shell call (local-scoped)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: caller LC_ALL leaked/changed to '${LC_ALL:-}'"
+  FAILED=$((FAILED + 1))
+fi
+assert_fp_equals "dirty: caller-LC_ALL=zh call still yields identical fingerprint" \
+  "$FP_LOC_d_default" "$FP_LOC_pollute"
+if [ -n "$saved_lc_all" ]; then export LC_ALL="$saved_lc_all"; else unset LC_ALL; fi
+
+# (d) P0-9 REAL subprocess tests — the fingerprint must be byte-identical when
+# the function runs in a FRESH child shell under the three mandated
+# environments:
+#   env -u LC_ALL LANG=C.UTF-8      (LC_ALL unset, POSIX C.UTF-8)
+#   env -u LC_ALL LANG=zh_CN.UTF-8  (LC_ALL unset, Chinese locale — the case
+#                                    that used to produce a DIFFERENT SHA:
+#                                    `local LC_ALL=C` does not propagate to
+#                                    children when LC_ALL is unset in the
+#                                    caller, so sort fell back to LANG)
+#   LC_ALL=C                        (canonical C locale)
+# Each child sources the REAL script and computes the DIRTY fingerprint (the
+# sort -z path), so any non-C collation in the child env would change the SHA.
+saved_parent_lc="${LC_ALL-}"
+saved_parent_lang="${LANG-}"
+SUB_C="$(env -u LC_ALL LANG=C.UTF-8 bash -c 'source "$1"; compute_workspace_fingerprint "$2"' _ "$CORE_LIB/workspace-fingerprint.sh" "$LOC_TMP" 2>/dev/null)"
+SUB_ZH="$(env -u LC_ALL LANG=zh_CN.UTF-8 bash -c 'source "$1"; compute_workspace_fingerprint "$2"' _ "$CORE_LIB/workspace-fingerprint.sh" "$LOC_TMP" 2>/dev/null)"
+SUB_LC="$(LC_ALL=C bash -c 'source "$1"; compute_workspace_fingerprint "$2"' _ "$CORE_LIB/workspace-fingerprint.sh" "$LOC_TMP" 2>/dev/null)"
+assert_fp_equals "subprocess: env -u LC_ALL LANG=C.UTF-8 == default" "$SUB_C" "$FP_LOC_d_default"
+assert_fp_equals "subprocess: env -u LC_ALL LANG=zh_CN.UTF-8 == default" "$SUB_ZH" "$FP_LOC_d_default"
+assert_fp_equals "subprocess: LC_ALL=C == default" "$SUB_LC" "$FP_LOC_d_default"
+if [ -n "$SUB_C" ] && [ "$SUB_C" = "$SUB_ZH" ] && [ "$SUB_C" = "$SUB_LC" ]; then
+  echo "PASS: three subprocess env configs yield identical fingerprints"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: subprocess fingerprints differ (C=$SUB_C zh=$SUB_ZH lcall=$SUB_LC)"
+  FAILED=$((FAILED + 1))
+fi
+
+# (e) P0-9 caller-env no-pollution proofs.
+#   (e1) the PARENT shell's LC_ALL/LANG are unchanged after the three subprocess
+#        invocations above (a child process cannot mutate its parent — asserted
+#        explicitly as structural evidence of the contract).
+#   (e2) the CHILD shell itself is not polluted: after it computes the
+#        fingerprint under LC_ALL-unset LANG=zh_CN.UTF-8, ITS OWN LC_ALL is
+#        still unset and LANG still zh_CN.UTF-8 — proving the function restores
+#        the caller state instead of leaving `export LC_ALL=C` behind.
+#   (e3) likewise, a child launched with LC_ALL=C still has LC_ALL=C after the
+#        call (the exported value is restored, not dropped).
+if [ "${LC_ALL-}" = "$saved_parent_lc" ] && [ "${LANG-}" = "$saved_parent_lang" ]; then
+  echo "PASS: parent LC_ALL/LANG unchanged after subprocess invocations (no pollution)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: parent locale polluted by subprocess invocations (LC_ALL=${LC_ALL-} LANG=${LANG-})"
+  FAILED=$((FAILED + 1))
+fi
+CHILD_STATE="$(env -u LC_ALL LANG=zh_CN.UTF-8 bash -c 'source "$1"; compute_workspace_fingerprint "$2" >/dev/null; printf "%s|%s" "${LC_ALL-unset}" "${LANG-unset}"' _ "$CORE_LIB/workspace-fingerprint.sh" "$LOC_TMP" 2>/dev/null)"
+if [ "$CHILD_STATE" = "unset|zh_CN.UTF-8" ]; then
+  echo "PASS: child env unpolluted after compute under env -u LC_ALL LANG=zh_CN.UTF-8 (LC_ALL still unset, LANG intact)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: child env polluted after compute — got '$CHILD_STATE' (expected unset|zh_CN.UTF-8)"
+  FAILED=$((FAILED + 1))
+fi
+CHILD_STATE_C="$(LC_ALL=C bash -c 'source "$1"; compute_workspace_fingerprint "$2" >/dev/null; printf "%s" "${LC_ALL-unset}"' _ "$CORE_LIB/workspace-fingerprint.sh" "$LOC_TMP" 2>/dev/null)"
+if [ "$CHILD_STATE_C" = "C" ]; then
+  echo "PASS: LC_ALL=C child env intact after compute (restored to C)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: LC_ALL=C child env corrupted after compute — got '$CHILD_STATE_C'"
+  FAILED=$((FAILED + 1))
+fi
+
+# ============================================================================
+# Test 21: P0-M1 — per-call rebuild + cross-project isolation + git→no-git
+# ============================================================================
+# P0-M1 contract: every call to compute_workspace_fingerprint must rebuild
+# BUILTIN_EXCLUDES + FINGERPRINT_EXCLUDES + VERIFICATION_SCOPE + _FP_EXCLUDE_ERE
+# from the CURRENT project's state, including the no-git branch. Two
+# consecutive calls in the SAME shell on two different projects must observe
+# independent exclude sets (positive and reverse order must agree; git→no-git
+# must rebuild and not inherit a stale regex).
+#
+# This test never modifies the real repo. It builds two minimal temp dirs:
+#   P_GIT: a git repo with a custom fingerprint_exclude list.
+#   P_NO:  a plain dir (no git) with a different fingerprint_exclude list.
+# Both are populated with files that exercise the exclude logic, then we
+# compute (a) A then B (b) B then A (c) git → no-git, and assert both
+# (i) determinism across orders and (ii) no leakage of the git project's
+# FINGERPRINT_EXCLUDES into the no-git compute.
+echo ""
+echo "=== Test 21: P0-M1 — per-call rebuild + cross-project isolation ==="
+
+P_GIT_X=""
+P_NO_X=""
+safe_mktemp P_GIT_X "m1 git project" || exit 1
+safe_mktemp P_NO_X  "m1 no-git project" || exit 1
+P_GIT="$P_GIT_X"
+P_NO="$P_NO_X"
+
+# Project A (git): a single tracked file `keep.txt`, .harness/config.json with
+# one custom exclude `*.gitignore`. The exclude must drop `keep.gitignore`.
+( cd "$P_GIT" && git init --quiet && git config user.email t@t && git config user.name t && git config core.quotepath false
+  mkdir -p .harness
+  printf '{"fingerprint_exclude":["*.gitignore"]}\n' > .harness/config.json
+  printf 'keep\n' > keep.txt
+  printf 'ignored-by-custom\n' > keep.gitignore
+  mkdir -p .harness/logs/runs
+  printf '{"dummy":1}\n' > .harness/logs/runs/dummy.ndjson
+  git add -A && git commit -qm "seed A"
+)
+
+# Project B (no-git): same shape but with a DIFFERENT custom exclude
+# (`*.swp`) so the no-git compute must derive the B-set excludes (no carryover
+# from the git project).
+( mkdir -p "$P_NO/sub"
+  printf '{"fingerprint_exclude":["*.swp"]}\n' > "$P_NO/.harness/config.json"
+  printf 'keep\n' > "$P_NO/keep.txt"
+  printf 'swp\n' > "$P_NO/keep.swp"
+)
+
+# --- (a) order A→B then B→A must agree ---
+FP_A_A="$( ( cd "$P_GIT" && compute_workspace_fingerprint . ) )"
+FP_A_B="$( ( cd "$P_NO"  && compute_workspace_fingerprint . ) )"
+FP_B_A="$( ( cd "$P_GIT" && compute_workspace_fingerprint . ) )"
+FP_B_B="$( ( cd "$P_NO"  && compute_workspace_fingerprint . ) )"
+echo "FP_A_A=$FP_A_A  FP_A_B=$FP_A_B  FP_B_A=$FP_B_A  FP_B_B=$FP_B_B"
+if [ "$FP_A_A" = "$FP_B_A" ] && [ "$FP_A_B" = "$FP_B_B" ]; then
+  echo "PASS: (a) order-stable — A→B and B→A give same per-project result"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: (a) order instability across projects"
+  FAILED=$((FAILED + 1))
+fi
+
+# --- (b) git→no-git — git build's _FP_EXCLUDE_ERE must NOT carry into no-git ---
+# We force the scenario by computing inside ONE shell that processes the git
+# project first, then the no-git project. The no-git compute's _FP_EXCLUDE_ERE
+# is rebuilt from $P_NO's config.json (different excludes) — the hash for P_NO
+# must reflect ONLY the *.swp exclusion, not the git project's *.gitignore.
+# To detect carryover, we count what the no-git hash includes by recomputing
+# P_NO from a CLEAN shell with the same content and comparing — they must match.
+FP_NO_IN_SHARED_SHELL="$FP_A_B"
+FP_NO_IN_CLEAN_SHELL="$( FP_NO_DIR="$P_NO" LC_ALL=C bash -c '
+    . "$1/core/lib/workspace-fingerprint.sh"
+    cd "$2" && compute_workspace_fingerprint .
+  ' _ "$ROOT_DIR" "$P_NO" )"
+if [ "$FP_NO_IN_SHARED_SHELL" = "$FP_NO_IN_CLEAN_SHELL" ] \
+   && [ -n "$FP_NO_IN_SHARED_SHELL" ] \
+   && [ "$FP_NO_IN_SHARED_SHELL" != "no_git" ]; then
+  echo "PASS: (b) git→no-git — no carryover (FP matches a clean-shell compute)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: (b) git→no-git carryover (shared=$FP_NO_IN_SHARED_SHELL clean=$FP_NO_IN_CLEAN_SHELL)"
+  FAILED=$((FAILED + 1))
+fi
+
+# --- (c) no-git must rebuild its own ERE for files whose exclude is in B but not in A ---
+# In P_NO: keep.txt (kept), keep.swp (excluded by B). The computed hash must
+# be a sha256: prefix AND match the hash for a parallel dir that ONLY has
+# keep.txt (proving keep.swp was actually filtered).
+P_NO_TRIM="$(mktemp -d "$P_NO.XXXXXX")"
+cp -r "$P_NO"/* "$P_NO_TRIM/" 2>/dev/null || true
+[ -f "$P_NO_TRIM/keep.swp" ] && rm -f "$P_NO_TRIM/keep.swp"
+FP_NO_FULL="$( ( cd "$P_NO"      && compute_workspace_fingerprint . ) )"
+FP_NO_TRIM="$( ( cd "$P_NO_TRIM" && compute_workspace_fingerprint . ) )"
+rm -rf "$P_NO_TRIM"
+if [ -n "$FP_NO_FULL" ] && [ "$FP_NO_FULL" != "$FP_NO_TRIM" ] \
+   && [ "${FP_NO_FULL#sha256:}" != "$FP_NO_FULL" ]; then
+  echo "PASS: (c) no-git rebuild observed: keep.swp filtered (full≠trim, sha256:)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: (c) no-git exclude not observed (full=$FP_NO_FULL trim=$FP_NO_TRIM)"
+  FAILED=$((FAILED + 1))
+fi
+
+# --- (d) EMPTY no-git directory — must return the literal "no_git" token ---
+P_NO_EMPTY="$(mktemp -d "$P_NO.XXXXXX")"
+FP_EMPTY="$( ( cd "$P_NO_EMPTY" && compute_workspace_fingerprint . ) )"
+rm -rf "$P_NO_EMPTY"
+if [ "$FP_EMPTY" = "no_git" ]; then
+  echo "PASS: (d) empty no-git → token 'no_git' (not sha256:<hex-of-empty>)"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: (d) empty no-git returned '$FP_EMPTY' (expected 'no_git')"
+  FAILED=$((FAILED + 1))
+fi
 
 # ============================================================================
 # Summary

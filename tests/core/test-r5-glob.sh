@@ -329,13 +329,115 @@ if [ -n "$LOG" ]; then
   n_exec="$(count_cmd_events "$LOG" "glob-cmd")"
   # E5 has a required command that, if it ran with exit 1, would mark run
   # as failed. Confirm: command did NOT run (0 events), and overall is
-  # not failed (because required-but-skipped is treated as skipped, not failed).
+  # not failed (because required-but-not-applicable is excluded from the
+  # effective required set — E5 unification).
   overall="$(jq -r 'select(.event=="run_completed" or .event=="run_failed") | .overall_result' "$LOG" 2>/dev/null)"
-  if [ "$n_exec" = "0" ] && [ "$overall" != "failed" ]; then
-    assert_pass "E5: glob no-match → required command SKIPPED (not failed) — overall=$overall"
+  na_json="$(jq -c 'select(.event=="run_completed" or .event=="run_failed") | .not_applicable_command_ids' "$LOG" 2>/dev/null | tail -1)"
+  if [ "$n_exec" = "0" ] && [ "$overall" != "failed" ] && [ "$na_json" = '["glob-cmd"]' ]; then
+    assert_pass "E5: glob no-match → required command not_applicable, excluded from coverage — overall=$overall"
   else
-    assert_fail "E5: skipped required command must not mark run as failed" "events=$n_exec overall=$overall"
+    assert_fail "E5: not_applicable required command must not fail the run" "events=$n_exec overall=$overall na=$na_json"
   fi
+fi
+
+# E6: mixed applicable + not_applicable required commands (E5 unification).
+# Two required commands: one applies and executes (exit 0), the other has
+# predicate=false. The effective required set excludes the not_applicable id,
+# so the run must PASS. This is the "mixed" coverage scenario.
+E6="$TMPROOT/e6"
+mkdir -p "$E6/src"
+touch "$E6/src/foo.py"
+mkdir -p "$E6/.harness"
+git -C "$E6" init --quiet 2>/dev/null
+git -C "$E6" config user.email "t@t"
+git -C "$E6" config user.name "t"
+git -C "$E6" config commit.gpgsign false
+cat > "$E6/feature_list.json" <<'FL'
+{"revision":1,"features":[{"id":"feat-1","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}],"last_updated":"2026-08-01"}
+FL
+cat > "$E6/.harness/config.json" <<'EOF'
+{
+  "project_type": "generic",
+  "verification": {
+    "commands": [
+      {
+        "id": "glob-app",
+        "command": ["bash","-c","echo app-matched && exit 0"],
+        "required_for_passing": true,
+        "command_origin": "configured",
+        "confirmation": "not_required",
+        "applies_when": { "has_files": ["src/*.py"] }
+      },
+      {
+        "id": "glob-na",
+        "command": ["bash","-c","echo na-matched && exit 1"],
+        "required_for_passing": true,
+        "command_origin": "configured",
+        "confirmation": "not_required",
+        "applies_when": { "has_files": ["nonexistent/*.xyz"] }
+      }
+    ]
+  }
+}
+EOF
+run_verify "feat-1" "$E6"
+LOG="$(find_log "feat-1" "$E6")"
+if [ -n "$LOG" ]; then
+  n_app="$(count_cmd_events "$LOG" "glob-app")"
+  n_na="$(count_cmd_events "$LOG" "glob-na")"
+  overall="$(jq -r 'select(.event=="run_completed" or .event=="run_failed") | .overall_result' "$LOG" 2>/dev/null)"
+  na_json="$(jq -c 'select(.event=="run_completed" or .event=="run_failed") | .not_applicable_command_ids' "$LOG" 2>/dev/null | tail -1)"
+  if [ "$n_app" = "1" ] && [ "$n_na" = "0" ] && [ "$overall" = "passed" ] && [ "$na_json" = '["glob-na"]' ]; then
+    assert_pass "E6: mixed applicable/not-applicable required → passes (na excluded from effective required)"
+  else
+    assert_fail "E6: mixed required semantics" "app_events=$n_app na_events=$n_na overall=$overall na=$na_json"
+  fi
+else
+  assert_fail "E6: log produced" "no log"
+fi
+
+# E7: applicable-but-missed → coverage gate FAILS the run (E5 unification).
+# A required command with predicate=true that is skipped for any reason other
+# than not_applicable (here: detected+pending) is "applicable but missed" and
+# must still fail the coverage gate — it is NOT part of the exclusion.
+E7="$TMPROOT/e7"
+mkdir -p "$E7/.harness"
+git -C "$E7" init --quiet 2>/dev/null
+git -C "$E7" config user.email "t@t"
+git -C "$E7" config user.name "t"
+git -C "$E7" config commit.gpgsign false
+cat > "$E7/feature_list.json" <<'FL'
+{"revision":1,"features":[{"id":"feat-1","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}],"last_updated":"2026-08-01"}
+FL
+cat > "$E7/.harness/config.json" <<'EOF'
+{
+  "project_type": "generic",
+  "verification": {
+    "commands": [
+      {
+        "id": "det-pending",
+        "command": ["bash","-c","echo should-not-run && exit 0"],
+        "required_for_passing": true,
+        "command_origin": "detected",
+        "confirmation": "pending"
+      }
+    ]
+  }
+}
+EOF
+run_verify "feat-1" "$E7"
+LOG="$(find_log "feat-1" "$E7")"
+if [ -n "$LOG" ]; then
+  n="$(count_cmd_events "$LOG" "det-pending")"
+  overall="$(jq -r 'select(.event=="run_completed" or .event=="run_failed") | .overall_result' "$LOG" 2>/dev/null)"
+  failed_ids="$(jq -c 'select(.event=="run_failed") | .failed_command_ids' "$LOG" 2>/dev/null | tail -1)"
+  if [ "$n" = "0" ] && [ "$overall" = "failed" ] && [ "$failed_ids" = '["det-pending"]' ] && [ "$VERIFY_RC" = "1" ]; then
+    assert_pass "E7: applicable-but-missed required command → coverage gate fails (rc=$VERIFY_RC)"
+  else
+    assert_fail "E7: applicable-but-missed must fail the coverage gate" "events=$n overall=$overall failed_ids=$failed_ids rc=$VERIFY_RC"
+  fi
+else
+  assert_fail "E7: log produced" "no log"
 fi
 
 # ============================================================================

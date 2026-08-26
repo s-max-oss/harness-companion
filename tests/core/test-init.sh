@@ -2,7 +2,7 @@
 # test-init.sh — Phase 2: project-type detection and init.sh tests
 #
 # Verifies:
-#   - detect_project_type correctly classifies node/python/rust/go/docs/generic
+#   - detect_project_type correctly classifies node/python/rust/go/shell/electron/mixed/docs/unknown
 #   - init.sh scaffolds the right config example for each detected type
 #   - docs init produces 0-step config (no_checks)
 #   - .gitignore is updated with .harness/logs/
@@ -94,10 +94,10 @@ touch "$TMP/docs/README.md"
 got="$(detect_project_type "$TMP/docs")"
 assert_eq "docs: *.md at root, no source markers → docs" "docs" "$got"
 
-# 8. generic (empty dir)
+# 8. unknown (empty dir)
 mkdir -p "$TMP/empty"
 got="$(detect_project_type "$TMP/empty")"
-assert_eq "generic: empty dir → generic" "generic" "$got"
+assert_eq "unknown: empty dir → unknown" "unknown" "$got"
 
 # 9. precedence — node wins over docs (has package.json + README.md)
 mkdir -p "$TMP/node-docs"
@@ -119,6 +119,31 @@ mkdir -p "$TMP/docs-sub/docs"
 touch "$TMP/docs-sub/docs/index.md"
 got="$(detect_project_type "$TMP/docs-sub")"
 assert_eq "docs: docs/ subdirectory → docs" "docs" "$got"
+
+# 12. shell (no source markers + *.sh at root)
+mkdir -p "$TMP/shell"
+touch "$TMP/shell/deploy.sh"
+got="$(detect_project_type "$TMP/shell")"
+assert_eq "shell: *.sh at root, no source markers → shell" "shell" "$got"
+
+# 13. electron (package.json with electron dependency)
+mkdir -p "$TMP/electron"
+printf '{"dependencies":{"electron":"^31.0.0"}}\n' > "$TMP/electron/package.json"
+got="$(detect_project_type "$TMP/electron")"
+assert_eq "electron: package.json with electron dep → electron" "electron" "$got"
+
+# 14. mixed (node + python source markers)
+mkdir -p "$TMP/mixed"
+touch "$TMP/mixed/package.json"
+touch "$TMP/mixed/pyproject.toml"
+got="$(detect_project_type "$TMP/mixed")"
+assert_eq "mixed: package.json + pyproject.toml → mixed" "mixed" "$got"
+
+# 15. unknown (no source markers, non-doc file)
+mkdir -p "$TMP/unknown-file"
+touch "$TMP/unknown-file/LICENSE"
+got="$(detect_project_type "$TMP/unknown-file")"
+assert_eq "unknown: LICENSE only → unknown" "unknown" "$got"
 
 # ============================================================================
 # init.sh integration tests

@@ -29,11 +29,15 @@ if [ ! -f "$AUDIT" ]; then
   exit 0
 fi
 
-# Regenerate fixtures so each NDJSON's workspace_fingerprint matches the
-# current fingerprint of the fixture directory. Required for the test package
-# to be portable to any copy path. See _regen-fixtures.sh for details.
+# G0-rev4: copy fixtures to temp so regeneration never mutates source fixtures.
+_TMP_FIXTURES="$(mktemp -d)"
+trap 'rm -rf "$_TMP_FIXTURES"' EXIT
+cp -R "$FIXTURES/." "$_TMP_FIXTURES/" 2>/dev/null || true
+FIXTURES="$_TMP_FIXTURES"
+
+# Regenerate fixtures inside the temp copy only.
 if [ -x "$ROOT_DIR/tests/adapters/_regen-fixtures.sh" ]; then
-  bash "$ROOT_DIR/tests/adapters/_regen-fixtures.sh" all >/dev/null 2>&1 || true
+  FIXTURES_DIR="$_TMP_FIXTURES" bash "$ROOT_DIR/tests/adapters/_regen-fixtures.sh" all >/dev/null 2>&1 || true
 fi
 
 PASSED=0

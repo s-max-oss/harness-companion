@@ -25,12 +25,36 @@
 # available, install fails with an actionable error.
 #
 # All modes: idempotent, backup before modification, trust review prompt.
+#
+# BUG-1 fix (rc.2): Receipt upgrade contract — same-version reinstall updates
+# installed_at without appending upgrade_history; cross-version upgrade appends.
+#
+# BUG-2 fix (rc.2): Reads version from $REPO_ROOT/VERSION; writes $CODEX_DIR/VERSION.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ADAPTER_DIR="$SCRIPT_DIR"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# ---- Read version (BUG-2: single source of truth) ------------------------------
+if [ ! -f "$REPO_ROOT/VERSION" ] || [ -L "$REPO_ROOT/VERSION" ]; then
+  echo "[ERROR] VERSION file missing or not a regular source file: $REPO_ROOT/VERSION" >&2
+  exit 1
+fi
+VERSION_LINES="$(awk 'END { print NR }' "$REPO_ROOT/VERSION" 2>/dev/null)"
+VERSION="$(tr -d '\r' < "$REPO_ROOT/VERSION")"
+SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+if [ "$VERSION_LINES" != "1" ] || [[ "$VERSION" == *$'\n'* ]] || ! printf '%s' "$VERSION" | grep -qE "$SEMVER_RE"; then
+  echo "[ERROR] VERSION must contain exactly one valid SemVer value" >&2
+  exit 1
+fi
+
+# ---- Detect archive/tarball install (no .git) ----------------------------------
+IS_ARCHIVE=0
+if ! git -C "$REPO_ROOT" rev-parse HEAD >/dev/null 2>&1; then
+  IS_ARCHIVE=1
+fi
 
 echo "=== harness-companion Codex adapter — Phase 5b ==="
 echo "SessionStart: status injection  |  Stop: handoff warnings  |  PreToolUse: permissive"
@@ -113,6 +137,7 @@ if [ "$MODE" = "--repo" ]; then
   WINDOWS_INSTALLED="${INSTALLED_HOOKS_DIR//\//\\}"
 
   echo "Mode:       --repo (repo-local)"
+  echo "Version:    $VERSION"
   echo "Target:     $CODEX_DIR"
   echo "HookPath:   $POSIX_INSTALLED"
   echo ""
@@ -134,7 +159,7 @@ if [ "$MODE" = "--repo" ]; then
   cp "$ADAPTER_DIR/hooks/"*.cmd "$INSTALLED_HOOKS_DIR/"
   cp "$ADAPTER_DIR/install.sh" "$CODEX_DIR/adapters/codex/install.sh"
   cp "$ADAPTER_DIR/adapter.conf" "$CODEX_DIR/adapters/codex/adapter.conf"
-  cp "$ADAPTER_DIR/UNSUPPORTED.md" "$CODEX_DIR/adapters/codex/UNSUPPORTED.md"  # renamed to PHASE5B_STATUS.md
+  cp "$ADAPTER_DIR/PHASE5B_STATUS.md" "$CODEX_DIR/adapters/codex/PHASE5B_STATUS.md"
   echo "  copied adapters/codex/ → $CODEX_DIR/adapters/codex/"
 
   # ---- Backup existing hooks.json if present ---------------------------------
@@ -254,67 +279,355 @@ PYEOF
   chmod +x "$INSTALLED_HOOKS_DIR/"*.sh 2>/dev/null || true
   chmod +x "$CODEX_DIR/adapters/codex/install.sh" 2>/dev/null || true
 
-  # ---- Install receipt --------------------------------------------------------
+  # ---- Write VERSION to target (BUG-2) ----------------------------------------
+  printf '%s\n' "$VERSION" > "$CODEX_DIR/VERSION"
+  echo "  VERSION = $VERSION"
+
+  # ---- Install receipt (BUG-1 fix: upgrade-safe) ------------------------------
   INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)"
-  SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
   RECEIPT="$CODEX_DIR/install-receipt.json"
 
-  # Build receipt via jq OR python3 (avoid heredoc backslash issues).
-  # Validate jq actually works, not just exists in PATH (a stub must not
-  # silently produce invalid output).
-  if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
-    SOURCE_COMMIT="$SOURCE_COMMIT" \
-    INSTALLED_AT="$INSTALLED_AT" \
-    CODEX_DIR="$CODEX_DIR" \
-    INSTALLED_HOOKS_DIR="$INSTALLED_HOOKS_DIR" \
-    jq -n \
-      --arg adapter codex \
-      --arg ver "2.0.0" \
-      --arg schema "2.0.0" \
-      --arg mode "repo-local" \
-      --arg commit "$SOURCE_COMMIT" \
-      --arg installed_at "$INSTALLED_AT" \
-      --arg installed_to "$CODEX_DIR" \
-      --arg plugin_root "$INSTALLED_HOOKS_DIR" \
-      --arg status "supported" \
-      '{
-        adapter:$adapter, version:$ver, schema_version:$schema,
-        mode:$mode, status:$status,
-        source:{repository:"harness-engineering", commit:$commit},
-        installed_at:$installed_at, installed_to:$installed_to,
-        plugin_root:$plugin_root
-      }' > "$RECEIPT"
-  elif command -v python3 >/dev/null 2>&1; then
-    SOURCE_COMMIT="$SOURCE_COMMIT" \
-    INSTALLED_AT="$INSTALLED_AT" \
-    CODEX_DIR="$CODEX_DIR" \
-    INSTALLED_HOOKS_DIR="$INSTALLED_HOOKS_DIR" \
-    python3 - <<'PYEOF'
+  # Source metadata — null for archive/tarball installs
+  if [ "$IS_ARCHIVE" -eq 1 ]; then
+    SOURCE_COMMIT="null"
+    SOURCE_COMMIT_SHORT="null"
+    SOURCE_TAG=""
+    SOURCE_TAG_JSON="null"
+    SOURCE_ORIGIN="archive"
+  else
+    SOURCE_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+    SOURCE_COMMIT_SHORT="$(printf '%s' "$SOURCE_COMMIT" | cut -c1-12)"
+    SOURCE_TAG="$(git -C "$REPO_ROOT" tag --points-at HEAD 2>/dev/null | head -1 || true)"
+    if [ -n "${SOURCE_TAG:-}" ]; then
+      SOURCE_TAG_JSON="\"$SOURCE_TAG\""
+    else
+      SOURCE_TAG_JSON="null"
+    fi
+    SOURCE_ORIGIN="git"
+  fi
+
+  # Helper: regenerate integrity.files via python3 (works in jq-less envs).
+  # F14.2: must walk the actual installed files under $CODEX_DIR and write
+  # their sha256 hashes into receipt.integrity.files (not an empty object).
+  regenerate_integrity() {
+    local receipt_file="$1"
+    local target_dir="$2"
+    if [ ! -f "$receipt_file" ]; then
+      echo "  [ERROR] receipt file missing; cannot regenerate integrity: $receipt_file" >&2
+      return 1
+    fi
+    if [ ! -d "$target_dir" ]; then
+      echo "  [ERROR] install target missing; cannot regenerate integrity: $target_dir" >&2
+      return 1
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+      TARGET_DIR="$target_dir" RECEIPT_FILE="$receipt_file" python3 - <<'PYEOF'
+import hashlib, json, os
+target_dir = os.environ["TARGET_DIR"]
+receipt_file = os.environ["RECEIPT_FILE"]
+SKIP = {"install-receipt.json", "VERSION"}
+files = {}
+for root, dirs, fnames in os.walk(target_dir):
+    dirs.sort()
+    for fn in sorted(fnames):
+        full = os.path.join(root, fn)
+        rel = os.path.relpath(full, target_dir).replace(os.sep, "/")
+        if rel in SKIP:
+            continue
+        with open(full, "rb") as f:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+        files[rel] = digest.hexdigest()
+with open(receipt_file, "r", encoding="utf-8") as f:
+    r = json.load(f)
+r.setdefault("integrity", {})
+r["integrity"]["algorithm"] = "sha256"
+r["integrity"]["files"] = files
+tmp = receipt_file + ".tmp.integ"
+try:
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(r, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, receipt_file)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+with open(receipt_file, "r", encoding="utf-8") as f:
+    written = json.load(f)
+if written.get("integrity", {}).get("algorithm") != "sha256" or written.get("integrity", {}).get("files") != files:
+    raise RuntimeError("integrity receipt post-validation failed")
+PYEOF
+      return $?
+    fi
+    if ! command -v jq >/dev/null 2>&1 || ! echo '{}' | jq -e . >/dev/null 2>&1; then
+      echo "  [ERROR] integrity regeneration requires python3 or working jq" >&2
+      return 1
+    fi
+    local hasher=""
+    if command -v sha256sum >/dev/null 2>&1; then hasher="sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then hasher="shasum"
+    else echo "  [ERROR] integrity regeneration requires python3, sha256sum, or shasum" >&2; return 1
+    fi
+    local f path hash files_json="{}" list_file
+    list_file="$(mktemp)" || return 1
+    if ! find "$target_dir" -type f -print0 > "$list_file"; then rm -f "$list_file"; return 1; fi
+    while IFS= read -r -d '' f; do
+      path="${f#$target_dir/}"
+      path="$(printf '%s' "$path" | tr '\\' '/')"
+      case "$path" in
+        install-receipt.json|VERSION) continue ;;
+      esac
+      if [ "$hasher" = "sha256sum" ]; then hash="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"
+      else hash="$(shasum -a 256 "$f" 2>/dev/null | awk '{print $1}')"; fi
+      if ! printf '%s' "$hash" | grep -qE '^[0-9a-f]{64}$'; then rm -f "$list_file"; return 1; fi
+      files_json="$(jq --arg p "$path" --arg h "$hash" '.[$p] = $h' <<<"$files_json")" || { rm -f "$list_file"; return 1; }
+    done < "$list_file"
+    rm -f "$list_file"
+    jq --argjson files "$files_json" '.integrity.files = $files | .integrity.algorithm = "sha256"' "$receipt_file" > "$receipt_file.tmp" \
+      && mv "$receipt_file.tmp" "$receipt_file" \
+      && jq -e --argjson files "$files_json" '.integrity.algorithm == "sha256" and .integrity.files == $files' "$receipt_file" >/dev/null
+  }
+
+  # Helper: build fresh receipt
+  build_fresh_codex_receipt() {
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      SOURCE_COMMIT="$SOURCE_COMMIT" \
+      SOURCE_TAG_JSON="$SOURCE_TAG_JSON" \
+      INSTALLED_AT="$INSTALLED_AT" \
+      CODEX_DIR="$CODEX_DIR" \
+      INSTALLED_HOOKS_DIR="$INSTALLED_HOOKS_DIR" \
+      VERSION="$VERSION" \
+      SOURCE_ORIGIN="$SOURCE_ORIGIN" \
+      jq -n \
+        --arg adapter codex \
+        --arg version "$VERSION" \
+        --arg schema "2.0.0" \
+        --arg mode "repo-local" \
+        --arg commit "$SOURCE_COMMIT" \
+        --arg installed_at "$INSTALLED_AT" \
+        --arg installed_to "$CODEX_DIR" \
+        --arg plugin_root "$INSTALLED_HOOKS_DIR" \
+        --arg origin "$SOURCE_ORIGIN" \
+        --arg status "code-complete-runtime-e2e-pending" \
+        --arg tag_json "$SOURCE_TAG_JSON" \
+        '{
+          adapter:$adapter, version:$version, schema_version:$schema,
+          mode:$mode, status:$status,
+          source:{
+            repository:"harness-engineering",
+            commit:(if $commit == "null" then null else $commit end),
+            tag:($tag_json | fromjson),
+            origin:$origin
+          },
+          installed_at:$installed_at, installed_to:$installed_to,
+          plugin_root:$plugin_root,
+          integrity:{algorithm:"sha256",files:{}},
+          upgrade_history:[]
+        }' > "$RECEIPT"
+    elif command -v python3 >/dev/null 2>&1; then
+      SOURCE_COMMIT="$SOURCE_COMMIT" \
+      SOURCE_TAG="$SOURCE_TAG" \
+      INSTALLED_AT="$INSTALLED_AT" \
+      CODEX_DIR="$CODEX_DIR" \
+      INSTALLED_HOOKS_DIR="$INSTALLED_HOOKS_DIR" \
+      VERSION="$VERSION" \
+      SOURCE_ORIGIN="$SOURCE_ORIGIN" \
+      python3 - <<'PYEOF'
 import json, os
+commit = os.environ["SOURCE_COMMIT"]
+source_tag = os.environ.get("SOURCE_TAG", "").strip()
 receipt = {
   "adapter": "codex",
-  "version": "2.0.0",
+  "version": os.environ["VERSION"],
   "schema_version": "2.0.0",
   "mode": "repo-local",
-  "status": "supported",
-  "source": {"repository": "harness-engineering", "commit": os.environ["SOURCE_COMMIT"]},
+  "status": "code-complete-runtime-e2e-pending",
+  "source": {
+    "repository": "harness-engineering",
+    "commit": commit if commit != "null" else None,
+    "tag": source_tag if source_tag else None,
+    "origin": os.environ["SOURCE_ORIGIN"],
+  },
   "installed_at": os.environ["INSTALLED_AT"],
   "installed_to": os.environ["CODEX_DIR"],
   "plugin_root": os.environ["INSTALLED_HOOKS_DIR"],
+  "integrity": {"algorithm": "sha256", "files": {}},
+  "upgrade_history": [],
 }
 with open(os.environ["CODEX_DIR"] + "/install-receipt.json", "w") as f:
     json.dump(receipt, f, indent=2)
     f.write("\n")
 PYEOF
+    fi
+  }
+
+  # Build receipt with upgrade logic
+  if [ ! -f "$RECEIPT" ]; then
+    # Fresh install
+    echo "  [receipt] Fresh install — writing new receipt"
+    build_fresh_codex_receipt
+
+    # F7: Validate freshly-built receipt
+    if [ -f "$RECEIPT" ]; then
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        jq -e . "$RECEIPT" >/dev/null 2>&1 || {
+          echo "  [ERROR] generated receipt failed jq validation: $RECEIPT" >&2
+          exit 1
+        }
+      elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$RECEIPT" >/dev/null 2>&1 || {
+          echo "  [ERROR] generated receipt failed python3 validation: $RECEIPT" >&2
+          exit 1
+        }
+      fi
+    else
+      echo "  [ERROR] receipt file was not created: $RECEIPT" >&2
+      exit 1
+    fi
+
+    # F14.2: regenerate integrity.files by walking the installed tree
+    regenerate_integrity "$RECEIPT" "$CODEX_DIR" || {
+      echo "  [ERROR] integrity regeneration failed; installation is not trustworthy" >&2
+      exit 1
+    }
+  else
+    # Existing receipt: check version for upgrade
+    OLD_VERSION=""
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      OLD_VERSION="$(jq -r '.version // ""' "$RECEIPT" 2>/dev/null || echo "")"
+    elif command -v python3 >/dev/null 2>&1; then
+      OLD_VERSION="$(python3 -c "import json; d=json.load(open('$RECEIPT')); print(d.get('version',''))" 2>/dev/null || echo "")"
+    fi
+
+    if [ "$OLD_VERSION" = "$VERSION" ]; then
+      # Same-version reinstall: update installed_at + regenerate integrity,
+      # NO upgrade_history. Integrity must reflect current disk state even on
+      # same-version reinstall (files may have been tampered or repaired).
+      echo "  [receipt] Same-version reinstall ($VERSION) — updating installed_at + integrity"
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        jq --arg ts "$INSTALLED_AT" '.installed_at = $ts' "$RECEIPT" > "$RECEIPT.tmp" \
+          && mv "$RECEIPT.tmp" "$RECEIPT"
+      fi
+      # F14.2/G0-rev2: regenerate integrity on same-version reinstall
+      regenerate_integrity "$RECEIPT" "$CODEX_DIR" || {
+        echo "  [ERROR] integrity regeneration failed; installation is not trustworthy" >&2
+        exit 1
+      }
+    elif [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$VERSION" ]; then
+      # Cross-version upgrade: update version, source, installed_at; append upgrade_history
+      echo "  [receipt] Upgrade: $OLD_VERSION → $VERSION — appending upgrade_history"
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        jq \
+          --arg version "$VERSION" \
+          --arg commit "$SOURCE_COMMIT" \
+          --arg ts "$INSTALLED_AT" \
+          --arg origin "$SOURCE_ORIGIN" \
+          --arg old_ver "$OLD_VERSION" \
+          --arg new_ver "$VERSION" \
+          --arg at "$INSTALLED_AT" \
+          --arg tag_json "$SOURCE_TAG_JSON" \
+          '.version = $version
+           | .source.commit = (if $commit == "null" then null else $commit end)
+           | .source.tag = ($tag_json | fromjson)
+           | .source.origin = $origin
+           | .installed_at = $ts
+           | .upgrade_history += [{from: $old_ver, to: $new_ver, at: $at}]' \
+          "$RECEIPT" > "$RECEIPT.tmp" \
+          && mv "$RECEIPT.tmp" "$RECEIPT"
+      elif command -v python3 >/dev/null 2>&1; then
+        OLD_VERSION="$OLD_VERSION" \
+        VERSION="$VERSION" \
+        INSTALLED_AT="$INSTALLED_AT" \
+        SOURCE_COMMIT="$SOURCE_COMMIT" \
+        SOURCE_TAG="$SOURCE_TAG" \
+        SOURCE_ORIGIN="$SOURCE_ORIGIN" \
+        RECEIPT="$RECEIPT" \
+        python3 - <<'PYEOF'
+import json, os
+receipt_file = os.environ["RECEIPT"]
+with open(receipt_file) as f:
+    r = json.load(f)
+commit = os.environ["SOURCE_COMMIT"]
+source_tag = os.environ.get("SOURCE_TAG", "").strip()
+r["version"] = os.environ["VERSION"]
+r["source"]["commit"] = commit if commit != "null" else None
+r["source"]["tag"] = source_tag if source_tag else None
+r["source"]["origin"] = os.environ["SOURCE_ORIGIN"]
+r["installed_at"] = os.environ["INSTALLED_AT"]
+r.setdefault("upgrade_history", []).append({
+    "from": os.environ["OLD_VERSION"],
+    "to": os.environ["VERSION"],
+    "at": os.environ["INSTALLED_AT"],
+})
+with open(receipt_file, "w") as f:
+    json.dump(r, f, indent=2)
+    f.write("\n")
+PYEOF
+      fi
+
+      # F14.2: regenerate integrity.files after upgrade mutation
+      regenerate_integrity "$RECEIPT" "$CODEX_DIR" || {
+        echo "  [ERROR] integrity regeneration failed; installation is not trustworthy" >&2
+        exit 1
+      }
+    else
+      # Can't determine old version — update what we can
+      echo "  [receipt] Unknown prior version — updating installed_at"
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        jq --arg ts "$INSTALLED_AT" '.installed_at = $ts' "$RECEIPT" > "$RECEIPT.tmp" \
+          && mv "$RECEIPT.tmp" "$RECEIPT"
+      fi
+      regenerate_integrity "$RECEIPT" "$CODEX_DIR" || {
+        echo "  [ERROR] integrity regeneration failed; installation is not trustworthy" >&2
+        exit 1
+      }
+    fi
+
+    # F7: Validate receipt is still valid JSON after mutation
+    if [ -f "$RECEIPT" ]; then
+      if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+        jq -e . "$RECEIPT" >/dev/null 2>&1 || {
+          echo "  [ERROR] receipt became invalid JSON after upgrade mutation: $RECEIPT" >&2
+          exit 1
+        }
+      elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$RECEIPT" >/dev/null 2>&1 || {
+          echo "  [ERROR] receipt became invalid JSON after upgrade mutation: $RECEIPT" >&2
+          exit 1
+        }
+      fi
+    fi
   fi
   echo "  receipt written: $RECEIPT"
 
+  # F7: Final receipt sanity check — must contain required fields
+  if [ -f "$RECEIPT" ]; then
+    if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+      if ! jq -e '.version and .adapter and .installed_at and .installed_to and .integrity and .upgrade_history and .source' "$RECEIPT" >/dev/null 2>&1; then
+        echo "  [ERROR] receipt missing required fields (version, adapter, installed_at, installed_to, integrity, upgrade_history, source)" >&2
+        exit 1
+      fi
+    elif command -v python3 >/dev/null 2>&1; then
+      if ! python3 -c "
+import json, sys
+r = json.load(open(sys.argv[1]))
+for k in ('version','adapter','installed_at','installed_to','integrity','upgrade_history','source'):
+    assert k in r, f'missing field: {k}'
+" "$RECEIPT" >/dev/null 2>&1; then
+        echo "  [ERROR] receipt missing required fields" >&2
+        exit 1
+      fi
+    fi
+  fi
+
   echo ""
   echo "=== Repo-local install complete (Phase 5b) ==="
-  echo "  hooks.json:    $HOOKS_JSON"
-  echo "  core/:         $CODEX_DIR/core/"
-  echo "  adapter/:      $CODEX_DIR/adapters/codex/"
-  echo "  installed at:  $INSTALLED_AT"
+  echo "  version:        $VERSION"
+  echo "  hooks.json:     $HOOKS_JSON"
+  echo "  core/:          $CODEX_DIR/core/"
+  echo "  adapter/:       $CODEX_DIR/adapters/codex/"
+  echo "  installed at:   $INSTALLED_AT"
   echo ""
   echo "SessionStart status injection and Stop handoff warnings are active."
   echo "PreToolUse is permissive (policy not enabled)."
@@ -329,6 +642,7 @@ if [ "$MODE" = "--user" ]; then
   SNIPPET="$USER_CODEX/harness-hooks.toml"
 
   echo "Mode:       --user"
+  echo "Version:    $VERSION"
   echo "Snippet:    $SNIPPET"
   echo ""
   echo "NOTE: --user mode points paths at the SOURCE tree (the location you ran"

@@ -1,0 +1,11 @@
+{
+  "revision": 1,
+  "features": [
+    {
+      "id": "F-001",
+      "status": "not_started",
+      "evidence_associations": [],
+      "legacy_audit_evidence": []
+    }
+  ]
+}

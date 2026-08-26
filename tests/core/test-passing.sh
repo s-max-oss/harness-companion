@@ -199,7 +199,8 @@ make_run_log() {
     --argjson req "$required_json" \
     --arg verified_fp "$verified_fp" \
     --arg fid "$feature_id" \
-    '{event:"run_started",schema_version:2,run_id:$run_id,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:$vcs_rev,vcs_revision_source:"git",workspace_fingerprint_initial:$verified_fp,config_sha256:$config_sha,required_command_ids:$req,capability_level:1,feature_id:$fid}' \
+    --arg project_root "$dir" \
+    '{event:"run_started",schema_version:2,run_id:$run_id,started_at:"2026-07-31T15:12:57Z",project_root:$project_root,vcs_revision:$vcs_rev,vcs_revision_source:"git",workspace_fingerprint_initial:$verified_fp,config_sha256:$config_sha,required_command_ids:$req,capability_level:1,feature_id:$fid}' \
     > "$log"
 
   # command_completed events (one per required; all pass unless overall=failed)
@@ -429,8 +430,8 @@ T7_VERIFIED_FP="$(compute_workspace_fingerprint "$T7")"
 # We write run_started (required=[]), then ONE command_completed (representing
 # the optional command), then run_completed with overall=passed.
 LOG="$T7/.harness/logs/runs/20260731T-optional.ndjson"
-jq -nc --arg rid "20260731T-optional" --arg csha "$T7_CONFIG_SHA" --arg vfp "$T7_VERIFIED_FP" \
-  '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:[],capability_level:1,feature_id:"feat-opt"}' \
+jq -nc --arg rid "20260731T-optional" --arg csha "$T7_CONFIG_SHA" --arg vfp "$T7_VERIFIED_FP" --arg root "$T7" \
+  '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:$root,vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:[],capability_level:1,feature_id:"feat-opt"}' \
   > "$LOG"
 # Codex r6 (block ①): bind a real log_artifact + log_sha256 (exit_code:0).
 LOG_REL=".harness/logs/runs/20260731T-optional/optional-lint.log"
@@ -449,9 +450,9 @@ assert_passing_not_eligible "empty required_command_ids + optional command passe
 rm -rf "$T7"
 
 # ============================================================================
-# Test 8: overall_result=passed but failed_commands>0 → NOT eligible
-#         (design §9.1 step 5: explicit failed_commands==0 check,
-#         independent of overall_result.)
+# Test 8: overall_result=passed but failed_commands>0 → NOT eligible.
+# The canonical run-log validator now derives terminal counters from command
+# events, so this forgery is rejected before the passing-layer step-5 check.
 # ============================================================================
 echo ""
 echo "=== Test 8: overall_result=passed but failed_commands>0 → not eligible ==="
@@ -460,12 +461,11 @@ make_config "$T8"
 write_test_config "$T8" '["c1"]'
 T8_CONFIG_SHA="sha256:$(sha256sum "$T8/.harness/config.json" | awk '{print $1}')"
 T8_VERIFIED_FP="$(compute_workspace_fingerprint "$T8")"
-# Forge a terminal event with overall_result="passed" but failed_commands=1
-# This SHOULD be caught by the explicit step 5 safety check.
+# Forge a terminal event with overall_result="passed" but failed_commands=1.
 LOG="$T8/.harness/logs/runs/20260731T-inconsistent.ndjson"
-jq -nc --arg rid "20260731T-inconsistent" --arg csha "$T8_CONFIG_SHA" --arg vfp "$T8_VERIFIED_FP" \
+jq -nc --arg rid "20260731T-inconsistent" --arg csha "$T8_CONFIG_SHA" --arg vfp "$T8_VERIFIED_FP" --arg root "$T8" \
   --argjson req '["c1"]' \
-  '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:$req,capability_level:1,feature_id:"feat-incon"}' \
+  '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:$root,vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:$req,capability_level:1,feature_id:"feat-incon"}' \
   > "$LOG"
 # Codex r6 (block ①): bind real log_artifact + log_sha256 (exit_code:0).
 LOG8_REL=".harness/logs/runs/20260731T-inconsistent/c1.log"
@@ -480,7 +480,7 @@ jq -nc --arg rid "20260731T-inconsistent" --arg vfp "$T8_VERIFIED_FP" \
   >> "$LOG"
 make_feature_list "$T8" "feat-incon" "20260731T-inconsistent" '[]'
 assert_passing_not_eligible "passed overall + failed_commands>0 → not eligible (step 5)" \
-  "feat-incon" "$T8/feature_list.json" "$T8" "command_failed"
+  "feat-incon" "$T8/feature_list.json" "$T8" "terminal_command_result_mismatch"
 rm -rf "$T8"
 
 # ============================================================================
@@ -630,9 +630,9 @@ T15_VERIFIED_FP="$(compute_workspace_fingerprint "$T15")"
 # validate_run_log step 13 effective required = [] → structurally valid; but
 # passing.sh step 4 must still refuse eligibility.
 LOG="$T15/.harness/logs/runs/20260731T-zeroeff.ndjson"
-jq -nc --arg rid "20260731T-zeroeff" --arg csha "$T15_CONFIG_SHA" --arg vfp "$T15_VERIFIED_FP" \
+jq -nc --arg rid "20260731T-zeroeff" --arg csha "$T15_CONFIG_SHA" --arg vfp "$T15_VERIFIED_FP" --arg root "$T15" \
   --argjson req '["c1","c2"]' \
-  '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:"/test",vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:$req,capability_level:1,feature_id:"feat-zeroeff"}' \
+  '{event:"run_started",schema_version:2,run_id:$rid,started_at:"2026-07-31T15:12:57Z",project_root:$root,vcs_revision:"null",vcs_revision_source:"none",workspace_fingerprint_initial:$vfp,config_sha256:$csha,required_command_ids:$req,capability_level:1,feature_id:"feat-zeroeff"}' \
   > "$LOG"
 # Codex r6 (block ①): bind real log_artifact + log_sha256 (exit_code:0).
 mkdir -p "$T15/.harness/logs/runs/20260731T-zeroeff"

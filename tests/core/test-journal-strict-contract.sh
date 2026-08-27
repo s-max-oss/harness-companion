@@ -804,6 +804,49 @@ V_L5="$(journal_verify_pairs "$L5")"; rc_l5=$?
 check "L5a: well-formed pair still passes (positive control)" "0" "$rc_l5"
 check "L5b: well-formed pair empty reason" "" "$V_L5"
 
+# M: MSYS filename-escape recovery is append-only and predecessor-bound.
+M9="$(mktemp -d "$TMPDIR/m9-XXXX")"
+M9INIT="$(setup_project "$M9")"
+M9JP="$M9/.harness/registry-journal.ndjson"
+M9POST2='{"revision":2,"schema_version":"2.0.0","features":[{"id":"F-001","status":"in_progress","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+M9SHA2="$(printf '%s\n' "$M9POST2" | sha256sum | awk '{print $1}')"
+M9K2="$(journal_record_pending "$M9" status F-001 not_started in_progress --revision 2 --post-sha "$M9SHA2")"
+printf '%s\n' "$M9POST2" > "$M9/feature_list.json"
+journal_record_committed "$M9" "$M9K2" "$M9SHA2"
+M9POST3='{"revision":3,"schema_version":"2.0.0","features":[{"id":"F-001","status":"blocked","evidence_associations":[],"legacy_audit_evidence":[]}]}'
+M9SHA3="$(printf '%s\n' "$M9POST3" | sha256sum | awk '{print $1}')"
+M9K3="$(journal_record_pending "$M9" status F-001 in_progress blocked --revision 3 --post-sha "$M9SHA3")"
+printf '%s\n' "$M9POST3" > "$M9/feature_list.json"
+journal_record_committed "$M9" "$M9K3" "$M9SHA3"
+# Reproduce the historical writer defect without changing any other field.
+jq -c --arg k "$M9K3" 'if (.pending == true and .op_key == $k)
+  then .feature_list_sha_before = ("\\" + .feature_list_sha_before) else . end' \
+  "$M9JP" > "$M9/.j2" && mv "$M9/.j2" "$M9JP"
+M9PREFIX="$(cat "$M9JP")"
+rc_m9=0; journal_backfill_msys_sha_before "$M9" || rc_m9=$?
+check "M9a: deterministic MSYS sha-before recovery succeeds" "0" "$rc_m9"
+check "M9b: exactly one append-only correction minted" "1" "$(jq -s --arg k "$M9K3" '[.[] | select(.op == "recovery_sha_before" and .op_key == $k)] | length' "$M9JP")"
+check "M9c: pre-recovery bytes remain an exact prefix" "1" "$(case "$(cat "$M9JP")" in "$M9PREFIX"*) echo 1;; *) echo 0;; esac)"
+V_M9="$(journal_verify_pairs "$M9")"; rc_m9v=$?
+check "M9d: recovered pair contract verifies" "0" "$rc_m9v"
+M9REC="$(printf '{"revision":1,"features":%s,"_recorded_sha":"%s"}' "$REV1_FEATURES" "$M9INIT")"
+jr_m9=0; journal_replay "$M9" "$M9REC" >/dev/null 2>&1 || jr_m9=$?
+check "M9e: recovered sha chain replays" "0" "$jr_m9"
+before_m9="$(wc -l < "$M9JP" | tr -d '[:space:]')"
+journal_backfill_msys_sha_before "$M9"
+after_m9="$(wc -l < "$M9JP" | tr -d '[:space:]')"
+check "M9f: recovery is idempotent" "$before_m9" "$after_m9"
+
+# A forged correction that is not bound to the predecessor must fail closed.
+M10="$(mktemp -d "$TMPDIR/m10-XXXX")"
+cp -R "$M9/." "$M10/"
+M10JP="$M10/.harness/registry-journal.ndjson"
+jq -cn --arg k "$M9K2" --arg z "0000000000000000000000000000000000000000000000000000000000000000" \
+  '{op:"recovery_sha_before",op_key:$k,original_sha_before:("\\"+$z),corrected_sha_before:$z}' >> "$M10JP"
+V_M10="$(journal_verify_pairs "$M10")"; rc_m10=$?
+check "M10a: unbound recovery is rejected" "1" "$rc_m10"
+check "M10b: unbound recovery reason" "invalid_sha_before_recovery" "$V_M10"
+
 echo ""
 echo "Journal-Strict-Contract Results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

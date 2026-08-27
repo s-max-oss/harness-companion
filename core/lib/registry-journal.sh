@@ -95,6 +95,11 @@ journal_init() {
       echo "journal: cannot initialize $jp" >&2; return 1; }
   fi
   journal_migrate_legacy "$dir"
+  # MSYS sha256sum prefixes a leading backslash when its filename-form output
+  # needs escaping. Older writers captured that marker as part of the digest.
+  # Repair only the deterministic, predecessor-bound form by APPENDING a
+  # recovery record; historical journal bytes are never rewritten.
+  journal_backfill_msys_sha_before "$dir" || return 1
   # Contract 3 (fail-closed): before any new mutation, resolve orphan pending
   # lines via three-way recovery (roll-forward ONLY on exact expected post-state
   # SHA; anything else blocks). A blocker aborts the init → the mutation fails.
@@ -104,9 +109,11 @@ journal_init() {
 # ---- sha256_file <path> -----------------------------------------------------
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+    # Hash through stdin so coreutils never emits the filename-escaping marker
+    # (a leading '\\' before the digest on MSYS for some Windows paths).
+    sha256sum < "$1" 2>/dev/null | awk '{print $1}'
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+    shasum -a 256 < "$1" 2>/dev/null | awk '{print $1}'
   else
     printf 'null'
   fi
@@ -324,6 +331,7 @@ journal_recover() {
   # pending lines (no expected_post_sha) into the strict contract via append-only
   # recovery_backfill records derived from their committed sha_after.
   journal_backfill_legacy_pending "$dir" || return 1
+  journal_backfill_msys_sha_before "$dir" || return 1
 
   # P0-1.6 INDEPENDENT strict-pairing verification. A committed partner NEVER
   # lets recovery skip this: a duplicate op_key/pending/commit, commit-without-
@@ -355,7 +363,11 @@ journal_recover() {
     fi
     # No committed partner — decide from the current registry SHA.
     local pre_sha
-    pre_sha="$(jq -r --arg k "$key" 'select(.op_key == $k and .pending == true) | .feature_list_sha_before' "$jp" 2>/dev/null | tr -d '\r')"
+    pre_sha="$(jq -rs --arg k "$key" '
+      ([.[] | select(.op == "recovery_sha_before" and .op_key == $k)
+        | .corrected_sha_before] | .[0]) as $fixed
+      | ($fixed // ([.[] | select(.op_key == $k and .pending == true)
+        | .feature_list_sha_before] | .[0]) // "")' "$jp" 2>/dev/null | tr -d '\r')"
     if [ "$pre_sha" = "$fl_sha" ]; then
       # Roll-back (Codex item 3 — APPEND-ONLY): the orphan pending line is
       # PRESERVED in the audit trail (DWM append-only contract). Backout is
@@ -623,8 +635,25 @@ journal_verify_pairs() {
     | (([$ck | group_by(.)[] | select(length > 1) | .[0]] | length) > 0) as $dupC
     | (([$ck[] | select(($pk | index(.)) == null)] | length) > 0) as $noP
     | ([ .[] | select(.op == "recovery_backfill") ]) as $bfAll
+    | ([ .[] | select(.op == "recovery_sha_before") ]) as $sbAll
     | (([$bfAll | group_by(.op_key)[] | select(length > 1) | .[0].op_key] | length) > 0) as $dupBf
+    | (([$sbAll | group_by(.op_key)[] | select(length > 1) | .[0].op_key] | length) > 0) as $dupSb
     | ([ $bfAll | map({key:.op_key, value:.expected_post_sha}) | from_entries] | add // {}) as $bf
+    | ([ $pend[] | .op_key as $k
+         | select(($ck | index($k)) != null) ]) as $mut
+    | ([ $sbAll[] as $r
+         | ([range(0; ($mut | length))
+             | select($mut[.].op_key == $r.op_key)] | .[0] // -1) as $i
+         | select(
+             ($i <= 0)
+             or (($r.original_sha_before | type) != "string")
+             or (($r.corrected_sha_before | type) != "string")
+             or (($r.corrected_sha_before | test("^[0-9a-fA-F]{64}$")) | not)
+             or ($mut[$i].feature_list_sha_before != $r.original_sha_before)
+             or ($r.original_sha_before != ("\\" + $r.corrected_sha_before))
+             or (([ $comm[] | select(.op_key == $mut[$i - 1].op_key)
+                    | .feature_list_sha_after ][0]) != $r.corrected_sha_before)
+           ) ]) as $badSb
     | ([ $pk[] as $k
          | select(($ck | index($k)) != null)
          | ([ $pend[] | select(.op_key == $k) ][0]) as $p
@@ -645,6 +674,8 @@ journal_verify_pairs() {
     | if $dupP then "duplicate_pending"
       elif $dupC then "duplicate_commit"
       elif $dupBf then "duplicate_backfill"
+      elif $dupSb then "duplicate_sha_before_recovery"
+      elif (($badSb | length) > 0) then "invalid_sha_before_recovery"
       elif $noP then "commit_without_pending"
       elif ($nRev > 0) then "pending_no_revision"
       elif ($nEff > 0) then "pending_no_expected_sha"
@@ -683,6 +714,62 @@ journal_verify_pairs() {
     printf '%s' "$reason"
     return 1
   fi
+  return 0
+}
+
+# ---- journal_backfill_msys_sha_before <project_dir> --------------------------
+# Older MSYS/coreutils writers could capture sha256sum's filename-escaping
+# marker as part of feature_list_sha_before ("\\<64-hex>"). Correcting the old
+# line in place would violate the append-only contract, so this recovery appends
+# a narrowly-scoped record. The corrected digest is accepted only when it is
+# byte-equal to the immediately preceding committed mutation's sha_after.
+# Therefore the repair is derived from the existing chain and cannot invent a
+# new trust root. Idempotent; malformed/ambiguous records remain fail-closed.
+journal_backfill_msys_sha_before() {
+  local dir="$1"
+  local jp; jp="${2:-$(journal_path "$dir")}"
+  [ -f "$jp" ] || return 0
+  local rows jq_rc
+  rows="$(jq -rsr '
+    [ .[] | select(.pending == true
+        and (.op == "add" or .op == "status" or .op == "evidence_associate")) ] as $pend
+    | [ .[] | select(.op == "commit" and .pending == false) ] as $comm
+    | [ .[] | select(.op == "recovery_backout") | .op_key ] as $backout
+    | [ .[] | select(.op == "recovery_sha_before") | .op_key ] as $fixed
+    | ([ $comm[] | .op_key ]) as $ck
+    | ([ $pend[] | .op_key as $k
+         | select(($ck | index($k)) != null)
+         | select(($backout | index($k)) == null) ]) as $mut
+    | [ range(1; ($mut | length)) as $i
+        | $mut[$i] as $p
+        | select(($fixed | index($p.op_key)) == null)
+        | ([ $comm[] | select(.op_key == $mut[$i - 1].op_key)
+             | .feature_list_sha_after ][0]) as $prev
+        | select(($prev | type) == "string" and ($prev | test("^[0-9a-fA-F]{64}$")))
+        | select($p.feature_list_sha_before == ("\\" + $prev))
+        | [$p.op_key, $prev] | @tsv ]
+    | .[]' "$jp" 2>/dev/null | tr -d '\r')"
+  jq_rc=$?
+  if [ "$jq_rc" -ne 0 ]; then
+    echo "journal-sha-before-recovery: journal_corrupt (jq rc=$jq_rc)" >&2
+    return 1
+  fi
+
+  local key original corrected ts rec
+  while IFS=$'\t' read -r key corrected; do
+    [ -n "$key" ] || continue
+    original="\\$corrected"
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)"
+    rec="$(jq -cn --arg ts "$ts" --arg k "$key" \
+      --arg original "$original" --arg corrected "$corrected" \
+      '{ts:$ts, op:"recovery_sha_before", op_key:$k,
+        original_sha_before:$original, corrected_sha_before:$corrected,
+        reason:"MSYS sha256sum filename escape marker; corrected digest equals immediately preceding committed sha_after"}')" || return 1
+    if ! printf '%s\n' "$rec" >> "$jp"; then
+      echo "journal-sha-before-recovery: cannot append correction for $key" >&2
+      return 1
+    fi
+  done <<<"$rows"
   return 0
 }
 
@@ -863,13 +950,15 @@ journal_replay() {
   local mutations
   mutations="$(jq -cn --slurpfile j "$jp" '
     ( $j | [.[] | select(.op == "commit")] | map({key:.op_key, value:.feature_list_sha_after}) | from_entries ) as $after
+    | ( $j | [.[] | select(.op == "recovery_sha_before")]
+        | map({key:.op_key, value:.corrected_sha_before}) | from_entries ) as $before_fix
     | ( $j | [.[] | select(.op == "recovery_backout")] | map(.op_key) ) as $bks
     | [ $j[] | select(.pending == true and (.op == "add" or .op == "status" or .op == "evidence_associate"))
         | .op_key as $k
         | select($after[$k] != null)
         | select(($bks | index($k)) == null)
         | {op, feature_id, from, to, revision, run_id,
-           sha_before:.feature_list_sha_before,
+           sha_before:($before_fix[$k] // .feature_list_sha_before),
            sha_after:$after[$k]} ]' 2>/dev/null)"
   if [ -z "$mutations" ]; then
     echo "journal-replay: failed to extract mutations from journal" >&2

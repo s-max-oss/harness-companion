@@ -1,0 +1,24 @@
+{
+  "authorization_parent": "d06a1d88e51d9787f67c8d5c37ffc25ef4373725",
+  "changes": [
+    {
+      "authorized_sha256": "9335a4c201ce7d6acdb14682e91c444ae38f3738d5f368450e0851468a711072",
+      "path": "AGENTS.md",
+      "snapshot_sha256": "6e787f7a6167a18110dfb9bd1462836e36c5cea472da0271dfe915bdbe634d69"
+    },
+    {
+      "authorized_sha256": "f4002d56713b3376be93f08d4007525df28cf8269e704b815ebd1922241082bf",
+      "path": "CLAUDE.md",
+      "snapshot_sha256": "c204933931aa87a9db52ab4da9a06bb50c1453de526cb19bae5b5f142425ace4"
+    },
+    {
+      "authorized_sha256": "9b59de363fdc8dfc6e94ba66186a062d4ca1b41553e1978ed9fd3b4fc2591a1d",
+      "path": "init.sh",
+      "snapshot_sha256": "4e85bfa808dce352d09de2481c1fd7fcfab0b746ea1fe4670d6c7ae7376f9f36"
+    }
+  ],
+  "migration_id": "2026-08-27-rc2-to-rc3-bootstrap",
+  "reason": "Preserve the frozen rc.2 template snapshot while explicitly authorizing the reviewed, tracked self-host contract that begins rc.3 development.",
+  "schema_version": 1,
+  "snapshot_sha256": "973d1efb4f8c5777fd923247876cd7a702f9b4468897c5a7c8141335d2c9597e"
+}

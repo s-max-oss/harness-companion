@@ -15,6 +15,8 @@ CORE_LIB="$ROOT_DIR/core/lib"
 
 # shellcheck source=../../core/lib/brief-integrity.sh
 source "$CORE_LIB/brief-integrity.sh"
+# shellcheck source=../../core/lib/template-contract-migration.sh
+source "$CORE_LIB/template-contract-migration.sh"
 
 PASSED=0
 FAILED=0
@@ -158,6 +160,65 @@ P11="$(mktemp -d "$TMPDIR/p11-XXXX")"
 build_project "$P11"
 rm -f "$P11/.harness/PROJECT_BRIEF.json"
 assert_invalid "T11: missing PROJECT_BRIEF.json → 1" "$P11"
+
+# ---- T12: deliberate immutable evolution uses a committed migration --------
+P12="$(mktemp -d "$TMPDIR/p12-XXXX")"
+mkdir -p "$P12/.harness" "$P12/docs/template-contract-migrations"
+git -C "$P12" init -q
+git -C "$P12" config user.email test@example.invalid
+git -C "$P12" config user.name harness-test
+printf '%s\n' 'config-v1' > "$P12/.harness/config.json"
+printf '%s\n' 'agents-v1' > "$P12/AGENTS.md"
+printf '%s\n' 'claude-v1' > "$P12/CLAUDE.md"
+printf '%s\n' 'init-v1' > "$P12/init.sh"
+C12="$(_tcm_sha256_file "$P12/.harness/config.json")"
+A12_OLD="$(_tcm_sha256_file "$P12/AGENTS.md")"
+CL12_OLD="$(_tcm_sha256_file "$P12/CLAUDE.md")"
+I12_OLD="$(_tcm_sha256_file "$P12/init.sh")"
+jq -n --arg c "$C12" --arg a "$A12_OLD" --arg cl "$CL12_OLD" --arg i "$I12_OLD" \
+  '{schema_version:1,source_version:"test",captured_from_git_rev:null,
+    templates:{".harness/config.json":{source:"t",sha256:$c},
+      "AGENTS.md":{source:"t",sha256:$a},"CLAUDE.md":{source:"t",sha256:$cl},
+      "init.sh":{source:"t",sha256:$i}}}' > "$P12/.harness/.template-snapshot.json"
+printf '%s\n' 'agents-v2' > "$P12/AGENTS.md"
+printf '%s\n' 'claude-v2' > "$P12/CLAUDE.md"
+printf '%s\n' 'init-v2' > "$P12/init.sh"
+git -C "$P12" add -- .harness AGENTS.md CLAUDE.md init.sh
+git -C "$P12" commit -qm 'base contract evolution'
+P12_PARENT="$(git -C "$P12" rev-parse HEAD)"
+P12_SNAP="$(_tcm_sha256_file "$P12/.harness/.template-snapshot.json")"
+A12_NEW="$(_tcm_sha256_file "$P12/AGENTS.md")"
+CL12_NEW="$(_tcm_sha256_file "$P12/CLAUDE.md")"
+I12_NEW="$(_tcm_sha256_file "$P12/init.sh")"
+jq -n --arg parent "$P12_PARENT" --arg snap "$P12_SNAP" \
+  --arg ao "$A12_OLD" --arg an "$A12_NEW" --arg co "$CL12_OLD" --arg cn "$CL12_NEW" \
+  --arg io "$I12_OLD" --arg inn "$I12_NEW" \
+  '{schema_version:1,migration_id:"test-contract-v2",authorization_parent:$parent,
+    snapshot_sha256:$snap,reason:"test deliberate contract evolution",
+    changes:[{path:"AGENTS.md",snapshot_sha256:$ao,authorized_sha256:$an},
+      {path:"CLAUDE.md",snapshot_sha256:$co,authorized_sha256:$cn},
+      {path:"init.sh",snapshot_sha256:$io,authorized_sha256:$inn}]}' \
+  > "$P12/docs/template-contract-migrations/test.json"
+git -C "$P12" add -- docs/template-contract-migrations/test.json
+git -C "$P12" commit -qm 'authorize contract evolution'
+T12_ID="$(validate_template_contract_migration "$P12" "$P12/.harness/.template-snapshot.json" \
+  .harness/config.json AGENTS.md CLAUDE.md init.sh 2>/dev/null)"; T12_RC=$?
+if [ "$T12_RC" = 0 ] && [ "$T12_ID" = "test-contract-v2" ]; then
+  echo "PASS: T12a: exact committed migration authorizes deliberate evolution"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: T12a: exact committed migration should authorize evolution"
+  FAILED=$((FAILED + 1))
+fi
+printf '%s\n' 'tampered-after-authorization' > "$P12/AGENTS.md"
+if validate_template_contract_migration "$P12" "$P12/.harness/.template-snapshot.json" \
+    .harness/config.json AGENTS.md CLAUDE.md init.sh >/dev/null 2>&1; then
+  echo "FAIL: T12b: post-authorization drift must fail closed"
+  FAILED=$((FAILED + 1))
+else
+  echo "PASS: T12b: post-authorization drift fails closed"
+  PASSED=$((PASSED + 1))
+fi
 
 echo ""
 echo "Brief-Integrity Results: $PASSED passed, $FAILED failed"

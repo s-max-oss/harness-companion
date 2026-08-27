@@ -226,11 +226,26 @@ else
   echo "  FAIL: core/lib/brief-integrity.sh missing"
   FAILED=true
 fi
-for entry in ".harness/config.json" "AGENTS.md" "CLAUDE.md" "init.sh"; do
+IMMUTABLE_ENTRIES=(".harness/config.json" "AGENTS.md" "CLAUDE.md" "init.sh")
+IMMUTABLE_DIRECT=true
+for entry in "${IMMUTABLE_ENTRIES[@]}"; do
   REC="$(jq -r --arg e "$entry" '.templates[$e].sha256 // ""' .harness/.template-snapshot.json 2>/dev/null)"
-  ACT="$(sha256sum "$entry" 2>/dev/null | cut -d' ' -f1)"
+  ACT="$(sha256sum < "$entry" 2>/dev/null | cut -d' ' -f1)"
+  if [ -z "$REC" ] || [ "$REC" != "$ACT" ]; then IMMUTABLE_DIRECT=false; fi
+done
+MIGRATION_ID=""
+if [ "$IMMUTABLE_DIRECT" = false ] && [ -f core/lib/template-contract-migration.sh ]; then
+  # shellcheck source=core/lib/template-contract-migration.sh
+  . core/lib/template-contract-migration.sh
+  MIGRATION_ID="$(validate_template_contract_migration . .harness/.template-snapshot.json "${IMMUTABLE_ENTRIES[@]}" 2>/dev/null || true)"
+fi
+for entry in "${IMMUTABLE_ENTRIES[@]}"; do
+  REC="$(jq -r --arg e "$entry" '.templates[$e].sha256 // ""' .harness/.template-snapshot.json 2>/dev/null)"
+  ACT="$(sha256sum < "$entry" 2>/dev/null | cut -d' ' -f1)"
   if [ -n "$REC" ] && [ "$REC" = "$ACT" ]; then
     echo "  OK: immutable $entry matches snapshot ($REC)"
+  elif [ -n "$MIGRATION_ID" ]; then
+    echo "  OK: immutable $entry authorized by committed migration $MIGRATION_ID ($ACT)"
   else
     echo "  FAIL: immutable $entry diverged from snapshot (recorded $REC, on-disk $ACT) — deliberate contract update + snapshot recapture required"
     FAILED=true

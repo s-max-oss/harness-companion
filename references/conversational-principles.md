@@ -48,8 +48,9 @@ Prefer language at the user's level. Translate Harness terms before using them:
 - `cadence` means how cautiously or quickly changes should be delivered.
 - `operation_preferences` describe which Git or release actions may be
   suggested or performed after separate in-session authorization.
-- `secrets_handling` describes how credentials and sensitive values must be
-  kept out of files, logs, and messages.
+- `secrets_handling` describes how credentials and sensitive values are stored
+  or handled (for example, in an environment file, vault, or keyring) while
+  keeping them out of source code, logs, and messages.
 
 ## Resolve conflicts explicitly
 
@@ -62,15 +63,26 @@ both observations and ask one precise resolution question:
   - The repository indicates: <evidence and path>
   - You said: <user statement>
 Which is correct?
-  1. Use the repository interpretation
-  2. Both are true; clarify the project structure
-  3. Use my statement
+  1. Use repository evidence
+  2. Use user input
+  3. Tell me more
   4. Skip this for now
 ```
 
-Record the chosen resolution in `conflicts_resolved`. If the conflict affects a
-required field and the user skips it, the Brief remains incomplete and no
-guided execution may begin.
+Record the chosen resolution in `conflicts_resolved`. Normalize a choice of
+repository evidence, user input, or a third value established through
+clarification as `repo`, `user`, or `custom`, respectively, and always include
+a non-null `resolved_value`. "Tell me more" starts clarification; it is not
+itself a resolution. Normalize a permitted skip as `resolution: "deferred"`
+with an explicit `resolved_value: null`.
+
+Execution-critical conflicts cannot be deferred: `goal`, `success_criteria`,
+`detected_type` when it identifies the primary project type in the stack, and
+`initial_project_state.is_git_repo`. Guided mode remains blocked and performs
+no execution until these conflicts are resolved. Quick mode aborts instead of
+guessing. Legacy mode may fall back to repository evidence only with an
+explicit warning. For other required fields, a deferred conflict still leaves
+the Brief incomplete and prevents guided execution.
 
 ## Build and confirm the Brief
 

@@ -42,10 +42,11 @@ Load `references/conversational-principles.md` and `references/post-init-explana
 
 ### Route the mode first
 
+- In every Agent mode, a structurally invalid `.harness/.template-snapshot.json` fails closed before dialog or execution. Make zero writes, explain the damage, and direct the user to back up the snapshot and use the explicit recovery flow; never auto-repair it.
 - `/harness:init` on a fresh project is **guided**. No target-project file may be created or changed until the user confirms the synthesized Project Brief.
 - `/harness:init` on a legacy-unmanaged project is **guided migration**. Explain the legacy markers, confirm the Brief, preserve every pre-existing file, and let the executor snapshot only files created by this run.
 - `/harness:init` on a project with a valid `.harness/.template-snapshot.json` is **resume**. Load the existing Brief, discuss only requested or unresolved changes, and confirm the revised Brief before execution.
-- `/harness:init --quick` is **quick**. Ask no questions and request no confirmation. Infer what is safe from the current message, conversation, environment, and repository; apply documented defaults. If `goal` or `success_criteria` is still missing, stop without writes and explain what is missing. Never retry as legacy mode. On an initialized or legacy-unmanaged project, refuse implicit changes and direct the user to guided init or explicit `/harness:init --update` as appropriate.
+- `/harness:init --quick` is **quick**. Ask no questions and request no confirmation. Infer what is safe from the current message, conversation, environment, and repository; apply documented defaults. If `goal` or `success_criteria` is still missing, stop without writes and explain what is missing. Never retry as legacy mode. On an initialized or legacy-unmanaged project, refuse implicit changes and direct the user to guided init or explicit `/harness:init --update` as appropriate. For a complete fresh-project Brief, immediately use the `--brief-stdin --non-interactive --host=<claude|codex>` executor path shown below, then warn that quick mode ran without confirmation and the generated Brief should be reviewed.
 - `/harness:init --update` is an explicit template update. A fresh project fails because there is nothing to update. A legacy-unmanaged project enters the migration plan described below. A structurally damaged snapshot fails closed; do not repair, replace, or recreate it automatically.
 - Plain `bash scripts/harness-init.sh <target> ...` is the compatibility-only **legacy** entry point. It is not the Agent workflow.
 
@@ -67,13 +68,13 @@ Load `references/conversational-principles.md` and `references/post-init-explana
 
 ### Resume and update safety
 
-For a confirmed Brief on a managed-valid project, resume with the same `--brief-stdin --non-interactive` path; the executor merges changed fields and applies its 3-way SHA comparison. User-modified files must be preserved.
+For resume on a managed-valid project, first perform a no-write 3-way comparison and explain which files are identical, template-only changes, user-modified, or missing. Offer **apply the template-only changes**, **keep all existing files**, or **cancel**. Only an approved exact plan may execute; user-modified files must be preserved. Use the same stable-Brief dry-run and plan-token apply sequence as explicit update below. If the user keeps all or cancels, do not apply the plan.
 
-For explicit `/harness:init --update`, store the confirmed Brief in a stable temporary file outside the target, then:
+For explicit `/harness:init --update`, store the confirmed Brief in a stable temporary file outside the target. On a legacy-unmanaged project, first explain which files predate Harness management, collect and confirm any missing Brief fields, and make clear that the new snapshot will claim only files this migration creates. Then:
 
-1. Run `bash <skill-root>/scripts/harness-init.sh <target> --brief <temp-json> --non-interactive --update` as a no-write dry run.
+1. Run `bash <skill-root>/scripts/harness-init.sh <target> --brief <temp-json> --non-interactive --host=<claude|codex> --update` as a no-write dry run.
 2. Explain the proposed creates, updates, and preserved user modifications. Ask whether to apply that exact plan.
-3. Only after approval, rerun with `--update --apply --plan-token <token>` and the same Brief path. A stale or missing token means stop and regenerate the plan; never bypass the check.
+3. Only after approval, run `bash <skill-root>/scripts/harness-init.sh <target> --brief <temp-json> --non-interactive --host=<claude|codex> --update --apply --plan-token <token>`. A stale or missing token means stop and regenerate the plan; never bypass the check.
 
 ### Completion and errors
 
@@ -81,7 +82,7 @@ After a successful run, explain the outcome conversationally using the four cate
 
 Translate executor diagnostics into plain language while preserving the failed field or condition and the non-zero result. Do not hide partial state, silently retry, weaken a fail-closed check, or fall back to another mode.
 
-The Brief is advisory. Current-session instructions and host security policy always win. Obtain explicit in-session authorization for merge, release, package installation, external mutation, and destructive actions regardless of Brief preferences.
+The Brief is advisory. Current-session instructions and host security policy always win. Obtain explicit in-session authorization for push, merge, tag, release, local skill installation or update, package installation, external network access or mutation, and destructive actions regardless of Brief preferences. An in-session stop or denial wins immediately; do not perform the action, and record the denial in evidence when the active workflow has an evidence sink.
 
 ## Architecture (v2)
 

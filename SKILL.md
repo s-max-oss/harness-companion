@@ -1,6 +1,6 @@
 ---
 name: harness-companion
-description: Use when working on projects that have harness engineering files (feature_list.json, AGENTS.md, init.sh) — when the user wants to set up or audit Harness Engineering practices, drive an evidence-backed feature pipeline, surface stale evidence or WIP violations at session start, hand off cleanly between sessions, or run the 7-subsystem health / 5-axis audit dashboard. v2 splits the runtime into core/ (business semantics) and adapters/ (host protocol mapping for Claude Code and Codex), with v1 compat wrappers preserved.
+description: Use when working on projects that have harness engineering files (feature_list.json, AGENTS.md, init.sh), or when the user wants a guided conversational /harness:init, a Harness audit, evidence-backed feature tracking, verification, or session handoff. v2 splits the runtime into core/ (business semantics) and adapters/ (host protocol mapping for Claude Code and Codex), with v1 compatibility preserved.
 ---
 
 # Harness Companion
@@ -20,19 +20,68 @@ A Core/Adapter refactor of the v1.1.2 Harness Engineering skill. The runtime now
 
 ## When NOT to use
 
-- Projects without any harness files (the skill will see no `feature_list.json` and emit `suppressOutput`)
+- Projects without harness files when the user has not asked to initialize or assess a Harness
 - Pure refactor / business-logic tasks (the skill is a meta-tool about the workflow, not the work)
 
 ## Commands
 
 | Command | Purpose |
 |---------|---------|
-| `/harness:init` | Bootstrap harness files in a project (AGENTS.md, CLAUDE.md, init.sh, feature_list.json). **Canonical impl** in `scripts/harness-init.sh`. |
+| `/harness:init [--quick\|--update]` | Build or refine a project Harness through the guided workflow below. `scripts/harness-init.sh` is the only file-writing executor. |
 | `/harness:status` | Compact 7-subsystem health dashboard. Cheap to run, run often. |
 | `/harness:feature <id> <status> [evidence...]` | Update a feature in `feature_list.json` with a structured evidence record |
 | `/harness:verify` | Run the verification chain (config-driven or `checklist.sh`) and capture evidence |
 | `/harness:handoff` | Render handoff warnings (uncommitted files, dangling `in_progress`, passing-without-evidence, stale evidence, checklist reminder). **Canonical impl** in `scripts/harness-handoff.sh`. |
 | `/harness:audit` | Detailed 5-axis scoring per subsystem. Total out of 21. Verbose mode via `HARNESS_VERBOSE=1`. |
+
+## Onboarding workflow
+
+`/harness:init` is an Agent-guided conversation backed by a deterministic Bash executor. The Agent owns understanding and decisions; `scripts/harness-init.sh` owns every target-project mutation. Never ask the user to fill in JSON or write scaffold files directly.
+
+Load `references/conversational-principles.md` and `references/post-init-explanation.md` when `/harness:init` is invoked, not at session start. Resolve the executor from this skill's own root; do not assume it exists in the target project.
+
+### Route the mode first
+
+- `/harness:init` on a fresh project is **guided**. No target-project file may be created or changed until the user confirms the synthesized Project Brief.
+- `/harness:init` on a legacy-unmanaged project is **guided migration**. Explain the legacy markers, confirm the Brief, preserve every pre-existing file, and let the executor snapshot only files created by this run.
+- `/harness:init` on a project with a valid `.harness/.template-snapshot.json` is **resume**. Load the existing Brief, discuss only requested or unresolved changes, and confirm the revised Brief before execution.
+- `/harness:init --quick` is **quick**. Ask no questions and request no confirmation. Infer what is safe from the current message, conversation, environment, and repository; apply documented defaults. If `goal` or `success_criteria` is still missing, stop without writes and explain what is missing. Never retry as legacy mode. On an initialized or legacy-unmanaged project, refuse implicit changes and direct the user to guided init or explicit `/harness:init --update` as appropriate.
+- `/harness:init --update` is an explicit template update. A fresh project fails because there is nothing to update. A legacy-unmanaged project enters the migration plan described below. A structurally damaged snapshot fails closed; do not repair, replace, or recreate it automatically.
+- Plain `bash scripts/harness-init.sh <target> ...` is the compatibility-only **legacy** entry point. It is not the Agent workflow.
+
+### Guided conversation
+
+1. Inspect the target read-only: repository status and recent history, existing Harness files and snapshot state, top-level files, and project markers such as `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, and `Makefile`. Reuse facts already present in the current message or conversation.
+2. Start by telling the user what is already known or inferred. Build the five Brief categories—goal and success criteria, cadence, constraints, initial project state, and operation preferences—while asking only about missing required information, genuine conflicts, and choices that materially affect the Harness. Explain unfamiliar concepts in plain language. Do not use a fixed questionnaire or a question-count rule.
+3. Never re-ask known information. Prefer the current user message, then conversation history, then repository evidence. If user input conflicts with the repository, show both grounded positions and offer: use the repo value, use the user's value, tell me more, or defer. Never silently choose. Execution-critical conflicts cannot be deferred.
+4. Compose a complete Brief in conversation context. Preserve machine-readable `provenance`, `defaults_applied`, and `conflicts_resolved`; include `type_evidence` for `mixed` or `unknown` projects. Annotate the human presentation as `[from you]`, `[inferred from <file>]`, `[default]`, or `[to decide]`. Present the Brief—not the Agent's implementation plan—for approve, edit, or cancel. Edits preserve all previously confirmed fields; cancel leaves a fresh target byte-identical.
+5. After approval, pass the resolved Brief to the executor without writing it into the target yourself:
+
+   ```sh
+   printf '%s' "$RESOLVED_BRIEF_JSON" \
+     | bash <skill-root>/scripts/harness-init.sh <target> \
+         --brief-stdin --non-interactive --host=<claude|codex>
+   ```
+
+   Treat the command as illustrative argument binding, not permission to interpolate untrusted shell text. Use the host's structured process API or safely quoted arguments in a real invocation.
+
+### Resume and update safety
+
+For a confirmed Brief on a managed-valid project, resume with the same `--brief-stdin --non-interactive` path; the executor merges changed fields and applies its 3-way SHA comparison. User-modified files must be preserved.
+
+For explicit `/harness:init --update`, store the confirmed Brief in a stable temporary file outside the target, then:
+
+1. Run `bash <skill-root>/scripts/harness-init.sh <target> --brief <temp-json> --non-interactive --update` as a no-write dry run.
+2. Explain the proposed creates, updates, and preserved user modifications. Ask whether to apply that exact plan.
+3. Only after approval, rerun with `--update --apply --plan-token <token>` and the same Brief path. A stale or missing token means stop and regenerate the plan; never bypass the check.
+
+### Completion and errors
+
+After a successful run, explain the outcome conversationally using the four categories in `references/post-init-explanation.md`: **generated**, **inferred**, **defaulted**, and **deferred**. Highlight decisions the user may want to revisit and invite them to rerun guided init; do not dump JSON.
+
+Translate executor diagnostics into plain language while preserving the failed field or condition and the non-zero result. Do not hide partial state, silently retry, weaken a fail-closed check, or fall back to another mode.
+
+The Brief is advisory. Current-session instructions and host security policy always win. Obtain explicit in-session authorization for merge, release, package installation, external mutation, and destructive actions regardless of Brief preferences.
 
 ## Architecture (v2)
 
@@ -62,7 +111,7 @@ harness-companion/
 │   ├── hooks.json                     # Codex event-keyed hook registry
 │   └── README.md
 ├── scripts/                           # v1 compat wrappers (≤5 lines each)
-│   ├── harness-init.sh                # ← canonical impl (4-file scaffold)
+│   ├── harness-init.sh                # ← canonical guided-init executor
 │   ├── harness-handoff.sh             # ← canonical impl (generate handoff + checklist)
 │   ├── harness-{verify,feature,status,audit}.sh   # → ../core/<name>.sh
 │   └── hooks/{session-start,stop-handoff}.sh      # → ../../adapters/claude-code/hooks/<name>.sh
@@ -98,7 +147,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 exec bash "$SCRIPT_DIR/../core/$(basename "$0")" "$@"
 ```
 
-`scripts/harness-init.sh` and `scripts/harness-handoff.sh` are NOT wrappers — they are the **canonical implementations** (4-file scaffold generator and handoff doc generator respectively). v2 core does not re-implement them.
+`scripts/harness-init.sh` and `scripts/harness-handoff.sh` are NOT wrappers — they are the **canonical implementations** (the rc.3 deterministic onboarding executor and the handoff generator respectively). v2 core does not re-implement them.
 
 Identity is guaranteed by the contract test (`tests/adapters/test-claude-code-contract.sh` G3) — byte-for-byte equal output between direct core invocation and wrapper invocation.
 

@@ -24,6 +24,18 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# AC-12 / ISO-4: the entire suite runs under a disposable HOME containing a
+# simulated installed-skill sentinel. This prevents a test from reaching a
+# developer's real ~/.claude or ~/.agents tree and proves the simulated install
+# remains untouched across the complete suite.
+SUITE_ISOLATION_ROOT="$(mktemp -d)" || exit 1
+trap 'rm -rf "$SUITE_ISOLATION_ROOT"' EXIT
+export HOME="$SUITE_ISOLATION_ROOT/home"
+SUITE_SENTINEL="$HOME/.claude/skills/harness-companion/.sentinel"
+mkdir -p "$(dirname "$SUITE_SENTINEL")" || exit 1
+printf 'full-suite-isolation-sentinel\n' > "$SUITE_SENTINEL"
+SUITE_SENTINEL_SHA="$(sha256sum "$SUITE_SENTINEL" | awk '{print $1}')"
+
 # timeout available? (coreutils; absent on some minimal shells)
 HAS_TIMEOUT=1
 command -v timeout >/dev/null 2>&1 || HAS_TIMEOUT=0
@@ -116,6 +128,13 @@ while [ "$i" -lt "${#TESTS[@]}" ]; do
     i=$((i + 1))
   fi
 done
+
+if [ -f "$SUITE_SENTINEL" ] && [ "$(sha256sum "$SUITE_SENTINEL" | awk '{print $1}')" = "$SUITE_SENTINEL_SHA" ]; then
+  echo "PASS: ISO-4 full-suite simulated installed-skill sentinel unchanged"
+else
+  echo "FAIL: ISO-4 full-suite simulated installed-skill sentinel changed"
+  FAILS="$FAILS ISO-4-sentinel(rc=1)"
+fi
 echo "========== FULL SUITE DONE =========="
 echo "SUITES: $PASS_ALL/$TOTAL passed"
 if [ -n "$FAILS" ]; then

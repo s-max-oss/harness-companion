@@ -14,6 +14,32 @@ ok() { PASS=$((PASS+1)); echo "PASS: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1${2:+ — $2}"; }
 check() { local name="$1"; shift; if "$@"; then ok "$name"; else bad "$name"; fi; }
 
+mode_of() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || printf 'unknown'
+}
+
+tree_manifest() {
+  local root="$1" path kind mode digest target
+  (
+    cd "$root" || exit 1
+    while IFS= read -r -d '' path; do
+      mode="$(mode_of "$path")"
+      if [ -L "$path" ]; then
+        target="$(readlink "$path")"
+        printf 'symlink\t%s\t%s\t%s\n' "$mode" "$path" "$target"
+      elif [ -d "$path" ]; then
+        printf 'directory\t%s\t%s\n' "$mode" "$path"
+      elif [ -f "$path" ]; then
+        digest="$(sha256sum "$path" | awk '{print $1}')"
+        printf 'file\t%s\t%s\t%s\n' "$mode" "$digest" "$path"
+      else
+        kind="$(stat -c '%F' "$path" 2>/dev/null || printf 'other')"
+        printf 'other\t%s\t%s\t%s\n' "$mode" "$kind" "$path"
+      fi
+    done < <(find . -mindepth 1 -print0 | LC_ALL=C sort -z)
+  )
+}
+
 brief() {
   local path="$1" dtype="$2"
   jq -n --arg dtype "$dtype" '{
@@ -46,30 +72,36 @@ fi
 TA="$TMP/deterministic-a"; TB="$TMP/deterministic-b"; TC="$TMP/host-codex"
 mkdir -p "$TA" "$TB" "$TC"
 brief "$TMP/shell.json" shell
-bash "$INIT" "$TA" --brief "$TMP/shell.json" --non-interactive --host=claude >/dev/null 2>&1
-bash "$INIT" "$TB" --brief "$TMP/shell.json" --non-interactive --host=claude >/dev/null 2>&1
-bash "$INIT" "$TC" --brief "$TMP/shell.json" --non-interactive --host=codex >/dev/null 2>&1
+if bash "$INIT" "$TA" --brief "$TMP/shell.json" --non-interactive --host=claude >/dev/null 2>&1; then ok "deterministic run A exits zero"; else bad "deterministic run A exits zero"; fi
+if bash "$INIT" "$TB" --brief "$TMP/shell.json" --non-interactive --host=claude >/dev/null 2>&1; then ok "deterministic run B exits zero"; else bad "deterministic run B exits zero"; fi
+if bash "$INIT" "$TC" --brief "$TMP/shell.json" --non-interactive --host=codex >/dev/null 2>&1; then ok "cross-host Codex run exits zero"; else bad "cross-host Codex run exits zero"; fi
 check "identical Brief produces byte-equal trees" diff -r "$TA" "$TB"
+check "identical Brief preserves kinds and executable modes" test "$(tree_manifest "$TA")" = "$(tree_manifest "$TB")"
 check "cross-host common artifacts byte-equal" diff -r --exclude=claude-progress.md --exclude=codex-progress.md "$TA" "$TC"
 check "claude host progress path" test -f "$TA/claude-progress.md"
+check "claude host excludes codex progress path" test ! -e "$TA/codex-progress.md"
 check "codex host progress path" test -f "$TC/codex-progress.md"
+check "codex host excludes claude progress path" test ! -e "$TC/claude-progress.md"
 
 # 2. Schema failure is fail-closed and writes zero target bytes.
 T2="$TMP/invalid"; mkdir -p "$T2"; printf sentinel > "$T2/sentinel"
 jq '.cadence="sometimes"' "$TMP/python.json" > "$TMP/invalid.json"
-BEFORE="$(find "$T2" -type f -print0 | sort -z | xargs -0 sha256sum)"
+BEFORE="$(tree_manifest "$T2")"
 if bash "$INIT" "$T2" --brief "$TMP/invalid.json" --non-interactive >/dev/null 2>&1; then
   bad "invalid enum rejected"
 else
-  AFTER="$(find "$T2" -type f -print0 | sort -z | xargs -0 sha256sum)"
+  AFTER="$(tree_manifest "$T2")"
   check "invalid enum leaves target byte-equal" test "$BEFORE" = "$AFTER"
 fi
 for invalid_filter in '.deadline="2026-02-30"' '.initial_project_state={is_git_repo:"yes"}' '.defaults_applied=[{field:"/x",rationale:"r",source:"spec_default"}]' '.prohibitions=[""]'; do
   jq "$invalid_filter" "$TMP/python.json" > "$TMP/invalid-nested.json"
+  BEFORE="$(tree_manifest "$T2")"
   if bash "$INIT" "$T2" --brief "$TMP/invalid-nested.json" --non-interactive >/dev/null 2>&1; then
     bad "invalid nested Brief field rejected ($invalid_filter)"
   else
     ok "invalid nested Brief field rejected ($invalid_filter)"
+    AFTER="$(tree_manifest "$T2")"
+    check "invalid nested Brief leaves full tree unchanged ($invalid_filter)" test "$BEFORE" = "$AFTER"
   fi
 done
 
@@ -175,7 +207,7 @@ else
   check "invalid Brief render preserves MD" test "$(sha256sum "$T9/.harness/PROJECT_BRIEF.md" | awk '{print $1}')" = "$MD_SHA"
 fi
 
-if grep -nE 'read -[pr] ' "$INIT" >/dev/null; then bad "executor contains interactive prompt read"; else ok "executor contains no interactive prompt read"; fi
+if grep -nE '(^|[;&|[:space:]])read([[:space:]]|$)' "$INIT" | grep -vE '^[0-9]+:[[:space:]]*#' >/dev/null; then bad "executor contains interactive read"; else ok "executor contains no read command"; fi
 
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -8,6 +8,15 @@ INIT="$ROOT/scripts/harness-init.sh"
 FIXTURE="$ROOT/tests/init/fixtures/type-command-whitelist.json"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+TRACE="$TMP/executed-tools.log"
+SHADOW_BIN="$TMP/shadow-bin"
+mkdir -p "$SHADOW_BIN"
+: > "$TRACE"
+
+for tool in npm npx tsc pip pytest cargo go make shellcheck; do
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s" >> "$HARNESS_EXEC_TRACE"\nexit 97\n' "$tool" > "$SHADOW_BIN/$tool"
+  chmod +x "$SHADOW_BIN/$tool"
+done
 
 PASS=0
 FAIL=0
@@ -47,8 +56,9 @@ brief() {
 }
 
 contains_marker() {
-  local file="$1" marker="$2"
-  grep -qE -- "(^|[^[:alnum:]_])${marker}([^[:alnum:]_]|$)" "$file" 2>/dev/null
+  local marker="$1"
+  shift
+  grep -qE -- "(^|[^[:alnum:]_])${marker}([^[:alnum:]_]|$)" "$@" 2>/dev/null
 }
 
 if ! jq -e '
@@ -75,7 +85,7 @@ while IFS= read -r row; do
   mkdir -p "$target"
   brief "$brief_path" "$dtype"
 
-  if output="$(bash "$INIT" "$target" --brief "$brief_path" --non-interactive --host=claude 2>&1)"; then
+  if output="$(HARNESS_EXEC_TRACE="$TRACE" PATH="$SHADOW_BIN:$PATH" bash "$INIT" "$target" --brief "$brief_path" --non-interactive --host=claude --full 2>&1)"; then
     pass "$dtype executor completes"
   else
     fail "$dtype executor completes" "$(printf '%s' "$output" | tail -n 1)"
@@ -95,25 +105,35 @@ while IFS= read -r row; do
     check "$dtype snapshot records typed source for $file" \
       test "$(jq -r --arg file "$file" '.templates[$file].source' "$target/.harness/.template-snapshot.json")" = "by-type/$dtype/$file"
   done
+  check "$dtype generated checklist.sh matches common fallback" \
+    cmp -s "$target/checklist.sh" "$ROOT/templates/common/checklist.sh"
+  check "$dtype snapshot records common source for checklist.sh" \
+    test "$(jq -r '.templates["checklist.sh"].source' "$target/.harness/.template-snapshot.json")" = "common/checklist.sh"
 
   while IFS= read -r marker; do
     marker="${marker//$'\r'/}"
-    if contains_marker "$target/init.sh" "$marker"; then
-      pass "$dtype generated init.sh contains required tool $marker"
+    if contains_marker "$marker" "$target/init.sh" "$target/AGENTS.md" "$target/CLAUDE.md" "$target/checklist.sh"; then
+      pass "$dtype generated files contain required tool $marker"
     else
-      fail "$dtype generated init.sh contains required tool $marker"
+      fail "$dtype generated files contain required tool $marker"
     fi
   done < <(printf '%s' "$row" | jq -r '.required[]')
 
   while IFS= read -r marker; do
     marker="${marker//$'\r'/}"
-    if contains_marker "$target/init.sh" "$marker"; then
-      fail "$dtype generated init.sh excludes foreign tool $marker"
+    if contains_marker "$marker" "$target/init.sh" "$target/AGENTS.md" "$target/CLAUDE.md" "$target/checklist.sh"; then
+      fail "$dtype generated files exclude foreign tool $marker"
     else
-      pass "$dtype generated init.sh excludes foreign tool $marker"
+      pass "$dtype generated files exclude foreign tool $marker"
     fi
   done < <(printf '%s' "$row" | jq -r '.forbidden[]')
 done < <(jq -c '.types[]' "$FIXTURE")
+
+if [ -s "$TRACE" ]; then
+  fail "executor never runs generated project toolchains" "executed: $(tr '\n' ' ' < "$TRACE")"
+else
+  pass "executor never runs generated project toolchains"
+fi
 
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

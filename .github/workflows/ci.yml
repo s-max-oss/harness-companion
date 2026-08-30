@@ -5,6 +5,7 @@ name: harness-companion CI
 # Runs on every push to master, every PR targeting master, AND every push of
 # a v* tag. Executes:
 #   1. Core regression suite (tests/core/test-*.sh)
+#   1b. Guided-init executor contracts (tests/init/test-*.sh)
 #   2. Claude Code adapter contract suite (tests/adapters/test-claude-code-contract.sh)
 #   3. Codex adapter contract suite (tests/adapters/test-codex-contract.sh)
 #   4. Codex install-modes suite (tests/adapters/test-codex-install-modes.sh)
@@ -51,13 +52,18 @@ concurrency:
 
 jobs:
   test:
-    name: 15 test scripts + Codex plugin validator
+    name: Harness contract suites + Codex plugin validator
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Isolate test HOME
+        run: |
+          mkdir -p "$RUNNER_TEMP/harness-home"
+          echo "HOME=$RUNNER_TEMP/harness-home" >> "$GITHUB_ENV"
 
       - name: Show environment
         run: |
@@ -93,6 +99,20 @@ jobs:
           echo ""
           echo "Phase 1 summary: $FAILED core suite(s) failed"
           [ "$FAILED" -eq 0 ]
+
+      # ------------------------------------------------------------------
+      # Phase 1b — rc.3 guided-init executor contracts
+      # ------------------------------------------------------------------
+      - name: Phase 1b — guided-init executor contracts
+        run: |
+          set -euo pipefail
+          for t in tests/init/test-*.sh; do
+            echo ""
+            echo "============================================"
+            echo "  $t"
+            echo "============================================"
+            bash "$t"
+          done
 
       # ------------------------------------------------------------------
       # Phase 2 — Claude Code adapter contract

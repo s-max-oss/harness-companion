@@ -82,7 +82,7 @@ After a successful run, explain the outcome conversationally using the four cate
 
 Translate executor diagnostics into plain language while preserving the failed field or condition and the non-zero result. Do not hide partial state, silently retry, weaken a fail-closed check, or fall back to another mode.
 
-The Brief is advisory. Current-session instructions and host security policy always win. Obtain explicit in-session authorization for push, merge, tag, release, local skill installation or update, package installation, external network access or mutation, and destructive actions regardless of Brief preferences. An in-session stop or denial wins immediately; do not perform the action, and record the denial in evidence when the active workflow has an evidence sink.
+The Brief is advisory. Current-session instructions and host security policy always win. Obtain explicit in-session authorization for push, merge, tag, release, handling credentials, secrets, API keys, or tokens, local skill installation or update, package installation, external network access or mutation, and destructive actions regardless of Brief preferences. An in-session stop or denial wins immediately; do not perform the action, and record the denial in evidence when the active workflow has an evidence sink.
 
 ## Architecture (v2)
 

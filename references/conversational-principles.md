@@ -112,8 +112,9 @@ no-write preview and approval before applying template changes.
 
 The Brief is advisory. Current-session instructions and host security policy
 always take precedence. Explicit in-session authorization is still required for
-push, merge, tag, release, local skill installation or update, package
-installation, external network access or mutation, and destructive actions.
+push, merge, tag, release, handling credentials, secrets, API keys, or tokens,
+local skill installation or update, package installation, external network
+access or mutation, and destructive actions.
 
 If the user stops or denies an action, stop immediately. Do not argue from an
 older Brief preference. Record the denial when the active workflow provides an

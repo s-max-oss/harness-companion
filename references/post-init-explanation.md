@@ -84,7 +84,8 @@ List optional decisions that remain unresolved after the confirmed Brief.
 - Tell the user how to refine the decision: discuss the change and rerun
   `/harness:init` in guided mode. Do not instruct them to hand-edit generated
   JSON as the normal workflow.
-- Omit this category when nothing was deferred.
+- When nothing was deferred, keep the category and say so naturally, for
+  example: "Nothing remains undecided."
 
 Example:
 
@@ -116,8 +117,8 @@ user-modified files. After a successful update:
 1. State which Brief decisions changed.
 2. State which generated files were updated.
 3. State which files were preserved, especially user-modified files.
-4. Reuse the inferred, defaulted, and deferred categories only where their
-   contents changed or remain important.
+4. Keep all four categories. Give detail where values changed or remain
+   important, and describe unchanged or empty categories in one short phrase.
 
 Never promise that a file was preserved unless the executor result and
 post-init state establish that fact. If a three-way conflict or another real
@@ -139,6 +140,8 @@ Deferred: <optional unresolved decisions + how to refine them>.
 <one or two revisitable decisions and the natural next step>
 ```
 
-Skip empty categories, except that **generated** should always summarize the
-successful filesystem outcome. The final response should read like an
-explanation to the project owner, not an audit report.
+Always cover all four categories. Keep an empty category to a short, natural
+statement such as "No values were inferred," "No defaults were needed," or
+"Nothing remains undecided." **Generated** always summarizes the successful
+filesystem outcome. The final response should read like an explanation to the
+project owner, not an audit report.

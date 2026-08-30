@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "types": [
+    {
+      "detected_type": "node",
+      "project_type": "node",
+      "required": ["npm", "npx", "tsc"],
+      "forbidden": ["pip", "pytest", "cargo", "go", "make", "shellcheck"]
+    },
+    {
+      "detected_type": "python",
+      "project_type": "python",
+      "required": ["pip", "pytest"],
+      "forbidden": ["npm", "npx", "tsc", "cargo", "go", "make", "shellcheck"]
+    },
+    {
+      "detected_type": "shell",
+      "project_type": "generic",
+      "required": ["make", "shellcheck"],
+      "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "cargo", "go"]
+    },
+    {
+      "detected_type": "docs",
+      "project_type": "docs",
+      "required": [],
+      "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "cargo", "go", "make", "shellcheck"]
+    },
+    {
+      "detected_type": "go",
+      "project_type": "go",
+      "required": ["go"],
+      "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "cargo", "make", "shellcheck"]
+    },
+    {
+      "detected_type": "rust",
+      "project_type": "rust",
+      "required": ["cargo"],
+      "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "go", "make", "shellcheck"]
+    },
+    {
+      "detected_type": "electron",
+      "project_type": "generic",
+      "required": ["npm", "npx", "tsc"],
+      "forbidden": ["pip", "pytest", "cargo", "go", "make", "shellcheck"]
+    }
+  ]
+}

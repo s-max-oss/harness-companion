@@ -162,29 +162,107 @@ fi
 # to their payload. This catches `FOO=1 /abs/npm`, `env npm`, `command npm`, and
 # Windows .cmd/.exe spellings without treating ordinary arguments as commands.
 TRACE_HEADS="$TMP/trace-heads.log"
-extract_trace_heads() {
-  sed -n 's/^T*TRACE|[^|]*|//p' "$1" \
-    | awk '
-      {
-        wrapped = 0
-        for (i = 1; i <= NF; i++) {
-          token = $i
-          if (token ~ /^[A-Za-z_][A-Za-z0-9_]*=/) continue
-          base = token
-          gsub(/^.*[\\/]/, "", base)
-          sub(/\.exe$/, "", base)
-          base = tolower(base)
-          if (base == "env" || base == "command" || base == "exec" || base == "builtin" || base == "nohup") {
-            print base
-            wrapped = 1
+TRACE_PARSER="$TMP/trace-heads.py"
+cat > "$TRACE_PARSER" <<'PY'
+import os
+import re
+import shlex
+import sys
+
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+def basename(token):
+    name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+def skip_options(tokens, i, wrapper):
+    while i < len(tokens):
+        token = tokens[i]
+        if ASSIGNMENT.match(token):
+            i += 1
             continue
-          }
-          if (wrapped && token ~ /^-/) continue
-          print base
-          break
-        }
-      }
-    '
+        if token == "--":
+            return i + 1, False
+        if wrapper == "env":
+            if token in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string", "--argv0"):
+                return i + 2, True
+            if token.startswith(("--unset=", "--chdir=", "--split-string=", "--argv0=")):
+                i += 1
+                continue
+            if token.startswith("-"):
+                i += 1
+                continue
+        elif wrapper == "command":
+            if token in ("-v", "-V"):
+                return len(tokens), False  # lookup only; no command is executed
+            if token.startswith("-"):
+                i += 1
+                continue
+        elif wrapper == "exec":
+            if token in ("-a", "--argv0"):
+                return i + 2, True
+            if token.startswith("--argv0=") or token in ("-c", "-l"):
+                i += 1
+                continue
+        elif wrapper in ("builtin", "nohup") and token.startswith("-"):
+            i += 1
+            continue
+        return i, False
+    return i, False
+
+def heads(command):
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError as exc:
+        raise SystemExit(f"unparseable xtrace command: {command!r}: {exc}")
+    result = []
+    i = 0
+    while i < len(tokens):
+        while i < len(tokens) and ASSIGNMENT.match(tokens[i]):
+            i += 1
+        if i >= len(tokens):
+            break
+        head = basename(tokens[i])
+        result.append(head)
+        i += 1
+        if head not in ("env", "command", "exec", "builtin", "nohup"):
+            break
+        i, consumed_operand = skip_options(tokens, i, head)
+        if consumed_operand:
+            # An option such as `env -u NAME` or `exec -a NAME` consumed its
+            # operand; continue parsing any remaining wrapper options/payload.
+            continue
+    return result
+
+prefix = re.compile(r"^T*TRACE\|[^|]*\|")
+commands = []
+current = None
+with open(sys.argv[1], encoding="utf-8", errors="strict") as stream:
+    for raw in stream:
+        match = prefix.match(raw)
+        if match:
+            if current is not None:
+                commands.append(current)
+            current = raw[match.end():].rstrip("\n")
+        elif current is not None:
+            # Bash xtrace preserves embedded newlines in quoted assignments;
+            # reconstruct the full command before shell-aware tokenization.
+            current += "\n" + raw.rstrip("\n")
+if current is not None:
+    commands.append(current)
+for command in commands:
+    for head in heads(command):
+        print(head)
+PY
+
+extract_trace_heads() {
+  local python_bin=""
+  python_bin="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+  [ -n "$python_bin" ] || {
+    echo "FATAL: python3/python required for shell-accurate xtrace parsing" >&2
+    return 1
+  }
+  "$python_bin" "$TRACE_PARSER" "$1"
 }
 extract_trace_heads "$EXEC_TRACE" > "$TRACE_HEADS"
 PROHIBITED_HEADS='^(npm(\.cmd)?|npx(\.cmd)?|tsc|pip3?|pytest|python3?|cargo|rustc|go|make|shellcheck|curl|wget|ruby|bundle|gradle(w)?|mvn|dotnet)$'
@@ -194,15 +272,18 @@ PROHIBITED_HEADS='^(npm(\.cmd)?|npx(\.cmd)?|tsc|pip3?|pytest|python3?|cargo|rust
 SYNTHETIC_TRACE="$TMP/synthetic-trace.log"
 cat > "$SYNTHETIC_TRACE" <<'EOF'
 TRACE|fixture:1|FOO=1 /opt/tools/npm --version
-TRACE|fixture:2|env BAR=2 npm test
-TRACE|fixture:3|command C:\tools\npm.cmd run check
+TRACE|fixture:2|env -u FOO BAR=2 npm test
+TRACE|fixture:3|command C:/tools/npm.cmd run check
+TRACE|fixture:4|exec -a alias /opt/tools/npm test
+TRACE|fixture:5|builtin command npm test
+TRACE|fixture:6|nohup '/opt/tools with spaces/npm' test
 EOF
 SYNTHETIC_HEADS="$TMP/synthetic-heads.log"
 extract_trace_heads "$SYNTHETIC_TRACE" > "$SYNTHETIC_HEADS"
-if [ "$(grep -Eic "$PROHIBITED_HEADS" "$SYNTHETIC_HEADS")" -eq 3 ]; then
-  pass "xtrace parser catches assignment, wrapper, and absolute project-tool forms"
+if [ "$(grep -Eic "$PROHIBITED_HEADS" "$SYNTHETIC_HEADS")" -eq 6 ]; then
+  pass "xtrace parser catches assignments, wrapper options, and quoted absolute project-tool forms"
 else
-  fail "xtrace parser catches assignment, wrapper, and absolute project-tool forms" "$(tr '\n' ' ' < "$SYNTHETIC_HEADS")"
+  fail "xtrace parser catches assignments, wrapper options, and quoted absolute project-tool forms" "$(tr '\n' ' ' < "$SYNTHETIC_HEADS")"
 fi
 if grep -Ei "$PROHIBITED_HEADS" "$TRACE_HEADS" >/dev/null; then
   fail "xtrace contains no project-tool execution" "$(grep -Ei "$PROHIBITED_HEADS" "$TRACE_HEADS" | head -3)"

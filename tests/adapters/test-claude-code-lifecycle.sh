@@ -89,6 +89,11 @@ safe_mktemp() {
   printf '%s' "$_dir"
 }
 
+# ISO-2: every real installer invocation below inherits this disposable home.
+INSTALL_TEST_HOME="$(mktemp -d)"
+add_cleanup "$INSTALL_TEST_HOME"
+export HOME="$INSTALL_TEST_HOME"
+
 # ---- pre-flight --------------------------------------------------------------
 
 VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null || echo "")"

@@ -70,6 +70,10 @@ safe_mktemp() {
   }
 }
 
+# ISO-2: installer probes never inherit the developer's real home.
+safe_mktemp INSTALL_TEST_HOME iso2-home || exit 1
+export HOME="$INSTALL_TEST_HOME"
+
 pass() {
   local name="$1"
   echo "PASS: $name"

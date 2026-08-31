@@ -19,23 +19,58 @@ FAIL=0
 pass() { PASS=$((PASS + 1)); echo "PASS: $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1${2:+ — $2}"; }
 
-if grep -R -nE '(^|[^$[:alnum:]_])~/(\.claude|\.agents)/' "$ROOT/tests" >/dev/null 2>&1; then
-  fail "ISO-1 tests contain no literal real-home install path"
+ISO1_BAD=""
+while IFS= read -r test_file; do
+  [ -n "$test_file" ] || continue
+  if [ "$test_file" = "$ROOT/tests/run-all.sh" ]; then
+    grep -Fq 'export HOME="$SUITE_ISOLATION_ROOT/home"' "$test_file" \
+      || ISO1_BAD="$ISO1_BAD ${test_file#"$ROOT/"}"
+  elif grep -Eq '^INSTALL_TEST_HOME="\$\(mktemp -d' "$test_file" \
+       && grep -Fq 'export HOME="$INSTALL_TEST_HOME"' "$test_file"; then
+    : # Explicit file-local disposable HOME binding.
+  else
+    ISO1_BAD="$ISO1_BAD ${test_file#"$ROOT/"}"
+  fi
+done < <(
+  grep -RIlE '(~|\$\{?HOME\}?)/(\.claude|\.agents)/' "$ROOT/tests" \
+    | while IFS= read -r candidate; do
+        grep -nE '(~|\$\{?HOME\}?)/(\.claude|\.agents)/' "$candidate" \
+          | grep -vE '^[0-9]+:[[:space:]]*#' >/dev/null && printf '%s\n' "$candidate"
+      done \
+    | LC_ALL=C sort -u
+)
+if [ -z "$ISO1_BAD" ]; then
+  pass "ISO-1 every HOME-scoped Claude/Agents path is bound to a disposable HOME"
 else
-  pass "ISO-1 tests contain no literal real-home install path"
+  fail "ISO-1 every HOME-scoped Claude/Agents path is bound to a disposable HOME" "$ISO1_BAD"
 fi
 
 ISO2_BAD=""
 while IFS= read -r test_file; do
-  if grep -q 'install\.sh' "$test_file" \
-     && ! grep -Eq 'mktemp -d|INSTALL_TARGET=|HOME=' "$test_file"; then
-    ISO2_BAD="$ISO2_BAD ${test_file#"$ROOT/"}"
+  literal_call=false
+  assigned_call=false
+  grep -Eq '^[[:space:]]*(if[[:space:]]+)?bash[[:space:]].*(^|/)install\.sh(["[:space:]]|$)' "$test_file" && literal_call=true
+  if grep -Eq '^[A-Z_]*INSTALL=".*install\.sh"' "$test_file" \
+     && grep -Eq 'bash[[:space:]]+"\$[A-Z_]*INSTALL"' "$test_file"; then
+    assigned_call=true
+  fi
+  if [ "$literal_call" = true ] || [ "$assigned_call" = true ]; then
+    if { grep -Eq '^INSTALL_TEST_HOME="\$\(mktemp -d' "$test_file" \
+         || grep -Fq 'safe_mktemp INSTALL_TEST_HOME iso2-home' "$test_file"; } \
+       && grep -Fq 'export HOME="$INSTALL_TEST_HOME"' "$test_file"; then
+      :
+    elif grep -Eq '^TMPHOME="\$\(mktemp -d' "$test_file" \
+         && grep -Fq 'export HOME="$TMPHOME"' "$test_file"; then
+      :
+    else
+      ISO2_BAD="$ISO2_BAD ${test_file#"$ROOT/"}"
+    fi
   fi
 done < <(find "$ROOT/tests" -name 'test-*.sh' -type f | LC_ALL=C sort)
 if [ -z "$ISO2_BAD" ]; then
-  pass "ISO-2 install tests declare an isolated HOME or install target"
+  pass "ISO-2 every actual installer invocation is bound to a file-local disposable HOME"
 else
-  fail "ISO-2 install tests declare an isolated HOME or install target" "$ISO2_BAD"
+  fail "ISO-2 every actual installer invocation is bound to a file-local disposable HOME" "$ISO2_BAD"
 fi
 
 if grep -qE 'HOME=.*runner\.temp|HOME=.*RUNNER_TEMP|echo "HOME=.*GITHUB_ENV' "$ROOT/.github/workflows/ci.yml"; then

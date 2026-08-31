@@ -72,12 +72,53 @@ fi
 TA="$TMP/deterministic-a"; TB="$TMP/deterministic-b"; TC="$TMP/host-codex"
 mkdir -p "$TA" "$TB" "$TC"
 brief "$TMP/shell.json" shell
-if bash "$INIT" "$TA" --brief "$TMP/shell.json" --non-interactive --host=claude >/dev/null 2>&1; then ok "deterministic run A exits zero"; else bad "deterministic run A exits zero"; fi
-if bash "$INIT" "$TB" --brief "$TMP/shell.json" --non-interactive --host=claude >/dev/null 2>&1; then ok "deterministic run B exits zero"; else bad "deterministic run B exits zero"; fi
-if bash "$INIT" "$TC" --brief "$TMP/shell.json" --non-interactive --host=codex >/dev/null 2>&1; then ok "cross-host Codex run exits zero"; else bad "cross-host Codex run exits zero"; fi
+if bash "$INIT" "$TA" --brief "$TMP/shell.json" --non-interactive --host=claude --full >/dev/null 2>&1; then ok "deterministic full run A exits zero"; else bad "deterministic full run A exits zero"; fi
+if bash "$INIT" "$TB" --brief "$TMP/shell.json" --non-interactive --host=claude --full >/dev/null 2>&1; then ok "deterministic full run B exits zero"; else bad "deterministic full run B exits zero"; fi
+if bash "$INIT" "$TC" --brief "$TMP/shell.json" --non-interactive --host=codex --full >/dev/null 2>&1; then ok "cross-host Codex full run exits zero"; else bad "cross-host Codex full run exits zero"; fi
 check "identical Brief produces byte-equal trees" diff -r "$TA" "$TB"
 check "identical Brief preserves kinds and executable modes" test "$(tree_manifest "$TA")" = "$(tree_manifest "$TB")"
 check "cross-host common artifacts byte-equal" diff -r --exclude=claude-progress.md --exclude=codex-progress.md "$TA" "$TC"
+
+# AC-4/AC-11/AC-14: enumerate the binding output manifest instead of relying
+# on a recursive diff over whatever files happened to be generated.
+for target in "$TA" "$TC"; do
+  label="$(basename "$target")"
+  for file in \
+    .harness/PROJECT_BRIEF.json \
+    .harness/PROJECT_BRIEF.md \
+    .harness/.template-snapshot.json \
+    .harness/config.json \
+    .gitignore \
+    feature_list.json \
+    init.sh \
+    AGENTS.md \
+    CLAUDE.md \
+    session-handoff.md \
+    clean-state-checklist.md \
+    checklist.sh; do
+    check "$label manifest file exists: $file" test -f "$target/$file"
+  done
+  check "$label manifest logs/runs is a directory" test -d "$target/.harness/logs/runs"
+  check "$label gitignore contains logs entry" grep -Fxq '.harness/logs/' "$target/.gitignore"
+  check "$label gitignore contains registry lock entry" grep -Fxq '.harness/.registry.lock/' "$target/.gitignore"
+  check "$label Brief persists all categories and advisory marker" jq -e '
+    .schema_version == 1 and .advisory == true
+    and (.goal | type == "string" and test("[^[:space:]]"))
+    and (.success_criteria | type == "array" and length > 0 and all(.[]; type == "string" and test("[^[:space:]]")))
+    and has("cadence") and has("deadline")
+    and has("stack") and has("test_framework")
+    and has("secrets_handling") and has("external_network") and has("prohibitions")
+    and (.initial_project_state | type == "object")
+    and (.operation_preferences | type == "object")
+    and (.defaults_applied | type == "array")
+    and (.conflicts_resolved | type == "array")
+  ' "$target/.harness/PROJECT_BRIEF.json"
+  json_rev="$(jq -r '.captured_from_git_rev // "0000000000000000000000000000000000000000"' "$target/.harness/PROJECT_BRIEF.json")"
+  md_rev="$(sed -n 's/^<!-- git rev \([0-9a-f]\{40\}\) -->$/\1/p' "$target/.harness/PROJECT_BRIEF.md")"
+  snap_rev="$(jq -r '.captured_from_git_rev // "0000000000000000000000000000000000000000"' "$target/.harness/.template-snapshot.json")"
+  check "$label Brief JSON and MD revisions agree" test "$json_rev" = "$md_rev"
+  check "$label Brief and snapshot revisions agree" test "$json_rev" = "$snap_rev"
+done
 check "claude host progress path" test -f "$TA/claude-progress.md"
 check "claude host excludes codex progress path" test ! -e "$TA/codex-progress.md"
 check "codex host progress path" test -f "$TC/codex-progress.md"

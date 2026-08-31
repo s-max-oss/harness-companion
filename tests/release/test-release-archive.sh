@@ -79,6 +79,11 @@ safe_mktemp() {
   }
 }
 
+# ISO-2: archive install/uninstall round-trips use a disposable home even
+# though project-mode targets are already temporary directories.
+safe_mktemp INSTALL_TEST_HOME iso2-home || exit 1
+export HOME="$INSTALL_TEST_HOME"
+
 # Resolve validator path. Returns path on stdout (exit 0), or nothing (exit 1).
 # Exit 2: validator not found but SKIP_OK is set.
 find_validator() {

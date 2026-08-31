@@ -19,7 +19,7 @@ UNINSTALL="$ROOT_DIR/adapters/codex/uninstall.sh"
 
 PASSED=0
 FAILED=0
-TMPHOME=""
+TMPHOME="$(mktemp -d)"
 TMP_REPO=""
 TMP_REPO_SOURCE_COPY=""
 
@@ -59,7 +59,6 @@ echo "=== Mode 1: plugin (default — no flag) ==="
 # ============================================================
 
 # G5.M1: install.sh with no flag prints Codex marketplace instructions
-TMPHOME="$(mktemp -d)"
 export HOME="$TMPHOME"
 out="$(bash "$INSTALL" 2>&1)"
 if echo "$out" | grep -qi 'Phase 5b'; then

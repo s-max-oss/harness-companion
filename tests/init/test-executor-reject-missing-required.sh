@@ -78,6 +78,7 @@ run_case missing-goal 'del(.goal)' goal
 run_case empty-goal '.goal="   "' goal
 run_case missing-success-criteria 'del(.success_criteria)' success_criteria
 run_case empty-success-criteria '.success_criteria=[]' success_criteria
+run_case whitespace-success-criterion '.success_criteria=["   "]' success_criteria
 
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -8,12 +8,14 @@ INIT="$ROOT/scripts/harness-init.sh"
 FIXTURE="$ROOT/tests/init/fixtures/type-command-whitelist.json"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-TRACE="$TMP/executed-tools.log"
+EXEC_TRACE="$TMP/executed-commands.log"
+SHADOW_TRACE="$TMP/shadow-tool-hits.log"
 SHADOW_BIN="$TMP/shadow-bin"
 mkdir -p "$SHADOW_BIN"
-: > "$TRACE"
+: > "$EXEC_TRACE"
+: > "$SHADOW_TRACE"
 
-for tool in npm npx tsc pip pytest cargo go make shellcheck; do
+for tool in npm npm.cmd npx npx.cmd tsc pip pip3 pytest python python3 cargo rustc go make shellcheck curl wget ruby bundle gradle gradlew mvn dotnet; do
   printf '#!/bin/sh\nprintf "%%s\\n" "%s" >> "$HARNESS_EXEC_TRACE"\nexit 97\n' "$tool" > "$SHADOW_BIN/$tool"
   chmod +x "$SHADOW_BIN/$tool"
 done
@@ -62,12 +64,14 @@ contains_marker() {
 }
 
 if ! jq -e '
-  .schema_version == 1
+  .schema_version == 2
   and (.types | type == "array" and length == 7)
   and ([.types[].detected_type] | sort == (["docs","electron","go","node","python","rust","shell"] | sort))
   and all(.types[];
     (.detected_type | type == "string")
     and (.project_type | IN("node","python","rust","go","docs","generic"))
+    and (.files | type == "object" and (keys | sort) == ([".harness/config.json","AGENTS.md","CLAUDE.md","checklist.sh","init.sh"] | sort))
+    and all(.files[]; type == "string" and test("^[0-9a-f]{64}$"))
     and (.required | type == "array")
     and (.forbidden | type == "array"))
 ' "$FIXTURE" >/dev/null; then
@@ -85,7 +89,10 @@ while IFS= read -r row; do
   mkdir -p "$target"
   brief "$brief_path" "$dtype"
 
-  if output="$(HARNESS_EXEC_TRACE="$TRACE" PATH="$SHADOW_BIN:$PATH" bash "$INIT" "$target" --brief "$brief_path" --non-interactive --host=claude --full 2>&1)"; then
+  if output="$(HARNESS_EXEC_TRACE="$SHADOW_TRACE" PATH="$SHADOW_BIN:$PATH" \
+      PS4='TRACE|${BASH_SOURCE}:${LINENO}|' BASH_XTRACEFD=9 \
+      bash -x "$INIT" "$target" --brief "$brief_path" --non-interactive --host=claude --full \
+      9>>"$EXEC_TRACE" 2>&1)"; then
     pass "$dtype executor completes"
   else
     fail "$dtype executor completes" "$(printf '%s' "$output" | tail -n 1)"
@@ -98,6 +105,17 @@ while IFS= read -r row; do
     test "$(jq -r '.project_type' "$target/.harness/config.json")" = "$expected_project_type"
   check "$dtype config is the mapped config template" \
     cmp -s "$target/.harness/config.json" "$ROOT/templates/.harness/config.json.$expected_project_type.example"
+
+  # The fixture is the independent, exhaustive white-list: an unexpected byte
+  # in any type-sensitive generated file (including a foreign command) changes
+  # its SHA and fails. Template comparisons below separately verify selection.
+  while IFS=$'\t' read -r file expected_sha; do
+    expected_sha="${expected_sha//$'\r'/}"
+    # Normalize only line endings so the allow-list represents tracked text
+    # bytes and remains stable across core.autocrlf hosts.
+    actual_sha="$(sed 's/\r$//' "$target/$file" | sha256sum | awk '{print $1}')"
+    check "$dtype allowlisted SHA for $file" test "$actual_sha" = "$expected_sha"
+  done < <(printf '%s' "$row" | jq -r '.files | to_entries[] | [.key,.value] | @tsv')
 
   for file in init.sh AGENTS.md CLAUDE.md; do
     check "$dtype generated $file matches typed template" \
@@ -129,10 +147,28 @@ while IFS= read -r row; do
   done < <(printf '%s' "$row" | jq -r '.forbidden[]')
 done < <(jq -c '.types[]' "$FIXTURE")
 
-if [ -s "$TRACE" ]; then
-  fail "executor never runs generated project toolchains" "executed: $(tr '\n' ' ' < "$TRACE")"
+if [ -s "$SHADOW_TRACE" ]; then
+  fail "executor never runs a PATH-resolved project tool" "executed: $(tr '\n' ' ' < "$SHADOW_TRACE")"
 else
-  pass "executor never runs generated project toolchains"
+  pass "executor never runs a PATH-resolved project tool"
+fi
+if grep -Eq '^T*TRACE\|' "$EXEC_TRACE"; then
+  pass "executor records every Bash command through xtrace"
+else
+  fail "executor records every Bash command through xtrace"
+fi
+# Reduce every traced shell command to its executable basename. This catches
+# absolute paths and Windows .cmd/.exe spellings without confusing an `echo`
+# argument that merely names a project tool.
+TRACE_HEADS="$TMP/trace-heads.log"
+sed -n 's/^T*TRACE|[^|]*|//p' "$EXEC_TRACE" \
+  | awk '{h=$1; if (h ~ /^[A-Za-z_][A-Za-z0-9_]*=/) next; gsub(/^.*[\\/]/,"",h); sub(/\.exe$/,"",h); print tolower(h)}' \
+  > "$TRACE_HEADS"
+PROHIBITED_HEADS='^(npm(\.cmd)?|npx(\.cmd)?|tsc|pip3?|pytest|python3?|cargo|rustc|go|make|shellcheck|curl|wget|ruby|bundle|gradle(w)?|mvn|dotnet)$'
+if grep -Ei "$PROHIBITED_HEADS" "$TRACE_HEADS" >/dev/null; then
+  fail "xtrace contains no project-tool execution" "$(grep -Ei "$PROHIBITED_HEADS" "$TRACE_HEADS" | head -3)"
+else
+  pass "xtrace contains no project-tool execution"
 fi
 
 echo "Results: $PASS passed, $FAIL failed"

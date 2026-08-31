@@ -1,47 +1,41 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "description": "Independent exhaustive allow-list: every type-sensitive generated file is pinned by path and SHA-256; tool markers are secondary readability checks.",
   "types": [
     {
-      "detected_type": "node",
-      "project_type": "node",
-      "required": ["npm", "npx", "tsc"],
-      "forbidden": ["pip", "pytest", "cargo", "go", "make", "shellcheck"]
+      "detected_type": "node", "project_type": "node",
+      "files": {".harness/config.json":"6df1da102afedc23eacb73b4facde2a02b1bc5e39911d2deb347d4955d8f63a6","init.sh":"9d8feee79b08195f1763d9a950e0fd23c743cbbe26ce89018b22461b4f8b54dd","AGENTS.md":"a8b01e1e6f3c8699fbc4adae8d5bf69a591b46efa524c55196cc0ceee60428b7","CLAUDE.md":"4807c70fcf42bb8173048172749abb387a3ce9e91349c2ac24436653725e3f15","checklist.sh":"ed24b4eb0e22cb0928b110a290cd8ec9e8af9177b2f79b0df529a970d61e29a7"},
+      "required": ["npm", "npx", "tsc"], "forbidden": ["pip", "pytest", "cargo", "go", "make", "shellcheck"]
     },
     {
-      "detected_type": "python",
-      "project_type": "python",
-      "required": ["pip", "pytest"],
-      "forbidden": ["npm", "npx", "tsc", "cargo", "go", "make", "shellcheck"]
+      "detected_type": "python", "project_type": "python",
+      "files": {".harness/config.json":"bb58d316dd9abee55e80110a0f5b7f3d5189203f6f1e4fd49d6d3c2ab9503a20","init.sh":"170773a9a50d719a722531d8b65804ef06d5fc296db5e872f26ee4acf89a62c1","AGENTS.md":"7c0ce6d711654d8e0d71973159146b4647490f23ec279e7c72ec7f5daeb4d56a","CLAUDE.md":"d176d8c3be19dfdb474b7ded6ca9a4ee5ca7efc4b8806b720d84d580fa53bbb0","checklist.sh":"ed24b4eb0e22cb0928b110a290cd8ec9e8af9177b2f79b0df529a970d61e29a7"},
+      "required": ["pip", "pytest"], "forbidden": ["npm", "npx", "tsc", "cargo", "go", "make", "shellcheck"]
     },
     {
-      "detected_type": "shell",
-      "project_type": "generic",
-      "required": ["make", "shellcheck"],
-      "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "cargo", "go"]
+      "detected_type": "shell", "project_type": "generic",
+      "files": {".harness/config.json":"6de7279bc9380bc544b9c7f23ce43024e4ae5859656bffdca34b511dc2e9766b","init.sh":"65d60aeaa10a23e628c9de8909a5cf049e9738256f41f747c4a15fea271f7983","AGENTS.md":"af8ad26e7c310d462e8cb4b0c025f8e51a7de6ae4d0a336287d7d46a36d4d978","CLAUDE.md":"611b55e322945ff9fc4763fc233c6070cd7f6985ef0afb7da782350b33aae860","checklist.sh":"ed24b4eb0e22cb0928b110a290cd8ec9e8af9177b2f79b0df529a970d61e29a7"},
+      "required": ["make", "shellcheck"], "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "cargo", "go"]
     },
     {
-      "detected_type": "docs",
-      "project_type": "docs",
-      "required": [],
-      "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "cargo", "go", "make", "shellcheck"]
+      "detected_type": "docs", "project_type": "docs",
+      "files": {".harness/config.json":"6edbbdced99d67911ae5d4cf79713f84de73fff0352622dec96f1fd1732d455e","init.sh":"958e807e8e505438734c8dcb1a217358cb999b1b03802d1fd693650f774de412","AGENTS.md":"0e4feeea373b3333ee77d4ea42688d4c0b526662c8174c231bbf4398bf3c21e5","CLAUDE.md":"38b9695df1543bae8b10453b7c1a499032dc3d8f334a0ef4e2f06c99d453400a","checklist.sh":"ed24b4eb0e22cb0928b110a290cd8ec9e8af9177b2f79b0df529a970d61e29a7"},
+      "required": [], "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "cargo", "go", "make", "shellcheck"]
     },
     {
-      "detected_type": "go",
-      "project_type": "go",
-      "required": ["go"],
-      "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "cargo", "make", "shellcheck"]
+      "detected_type": "go", "project_type": "go",
+      "files": {".harness/config.json":"0e61c07cd2677c038013738dde3b95fc8cd0fb4d124be5dd428c3b4721d2f7dc","init.sh":"ac67e763b46fc8b56007da0e283a9f443a714d763f313ebe2ee7123a88fb69e4","AGENTS.md":"ab055c6da805fd4f9f95582091eb4642aff3171eca1ba829cc76f98988953eba","CLAUDE.md":"d3cab820487cb1e560ba685bc42b74a147689277f51f0c81389bd366fd3ef57f","checklist.sh":"ed24b4eb0e22cb0928b110a290cd8ec9e8af9177b2f79b0df529a970d61e29a7"},
+      "required": ["go"], "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "cargo", "make", "shellcheck"]
     },
     {
-      "detected_type": "rust",
-      "project_type": "rust",
-      "required": ["cargo"],
-      "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "go", "make", "shellcheck"]
+      "detected_type": "rust", "project_type": "rust",
+      "files": {".harness/config.json":"72dc3a4a30db5d54f4660d84158fdf4e292c98e433ed21a0bfee7947c60816a7","init.sh":"3f7d2e0f89be6d114d7b3bbf093cf555f41aac44ad11324a5e7f6ff4878cb8cd","AGENTS.md":"52e4b423dbe0bc892aab2b4da5e014d9566310df9d3e4d7d3b3bd0d2a3b2f117","CLAUDE.md":"d5e72a80921afd29cfc5534dd5c9af8496ed33129d1bf32b4142a977dce28e0a","checklist.sh":"ed24b4eb0e22cb0928b110a290cd8ec9e8af9177b2f79b0df529a970d61e29a7"},
+      "required": ["cargo"], "forbidden": ["npm", "npx", "tsc", "pip", "pytest", "go", "make", "shellcheck"]
     },
     {
-      "detected_type": "electron",
-      "project_type": "generic",
-      "required": ["npm", "npx", "tsc"],
-      "forbidden": ["pip", "pytest", "cargo", "go", "make", "shellcheck"]
+      "detected_type": "electron", "project_type": "generic",
+      "files": {".harness/config.json":"6de7279bc9380bc544b9c7f23ce43024e4ae5859656bffdca34b511dc2e9766b","init.sh":"7f854f660b82dddb718b6bde66f897957d76bea47e6800bf2f6b053a559c0c83","AGENTS.md":"a6b7cfebe7bb0f694a4b4f2e33a601e19a2e21b852dce34715ec2240aaee8f27","CLAUDE.md":"4332d886fa6509cf72a8955b4c09a0a60cda651b2d686f1e6452c2c7c5a94576","checklist.sh":"ed24b4eb0e22cb0928b110a290cd8ec9e8af9177b2f79b0df529a970d61e29a7"},
+      "required": ["npm", "npx", "tsc"], "forbidden": ["pip", "pytest", "cargo", "go", "make", "shellcheck"]
     }
   ]
 }

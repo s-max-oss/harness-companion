@@ -36,7 +36,9 @@ fi
 # G0-rev4: copy fixture root to temp so regeneration never mutates source fixtures.
 # Contract tests must not publish back to the source fixture tree.
 _TMP_FIXTURES="$(mktemp -d)"
-trap 'rm -rf "$_TMP_FIXTURES" "$TMPROOT"' EXIT
+INSTALL_TEST_HOME="$(mktemp -d)"
+export HOME="$INSTALL_TEST_HOME"
+trap 'rm -rf "$_TMP_FIXTURES" "$TMPROOT" "$INSTALL_TEST_HOME"' EXIT
 cp -R "$FIXTURES_DIR/." "$_TMP_FIXTURES/" 2>/dev/null || true
 FIXTURES_DIR="$_TMP_FIXTURES"
 
@@ -428,6 +430,14 @@ for cli in harness-verify.sh harness-feature.sh harness-status.sh harness-audit.
     printf '  [FAIL] G9.2 core/%s missing or not executable: %s\n' "$cli" "$INSTALL_TARGET/core/$cli"
   fi
 done
+
+if [ -x "$INSTALL_TARGET/scripts/harness-init-boundary.sh" ]; then
+  PASSED=$((PASSED+1))
+  printf '  [PASS] G9.2 guided-init consent boundary installed and executable\n'
+else
+  FAILED=$((FAILED+1))
+  printf '  [FAIL] G9.2 guided-init consent boundary missing or not executable: %s\n' "$INSTALL_TARGET/scripts/harness-init-boundary.sh"
+fi
 
 # G9.3: settings.json hooks point at the installed path
 if [ -f "$INSTALL_SETTINGS" ]; then

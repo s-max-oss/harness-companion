@@ -56,11 +56,17 @@ Load `references/conversational-principles.md` and `references/post-init-explana
 2. Start by telling the user what is already known or inferred. Build the five Brief categories—goal and success criteria, cadence, constraints, initial project state, and operation preferences—while asking only about missing required information, genuine conflicts, and choices that materially affect the Harness. Explain unfamiliar concepts in plain language. Do not use a fixed questionnaire or a question-count rule.
 3. Never re-ask known information. Prefer the current user message, then conversation history, then repository evidence. If user input conflicts with the repository, show both grounded positions and offer: use the repo value, use the user's value, tell me more, or defer. Never silently choose. Execution-critical conflicts cannot be deferred.
 4. Compose a complete Brief in conversation context. Preserve machine-readable `provenance`, `defaults_applied`, and `conflicts_resolved`; include `type_evidence` for `mixed` or `unknown` projects. Annotate the human presentation as `[from you]`, `[inferred from <file>]`, `[default]`, or `[to decide]`. Present the Brief—not the Agent's implementation plan—for approve, edit, or cancel. Edits preserve all previously confirmed fields; cancel leaves a fresh target byte-identical.
-5. After approval, pass the resolved Brief to the executor without writing it into the target yourself:
+5. Record the user's decision through the consent boundary. Reject/cancel takes no executor arguments and returns without invoking the executor:
+
+   ```sh
+   bash <skill-root>/scripts/harness-init-boundary.sh <target> --decision cancel
+   ```
+
+   After approval, pass the resolved Brief through the same boundary without writing it into the target yourself:
 
    ```sh
    printf '%s' "$RESOLVED_BRIEF_JSON" \
-     | bash <skill-root>/scripts/harness-init.sh <target> \
+     | bash <skill-root>/scripts/harness-init-boundary.sh <target> --decision approve \
          --brief-stdin --non-interactive --host=<claude|codex>
    ```
 

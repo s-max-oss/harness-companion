@@ -4,7 +4,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SKILL="$ROOT/SKILL.md"
+BOUNDARY="$ROOT/scripts/harness-init-boundary.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 TARGET="$TMP/target"
@@ -35,33 +35,36 @@ tree_manifest() {
   )
 }
 
-before="$(tree_manifest "$TARGET")"
+for decision in reject cancel; do
+  before="$(tree_manifest "$TARGET")"
+  if output="$(bash "$BOUNDARY" "$TARGET" --decision "$decision" 2>&1)"; then
+    pass "real guided boundary accepts $decision"
+  else
+    fail "real guided boundary accepts $decision" "$output"
+  fi
+  after="$(tree_manifest "$TARGET")"
+  if [ "$before" = "$after" ]; then
+    pass "guided $decision leaves full target tree byte-identical"
+  else
+    fail "guided $decision leaves full target tree byte-identical"
+  fi
+done
 
-# The guided dialog owns this decision. Rejection/cancellation deliberately
-# performs no executor call and therefore cannot create even a draft file.
-decision=reject
-case "$decision" in
-  approve) fail "reject path never enters executor boundary" ;;
-  reject|cancel) pass "reject path never enters executor boundary" ;;
-  *) fail "guided decision is recognized" ;;
-esac
-
-after="$(tree_manifest "$TARGET")"
-if [ "$before" = "$after" ]; then
-  pass "guided rejection leaves full target tree byte-identical"
+# Positive control: approval crosses the same production boundary and reaches
+# the real executor, so the reject assertions cannot pass via an always-no-op
+# test double.
+APPROVED="$TMP/approved"
+mkdir -p "$APPROVED"
+jq -n '{schema_version:1,detected_type:"docs",goal:"Approved goal",success_criteria:["Approved criterion"],cadence:"stable",deadline:null,stack:"docs",test_framework:"none",secrets_handling:"unspecified",external_network:"ask",prohibitions:[],operation_preferences:{commit:"ask",push:"ask",merge:"ask",release:"ask",install_packages:"ask",external_mutation:"ask",destructive_ops:false},defaults_applied:[],conflicts_resolved:[],provenance:{},type_evidence:null}' > "$TMP/brief.json"
+if bash "$BOUNDARY" "$APPROVED" --decision approve --brief "$TMP/brief.json" --non-interactive --host=claude >/dev/null 2>&1; then
+  pass "guided approval delegates to real executor"
 else
-  fail "guided rejection leaves full target tree byte-identical"
+  fail "guided approval delegates to real executor"
 fi
-
-if grep -Fq 'After approval, pass the resolved Brief to the executor without writing it into the target yourself:' "$SKILL"; then
-  pass "dialog contract crosses executor boundary only after approval"
+if [ -f "$APPROVED/.harness/PROJECT_BRIEF.json" ]; then
+  pass "guided approval produces executor artifact"
 else
-  fail "dialog contract crosses executor boundary only after approval"
-fi
-if grep -Fq 'cancel leaves a fresh target byte-identical.' "$SKILL"; then
-  pass "dialog contract makes cancel a no-write outcome"
-else
-  fail "dialog contract makes cancel a no-write outcome"
+  fail "guided approval produces executor artifact"
 fi
 
 echo "Results: $PASS passed, $FAIL failed"

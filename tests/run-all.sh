@@ -91,8 +91,11 @@ record_result() {
 # The core contracts are fixture-isolated, but on Windows/MSYS their process
 # startup cost makes a fully sequential run exceed the auditable 7200-second
 # command ceiling before the release archive can finish. Run only those core
-# contracts two at a time. Adapter/install/release tests remain serialized
-# because they exercise host-level installation and archive resources.
+# contracts two at a time. The lock-registry contract is intentionally serial:
+# its T11 already launches two nested harness-verify writers, and an additional
+# peer suite can exhaust the Windows/MSYS fork budget before either writer gets
+# to exercise the lock. Adapter/install/release tests remain serialized because
+# they exercise host-level installation and archive resources.
 i=0
 while [ "$i" -lt "${#TESTS[@]}" ]; do
   t1="${TESTS[$i]}"
@@ -104,7 +107,9 @@ while [ "$i" -lt "${#TESTS[@]}" ]; do
     rel2=""
   fi
 
-  if [[ "$rel2" == tests/core/* ]]; then
+  if [[ "$rel2" == tests/core/* ]] \
+      && [ "$rel1" != "tests/core/test-lock-registry.sh" ] \
+      && [ "$rel2" != "tests/core/test-lock-registry.sh" ]; then
     out1="$(mktemp)"
     out2="$(mktemp)"
     run_test "$rel1" >"$out1" 2>&1 &

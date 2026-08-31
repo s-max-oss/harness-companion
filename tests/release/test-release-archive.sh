@@ -79,6 +79,10 @@ safe_mktemp() {
   }
 }
 
+# Preserve the caller's read-only validator search root before isolating all
+# installer activity. Validator discovery must not be disabled by the sandbox.
+VALIDATOR_SEARCH_HOME="${HOME:-}"
+
 # ISO-2: archive install/uninstall round-trips use a disposable home even
 # though project-mode targets are already temporary directories.
 safe_mktemp INSTALL_TEST_HOME iso2-home || exit 1
@@ -104,15 +108,15 @@ find_validator() {
   # 2. Common install locations (cross-platform)
   local cand
   for cand in \
-    "$HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py" \
-    "$HOME/.codex/scripts/validate_plugin.py" \
+    "$VALIDATOR_SEARCH_HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py" \
+    "$VALIDATOR_SEARCH_HOME/.codex/scripts/validate_plugin.py" \
     "/usr/local/share/codex/scripts/validate_plugin.py"; do
     [ -f "$cand" ] && { echo "$cand"; return 0; }
   done
 
   # 3. Last resort: find under $HOME (best-effort, may be slow)
   local found
-  found="$(find "$HOME" -maxdepth 6 -name "validate_plugin.py" -path "*plugin-creator*" 2>/dev/null | head -1)"
+  found="$(find "$VALIDATOR_SEARCH_HOME" -maxdepth 6 -name "validate_plugin.py" -path "*plugin-creator*" 2>/dev/null | head -1)"
   if [ -n "$found" ] && [ -f "$found" ]; then
     echo "$found"
     return 0

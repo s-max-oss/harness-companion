@@ -357,7 +357,11 @@ AWK
 extract_trace_heads() {
   awk -f "$TRACE_PARSER" "$1"
 }
-extract_trace_heads "$EXEC_TRACE" > "$TRACE_HEADS"
+if extract_trace_heads "$EXEC_TRACE" > "$TRACE_HEADS"; then
+  pass "xtrace parser accepts the complete executor trace"
+else
+  fail "xtrace parser accepts the complete executor trace" "parser exited non-zero"
+fi
 PROHIBITED_HEADS='^(npm(\.cmd)?|npx(\.cmd)?|tsc|pip3?|pytest|python3?|cargo|rustc|go|make|shellcheck|curl|wget|ruby|bundle|gradle(w)?|mvn|dotnet)$'
 
 # Parser regressions must fail independently of the product path: prove all
@@ -372,23 +376,33 @@ TRACE|fixture:5|builtin command npm test
 TRACE|fixture:6|nohup '/opt/tools with spaces/npm' test
 TRACE|fixture:7|env -S '/opt/tools/npm test'
 TRACE|fixture:8|env '--split-string=/opt/tools/npm test'
+TRACE|fixture:9|env -S "env -S '/opt/tools/npm test'"
+TRACE|fixture:10|TRACE_VALUE='first line
+second line' /opt/tools/npm test
 EOF
 SYNTHETIC_HEADS="$TMP/synthetic-heads.log"
 extract_trace_heads "$SYNTHETIC_TRACE" > "$SYNTHETIC_HEADS"
-EXPECTED_SYNTHETIC_HEADS=$'npm\nenv\nnpm\ncommand\nnpm.cmd\nexec\nnpm\nbuiltin\ncommand\nnpm\nnohup\nnpm\nenv\nnpm\nenv\nnpm'
+EXPECTED_SYNTHETIC_HEADS=$'npm\nenv\nnpm\ncommand\nnpm.cmd\nexec\nnpm\nbuiltin\ncommand\nnpm\nnohup\nnpm\nenv\nnpm\nenv\nnpm\nenv\nenv\nnpm\nnpm'
 if [ "$(<"$SYNTHETIC_HEADS")" = "$EXPECTED_SYNTHETIC_HEADS" ]; then
-  pass "xtrace parser catches assignments, wrapper options, split strings, and quoted absolute project-tool forms"
+  pass "xtrace parser catches assignments, wrapper options, recursive split strings, multiline records, and quoted absolute project-tool forms"
 else
-  fail "xtrace parser catches assignments, wrapper options, split strings, and quoted absolute project-tool forms" "$(tr '\n' ' ' < "$SYNTHETIC_HEADS")"
+  fail "xtrace parser catches assignments, wrapper options, recursive split strings, multiline records, and quoted absolute project-tool forms" "$(tr '\n' ' ' < "$SYNTHETIC_HEADS")"
 fi
 SYNTHETIC_NON_EXEC_TRACE="$TMP/synthetic-non-exec-trace.log"
-printf '%s\n' 'TRACE|fixture:9|nohup --help npm' > "$SYNTHETIC_NON_EXEC_TRACE"
+printf '%s\n' 'TRACE|fixture:11|nohup --help npm' > "$SYNTHETIC_NON_EXEC_TRACE"
 SYNTHETIC_NON_EXEC_HEADS="$TMP/synthetic-non-exec-heads.log"
 extract_trace_heads "$SYNTHETIC_NON_EXEC_TRACE" > "$SYNTHETIC_NON_EXEC_HEADS"
 if [ "$(<"$SYNTHETIC_NON_EXEC_HEADS")" = "nohup" ]; then
   pass "xtrace parser does not treat nohup terminal-option arguments as an executed payload"
 else
   fail "xtrace parser does not treat nohup terminal-option arguments as an executed payload" "$(tr '\n' ' ' < "$SYNTHETIC_NON_EXEC_HEADS")"
+fi
+SYNTHETIC_INVALID_TRACE="$TMP/synthetic-invalid-trace.log"
+printf '%s\n' "TRACE|fixture:12|env -S 'unterminated" > "$SYNTHETIC_INVALID_TRACE"
+if extract_trace_heads "$SYNTHETIC_INVALID_TRACE" >/dev/null 2>&1; then
+  fail "xtrace parser rejects malformed records instead of producing partial evidence"
+else
+  pass "xtrace parser rejects malformed records instead of producing partial evidence"
 fi
 if grep -Ei "$PROHIBITED_HEADS" "$TRACE_HEADS" >/dev/null; then
   fail "xtrace contains no project-tool execution" "$(grep -Ei "$PROHIBITED_HEADS" "$TRACE_HEADS" | head -3)"

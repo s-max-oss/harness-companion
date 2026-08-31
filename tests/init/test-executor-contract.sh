@@ -40,6 +40,34 @@ tree_manifest() {
   )
 }
 
+# Exact filesystem shape used by AC-4/AC-11. Unlike tree_manifest (which also
+# binds bytes for determinism), this deliberately records every generated path,
+# its kind, and whether a regular file is executable. Implicit parent
+# directories are included so an unexpected output cannot hide behind a list
+# of required-path existence checks.
+shape_manifest() {
+  local root="$1" path executable
+  (
+    cd "$root" || exit 1
+    while IFS= read -r -d '' path; do
+      if [ -L "$path" ]; then
+        printf 'symlink\t-\t%s\n' "$path"
+      elif [ -d "$path" ]; then
+        printf 'directory\t-\t%s\n' "$path"
+      elif [ -f "$path" ]; then
+        if [ -x "$path" ]; then executable=executable; else executable=non-executable; fi
+        printf 'file\t%s\t%s\n' "$executable" "$path"
+      else
+        printf 'other\t-\t%s\n' "$path"
+      fi
+    done < <(find . -mindepth 1 -print0 | LC_ALL=C sort -z)
+  )
+}
+
+EXPECTED_MINIMAL_CLAUDE=$'file\tnon-executable\t./.gitignore\ndirectory\t-\t./.harness\nfile\tnon-executable\t./.harness/.template-snapshot.json\nfile\tnon-executable\t./.harness/PROJECT_BRIEF.json\nfile\tnon-executable\t./.harness/PROJECT_BRIEF.md\nfile\tnon-executable\t./.harness/config.json\ndirectory\t-\t./.harness/logs\ndirectory\t-\t./.harness/logs/runs\nfile\tnon-executable\t./AGENTS.md\nfile\tnon-executable\t./CLAUDE.md\nfile\tnon-executable\t./claude-progress.md\nfile\tnon-executable\t./feature_list.json\nfile\texecutable\t./init.sh'
+EXPECTED_FULL_CLAUDE=$'file\tnon-executable\t./.gitignore\ndirectory\t-\t./.harness\nfile\tnon-executable\t./.harness/.template-snapshot.json\nfile\tnon-executable\t./.harness/PROJECT_BRIEF.json\nfile\tnon-executable\t./.harness/PROJECT_BRIEF.md\nfile\tnon-executable\t./.harness/config.json\ndirectory\t-\t./.harness/logs\ndirectory\t-\t./.harness/logs/runs\nfile\tnon-executable\t./AGENTS.md\nfile\tnon-executable\t./CLAUDE.md\nfile\texecutable\t./checklist.sh\nfile\tnon-executable\t./claude-progress.md\nfile\tnon-executable\t./clean-state-checklist.md\nfile\tnon-executable\t./feature_list.json\nfile\texecutable\t./init.sh\nfile\tnon-executable\t./session-handoff.md'
+EXPECTED_FULL_CODEX=$'file\tnon-executable\t./.gitignore\ndirectory\t-\t./.harness\nfile\tnon-executable\t./.harness/.template-snapshot.json\nfile\tnon-executable\t./.harness/PROJECT_BRIEF.json\nfile\tnon-executable\t./.harness/PROJECT_BRIEF.md\nfile\tnon-executable\t./.harness/config.json\ndirectory\t-\t./.harness/logs\ndirectory\t-\t./.harness/logs/runs\nfile\tnon-executable\t./AGENTS.md\nfile\tnon-executable\t./CLAUDE.md\nfile\texecutable\t./checklist.sh\nfile\tnon-executable\t./clean-state-checklist.md\nfile\tnon-executable\t./codex-progress.md\nfile\tnon-executable\t./feature_list.json\nfile\texecutable\t./init.sh\nfile\tnon-executable\t./session-handoff.md'
+
 brief() {
   local path="$1" dtype="$2"
   jq -n --arg dtype "$dtype" '{
@@ -87,6 +115,7 @@ check "minimal gitignore contains logs entry" grep -Fxq '.harness/logs/' "$T1/.g
 check "minimal gitignore contains registry lock entry" grep -Fxq '.harness/.registry.lock/' "$T1/.gitignore"
 check "minimal feature registry starts at revision 1" test "$(jq -r '.revision' "$T1/feature_list.json")" = 1
 check "minimal init.sh is executable" test -x "$T1/init.sh"
+check "minimal Claude output manifest is exact (path, kind, executable mode)" test "$(shape_manifest "$T1")" = "$EXPECTED_MINIMAL_CLAUDE"
 check "minimal Brief persists all categories and advisory marker" jq -e '
   .schema_version == 1 and .advisory == true
   and (.goal | type == "string" and test("[^[:space:]]"))
@@ -119,6 +148,8 @@ if bash "$INIT" "$TC" --brief "$TMP/shell.json" --non-interactive --host=codex -
 check "identical Brief produces byte-equal trees" diff -r "$TA" "$TB"
 check "identical Brief preserves kinds and executable modes" test "$(tree_manifest "$TA")" = "$(tree_manifest "$TB")"
 check "cross-host common artifacts byte-equal" diff -r --exclude=claude-progress.md --exclude=codex-progress.md "$TA" "$TC"
+check "full Claude output manifest is exact (path, kind, executable mode)" test "$(shape_manifest "$TA")" = "$EXPECTED_FULL_CLAUDE"
+check "full Codex output manifest is exact (path, kind, executable mode)" test "$(shape_manifest "$TC")" = "$EXPECTED_FULL_CODEX"
 
 # AC-4/AC-11/AC-14: enumerate the binding output manifest instead of relying
 # on a recursive diff over whatever files happened to be generated.

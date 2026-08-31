@@ -162,107 +162,200 @@ fi
 # to their payload. This catches `FOO=1 /abs/npm`, `env npm`, `command npm`, and
 # Windows .cmd/.exe spellings without treating ordinary arguments as commands.
 TRACE_HEADS="$TMP/trace-heads.log"
-TRACE_PARSER="$TMP/trace-heads.py"
-cat > "$TRACE_PARSER" <<'PY'
-import os
-import re
-import shlex
-import sys
+TRACE_PARSER="$TMP/trace-heads.awk"
+cat > "$TRACE_PARSER" <<'AWK'
+# POSIX-awk shell lexer for the command portion of Bash xtrace records. Tests
+# intentionally cannot depend on Python/Node. This recognizes the quoting and
+# escaping Bash emits in xtrace, then follows only execution-wrapper payloads.
+function clear_array(array, key) {
+  for (key in array) delete array[key]
+}
 
-ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+function shell_split(text, out,    i, ch, quote, escaped, token, started, count) {
+  clear_array(out)
+  quote = ""
+  escaped = 0
+  token = ""
+  started = 0
+  count = 0
+  for (i = 1; i <= length(text); i++) {
+    ch = substr(text, i, 1)
+    if (escaped) {
+      token = token ch
+      started = 1
+      escaped = 0
+    } else if (quote == "'") {
+      if (ch == "'") quote = ""
+      else token = token ch
+      started = 1
+    } else if (quote == "\"") {
+      if (ch == "\"") quote = ""
+      else if (ch == "\\") escaped = 1
+      else token = token ch
+      started = 1
+    } else if (ch == "\\") {
+      escaped = 1
+      started = 1
+    } else if (ch == "'" || ch == "\"") {
+      # Bash may render ANSI-C strings as $'...'. The payloads relevant to
+      # executable detection need no escape decoding, but '$' is not literal.
+      if (ch == "'" && token == "$") token = ""
+      quote = ch
+      started = 1
+    } else if (ch ~ /[[:space:]]/) {
+      if (started) {
+        out[++count] = token
+        token = ""
+        started = 0
+      }
+    } else {
+      token = token ch
+      started = 1
+    }
+  }
+  if (escaped || quote != "") {
+    print "FATAL: unparseable xtrace command: " text > "/dev/stderr"
+    exit 2
+  }
+  if (started) out[++count] = token
+  return count
+}
 
-def basename(token):
-    name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return name[:-4] if name.endswith(".exe") else name
+function executable_basename(token,    parts, count, name) {
+  gsub(/\\/, "/", token)
+  count = split(token, parts, "/")
+  name = tolower(parts[count])
+  sub(/\.exe$/, "", name)
+  return name
+}
 
-def skip_options(tokens, i, wrapper):
-    while i < len(tokens):
+function splice_split(pos, removed, payload,    split_tokens, split_count, delta, i) {
+  split_count = shell_split(payload, split_tokens)
+  delta = split_count - removed
+  if (delta > 0) {
+    for (i = token_count; i >= pos + removed; i--) tokens[i + delta] = tokens[i]
+  } else if (delta < 0) {
+    for (i = pos + removed; i <= token_count; i++) tokens[i + delta] = tokens[i]
+    for (i = token_count + delta + 1; i <= token_count; i++) delete tokens[i]
+  }
+  for (i = 1; i <= split_count; i++) tokens[pos + i - 1] = split_tokens[i]
+  token_count += delta
+}
+
+function emit_heads(command,    i, token, head, payload) {
+  token_count = shell_split(command, tokens)
+  i = 1
+  while (i <= token_count) {
+    while (i <= token_count && tokens[i] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) i++
+    if (i > token_count) return
+    head = executable_basename(tokens[i])
+    print head
+    i++
+
+    if (head == "env") {
+      while (i <= token_count) {
         token = tokens[i]
-        if ASSIGNMENT.match(token):
-            i += 1
-            continue
-        if token == "--":
-            return i + 1, False
-        if wrapper == "env":
-            if token in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string", "--argv0"):
-                return i + 2, True
-            if token.startswith(("--unset=", "--chdir=", "--split-string=", "--argv0=")):
-                i += 1
-                continue
-            if token.startswith("-"):
-                i += 1
-                continue
-        elif wrapper == "command":
-            if token in ("-v", "-V"):
-                return len(tokens), False  # lookup only; no command is executed
-            if token.startswith("-"):
-                i += 1
-                continue
-        elif wrapper == "exec":
-            if token in ("-a", "--argv0"):
-                return i + 2, True
-            if token.startswith("--argv0=") or token in ("-c", "-l"):
-                i += 1
-                continue
-        elif wrapper in ("builtin", "nohup") and token.startswith("-"):
-            i += 1
-            continue
-        return i, False
-    return i, False
+        if (token ~ /^[A-Za-z_][A-Za-z0-9_]*=/) { i++; continue }
+        if (token == "--") { i++; break }
+        if (token == "--help" || token == "--version") return
+        if (token == "-S" || token == "--split-string") {
+          if (i + 1 > token_count) return
+          payload = tokens[i + 1]
+          splice_split(i, 2, payload)
+          continue
+        }
+        if (token ~ /^--split-string=/) {
+          payload = token
+          sub(/^--split-string=/, "", payload)
+          splice_split(i, 1, payload)
+          continue
+        }
+        if (token ~ /^-S./) {
+          payload = substr(token, 3)
+          splice_split(i, 1, payload)
+          continue
+        }
+        if (token == "-u" || token == "--unset" || token == "-C" ||
+            token == "--chdir" || token == "--argv0") {
+          if (i + 1 > token_count) return
+          i += 2
+          continue
+        }
+        if (token ~ /^--(unset|chdir|argv0)=/ || token ~ /^-/) { i++; continue }
+        break
+      }
+      continue
+    }
 
-def heads(command):
-    try:
-        tokens = shlex.split(command, posix=True)
-    except ValueError as exc:
-        raise SystemExit(f"unparseable xtrace command: {command!r}: {exc}")
-    result = []
-    i = 0
-    while i < len(tokens):
-        while i < len(tokens) and ASSIGNMENT.match(tokens[i]):
-            i += 1
-        if i >= len(tokens):
-            break
-        head = basename(tokens[i])
-        result.append(head)
-        i += 1
-        if head not in ("env", "command", "exec", "builtin", "nohup"):
-            break
-        i, consumed_operand = skip_options(tokens, i, head)
-        if consumed_operand:
-            # An option such as `env -u NAME` or `exec -a NAME` consumed its
-            # operand; continue parsing any remaining wrapper options/payload.
-            continue
-    return result
+    if (head == "command") {
+      while (i <= token_count) {
+        token = tokens[i]
+        if (token == "--") { i++; break }
+        if (token == "-v" || token == "-V") return
+        if (token ~ /^-/) { i++; continue }
+        break
+      }
+      continue
+    }
 
-prefix = re.compile(r"^T*TRACE\|[^|]*\|")
-commands = []
-current = None
-with open(sys.argv[1], encoding="utf-8", errors="strict") as stream:
-    for raw in stream:
-        match = prefix.match(raw)
-        if match:
-            if current is not None:
-                commands.append(current)
-            current = raw[match.end():].rstrip("\n")
-        elif current is not None:
-            # Bash xtrace preserves embedded newlines in quoted assignments;
-            # reconstruct the full command before shell-aware tokenization.
-            current += "\n" + raw.rstrip("\n")
-if current is not None:
-    commands.append(current)
-for command in commands:
-    for head in heads(command):
-        print(head)
-PY
+    if (head == "exec") {
+      while (i <= token_count) {
+        token = tokens[i]
+        if (token == "--") { i++; break }
+        if (token == "-a" || token == "--argv0") {
+          if (i + 1 > token_count) return
+          i += 2
+          continue
+        }
+        if (token ~ /^--argv0=/ || token == "-c" || token == "-l") { i++; continue }
+        if (token ~ /^-/) return
+        break
+      }
+      continue
+    }
+
+    if (head == "builtin") {
+      while (i <= token_count && tokens[i] ~ /^-/) {
+        if (tokens[i] == "--help") return
+        i++
+      }
+      continue
+    }
+
+    if (head == "nohup") {
+      if (i <= token_count && tokens[i] == "--") i++
+      else if (i <= token_count && tokens[i] ~ /^-/) return
+      continue
+    }
+    return
+  }
+}
+
+function flush_record() {
+  if (have_record) emit_heads(record)
+  record = ""
+  have_record = 0
+}
+
+{
+  line = $0
+  sub(/\r$/, "", line)
+  if (line ~ /^T*TRACE\|[^|]*\|/) {
+    flush_record()
+    sub(/^T*TRACE\|[^|]*\|/, "", line)
+    record = line
+    have_record = 1
+  } else if (have_record) {
+    # Quoted assignments can span physical xtrace lines.
+    record = record "\n" line
+  }
+}
+
+END { flush_record() }
+AWK
 
 extract_trace_heads() {
-  local python_bin=""
-  python_bin="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
-  [ -n "$python_bin" ] || {
-    echo "FATAL: python3/python required for shell-accurate xtrace parsing" >&2
-    return 1
-  }
-  "$python_bin" "$TRACE_PARSER" "$1"
+  awk -f "$TRACE_PARSER" "$1"
 }
 extract_trace_heads "$EXEC_TRACE" > "$TRACE_HEADS"
 PROHIBITED_HEADS='^(npm(\.cmd)?|npx(\.cmd)?|tsc|pip3?|pytest|python3?|cargo|rustc|go|make|shellcheck|curl|wget|ruby|bundle|gradle(w)?|mvn|dotnet)$'
@@ -277,13 +370,25 @@ TRACE|fixture:3|command C:/tools/npm.cmd run check
 TRACE|fixture:4|exec -a alias /opt/tools/npm test
 TRACE|fixture:5|builtin command npm test
 TRACE|fixture:6|nohup '/opt/tools with spaces/npm' test
+TRACE|fixture:7|env -S '/opt/tools/npm test'
+TRACE|fixture:8|env '--split-string=/opt/tools/npm test'
 EOF
 SYNTHETIC_HEADS="$TMP/synthetic-heads.log"
 extract_trace_heads "$SYNTHETIC_TRACE" > "$SYNTHETIC_HEADS"
-if [ "$(grep -Eic "$PROHIBITED_HEADS" "$SYNTHETIC_HEADS")" -eq 6 ]; then
-  pass "xtrace parser catches assignments, wrapper options, and quoted absolute project-tool forms"
+EXPECTED_SYNTHETIC_HEADS=$'npm\nenv\nnpm\ncommand\nnpm.cmd\nexec\nnpm\nbuiltin\ncommand\nnpm\nnohup\nnpm\nenv\nnpm\nenv\nnpm'
+if [ "$(<"$SYNTHETIC_HEADS")" = "$EXPECTED_SYNTHETIC_HEADS" ]; then
+  pass "xtrace parser catches assignments, wrapper options, split strings, and quoted absolute project-tool forms"
 else
-  fail "xtrace parser catches assignments, wrapper options, and quoted absolute project-tool forms" "$(tr '\n' ' ' < "$SYNTHETIC_HEADS")"
+  fail "xtrace parser catches assignments, wrapper options, split strings, and quoted absolute project-tool forms" "$(tr '\n' ' ' < "$SYNTHETIC_HEADS")"
+fi
+SYNTHETIC_NON_EXEC_TRACE="$TMP/synthetic-non-exec-trace.log"
+printf '%s\n' 'TRACE|fixture:9|nohup --help npm' > "$SYNTHETIC_NON_EXEC_TRACE"
+SYNTHETIC_NON_EXEC_HEADS="$TMP/synthetic-non-exec-heads.log"
+extract_trace_heads "$SYNTHETIC_NON_EXEC_TRACE" > "$SYNTHETIC_NON_EXEC_HEADS"
+if [ "$(<"$SYNTHETIC_NON_EXEC_HEADS")" = "nohup" ]; then
+  pass "xtrace parser does not treat nohup terminal-option arguments as an executed payload"
+else
+  fail "xtrace parser does not treat nohup terminal-option arguments as an executed payload" "$(tr '\n' ' ' < "$SYNTHETIC_NON_EXEC_HEADS")"
 fi
 if grep -Ei "$PROHIBITED_HEADS" "$TRACE_HEADS" >/dev/null; then
   fail "xtrace contains no project-tool execution" "$(grep -Ei "$PROHIBITED_HEADS" "$TRACE_HEADS" | head -3)"

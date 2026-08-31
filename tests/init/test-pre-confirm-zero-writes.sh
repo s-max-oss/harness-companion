@@ -56,15 +56,31 @@ done
 APPROVED="$TMP/approved"
 mkdir -p "$APPROVED"
 jq -n '{schema_version:1,detected_type:"docs",goal:"Approved goal",success_criteria:["Approved criterion"],cadence:"stable",deadline:null,stack:"docs",test_framework:"none",secrets_handling:"unspecified",external_network:"ask",prohibitions:[],operation_preferences:{commit:"ask",push:"ask",merge:"ask",release:"ask",install_packages:"ask",external_mutation:"ask",destructive_ops:false},defaults_applied:[],conflicts_resolved:[],provenance:{},type_evidence:null}' > "$TMP/brief.json"
-if bash "$BOUNDARY" "$APPROVED" --decision approve --brief "$TMP/brief.json" --non-interactive --host=claude >/dev/null 2>&1; then
-  pass "guided approval delegates to real executor"
+if cat "$TMP/brief.json" | bash "$BOUNDARY" "$APPROVED" --decision approve --brief-stdin --non-interactive --host=claude >/dev/null 2>&1; then
+  pass "guided approval delegates the documented brief-stdin wire to the real executor"
 else
-  fail "guided approval delegates to real executor"
+  fail "guided approval delegates the documented brief-stdin wire to the real executor"
 fi
 if [ -f "$APPROVED/.harness/PROJECT_BRIEF.json" ]; then
   pass "guided approval produces executor artifact"
 else
   fail "guided approval produces executor artifact"
+fi
+
+MALFORMED="$TMP/malformed-approval"
+mkdir -p "$MALFORMED"
+printf 'sentinel\n' > "$MALFORMED/sentinel"
+before="$(tree_manifest "$MALFORMED")"
+if bash "$BOUNDARY" "$MALFORMED" --decision approve >/dev/null 2>&1; then
+  fail "approve without a resolved Brief fails closed"
+else
+  pass "approve without a resolved Brief fails closed"
+fi
+after="$(tree_manifest "$MALFORMED")"
+if [ "$before" = "$after" ]; then
+  pass "malformed approval leaves full target tree byte-identical"
+else
+  fail "malformed approval leaves full target tree byte-identical"
 fi
 
 echo "Results: $PASS passed, $FAIL failed"

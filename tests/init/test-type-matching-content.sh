@@ -157,14 +157,53 @@ if grep -Eq '^T*TRACE\|' "$EXEC_TRACE"; then
 else
   fail "executor records every Bash command through xtrace"
 fi
-# Reduce every traced shell command to its executable basename. This catches
-# absolute paths and Windows .cmd/.exe spellings without confusing an `echo`
-# argument that merely names a project tool.
+# Reduce every traced shell command to executable basenames. Assignment
+# prefixes are skipped; execution wrappers are recorded and scanning continues
+# to their payload. This catches `FOO=1 /abs/npm`, `env npm`, `command npm`, and
+# Windows .cmd/.exe spellings without treating ordinary arguments as commands.
 TRACE_HEADS="$TMP/trace-heads.log"
-sed -n 's/^T*TRACE|[^|]*|//p' "$EXEC_TRACE" \
-  | awk '{h=$1; if (h ~ /^[A-Za-z_][A-Za-z0-9_]*=/) next; gsub(/^.*[\\/]/,"",h); sub(/\.exe$/,"",h); print tolower(h)}' \
-  > "$TRACE_HEADS"
+extract_trace_heads() {
+  sed -n 's/^T*TRACE|[^|]*|//p' "$1" \
+    | awk '
+      {
+        wrapped = 0
+        for (i = 1; i <= NF; i++) {
+          token = $i
+          if (token ~ /^[A-Za-z_][A-Za-z0-9_]*=/) continue
+          base = token
+          gsub(/^.*[\\/]/, "", base)
+          sub(/\.exe$/, "", base)
+          base = tolower(base)
+          if (base == "env" || base == "command" || base == "exec" || base == "builtin" || base == "nohup") {
+            print base
+            wrapped = 1
+            continue
+          }
+          if (wrapped && token ~ /^-/) continue
+          print base
+          break
+        }
+      }
+    '
+}
+extract_trace_heads "$EXEC_TRACE" > "$TRACE_HEADS"
 PROHIBITED_HEADS='^(npm(\.cmd)?|npx(\.cmd)?|tsc|pip3?|pytest|python3?|cargo|rustc|go|make|shellcheck|curl|wget|ruby|bundle|gradle(w)?|mvn|dotnet)$'
+
+# Parser regressions must fail independently of the product path: prove all
+# wrapper/assignment/absolute forms reduce to a prohibited executable basename.
+SYNTHETIC_TRACE="$TMP/synthetic-trace.log"
+cat > "$SYNTHETIC_TRACE" <<'EOF'
+TRACE|fixture:1|FOO=1 /opt/tools/npm --version
+TRACE|fixture:2|env BAR=2 npm test
+TRACE|fixture:3|command C:\tools\npm.cmd run check
+EOF
+SYNTHETIC_HEADS="$TMP/synthetic-heads.log"
+extract_trace_heads "$SYNTHETIC_TRACE" > "$SYNTHETIC_HEADS"
+if [ "$(grep -Eic "$PROHIBITED_HEADS" "$SYNTHETIC_HEADS")" -eq 3 ]; then
+  pass "xtrace parser catches assignment, wrapper, and absolute project-tool forms"
+else
+  fail "xtrace parser catches assignment, wrapper, and absolute project-tool forms" "$(tr '\n' ' ' < "$SYNTHETIC_HEADS")"
+fi
 if grep -Ei "$PROHIBITED_HEADS" "$TRACE_HEADS" >/dev/null; then
   fail "xtrace contains no project-tool execution" "$(grep -Ei "$PROHIBITED_HEADS" "$TRACE_HEADS" | head -3)"
 else

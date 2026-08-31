@@ -59,6 +59,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # AC-16 compares core/lib against the frozen Phase-1 base commit.
+          fetch-depth: 0
 
       - name: Isolate test HOME
         run: |

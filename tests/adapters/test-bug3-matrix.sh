@@ -63,6 +63,12 @@ safe_mktemp() {
   printf '%s' "$_dir"
 }
 
+# ISO-2: every end-to-end installer call below inherits a disposable HOME.
+INSTALL_TEST_HOME="$(mktemp -d)" || exit 1
+[ -n "$INSTALL_TEST_HOME" ] && [ -d "$INSTALL_TEST_HOME" ] || exit 1
+add_cleanup "$INSTALL_TEST_HOME"
+export HOME="$INSTALL_TEST_HOME"
+
 # Detect platform
 IS_WINDOWS=0
 case "$(uname -s 2>/dev/null || echo unknown)" in

@@ -32,6 +32,44 @@ case "$DECISION" in
       echo "error: guided init executor is unavailable" >&2
       exit 2
     }
+    # Guided approval must carry exactly one resolved Brief. Never fall through
+    # to the executor's intentionally preserved legacy placeholder mode.
+    brief_inputs=0
+    expect_brief_path=false
+    for arg in "$@"; do
+      if [ "$expect_brief_path" = true ]; then
+        [ -n "$arg" ] || {
+          echo "error: --brief requires a non-empty path" >&2
+          exit 2
+        }
+        expect_brief_path=false
+        continue
+      fi
+      case "$arg" in
+        --brief)
+          brief_inputs=$((brief_inputs + 1))
+          expect_brief_path=true
+          ;;
+        --brief=*)
+          [ -n "${arg#--brief=}" ] || {
+            echo "error: --brief requires a non-empty path" >&2
+            exit 2
+          }
+          brief_inputs=$((brief_inputs + 1))
+          ;;
+        --brief-stdin)
+          brief_inputs=$((brief_inputs + 1))
+          ;;
+      esac
+    done
+    [ "$expect_brief_path" = false ] || {
+      echo "error: --brief requires a path" >&2
+      exit 2
+    }
+    [ "$brief_inputs" -eq 1 ] || {
+      echo "error: approve requires exactly one resolved Brief (--brief or --brief-stdin)" >&2
+      exit 2
+    }
     exec bash "$EXECUTOR" "$TARGET" "$@"
     ;;
   reject|cancel)

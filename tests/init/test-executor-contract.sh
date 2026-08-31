@@ -68,6 +68,47 @@ else
   bad "brief-driven fresh init" "executor exited non-zero"
 fi
 
+# AC-4: default mode is exactly the complete minimal manifest (#1-#11).
+for file in \
+  .harness/PROJECT_BRIEF.json \
+  .harness/PROJECT_BRIEF.md \
+  .harness/.template-snapshot.json \
+  .harness/config.json \
+  .gitignore \
+  feature_list.json \
+  init.sh \
+  AGENTS.md \
+  CLAUDE.md \
+  claude-progress.md; do
+  check "minimal manifest file exists: $file" test -f "$T1/$file"
+done
+check "minimal manifest logs/runs is a directory" test -d "$T1/.harness/logs/runs"
+check "minimal gitignore contains logs entry" grep -Fxq '.harness/logs/' "$T1/.gitignore"
+check "minimal gitignore contains registry lock entry" grep -Fxq '.harness/.registry.lock/' "$T1/.gitignore"
+check "minimal feature registry starts at revision 1" test "$(jq -r '.revision' "$T1/feature_list.json")" = 1
+check "minimal init.sh is executable" test -x "$T1/init.sh"
+check "minimal Brief persists all categories and advisory marker" jq -e '
+  .schema_version == 1 and .advisory == true
+  and (.goal | type == "string" and test("[^[:space:]]"))
+  and (.success_criteria | type == "array" and length > 0 and all(.[]; type == "string" and test("[^[:space:]]")))
+  and has("cadence") and has("deadline")
+  and has("stack") and has("test_framework")
+  and has("secrets_handling") and has("external_network") and has("prohibitions")
+  and (.initial_project_state | type == "object")
+  and (.operation_preferences | type == "object")
+  and (.defaults_applied | type == "array")
+  and (.conflicts_resolved | type == "array")
+' "$T1/.harness/PROJECT_BRIEF.json"
+check "minimal Claude host excludes Codex progress" test ! -e "$T1/codex-progress.md"
+check "minimal omits session handoff" test ! -e "$T1/session-handoff.md"
+check "minimal omits clean-state checklist" test ! -e "$T1/clean-state-checklist.md"
+check "minimal omits checklist.sh" test ! -e "$T1/checklist.sh"
+minimal_json_rev="$(jq -r '.captured_from_git_rev' "$T1/.harness/PROJECT_BRIEF.json")"
+minimal_md_rev="$(sed -n 's/^<!-- git rev \([0-9a-f]\{40\}\) -->$/\1/p' "$T1/.harness/PROJECT_BRIEF.md")"
+minimal_snap_rev="$(jq -r '.captured_from_git_rev' "$T1/.harness/.template-snapshot.json")"
+check "minimal Brief JSON and MD revisions agree" test "$minimal_json_rev" = "$minimal_md_rev"
+check "minimal Brief and snapshot revisions agree" test "$minimal_json_rev" = "$minimal_snap_rev"
+
 # 2b. Same Brief is deterministic; host changes only the progress filename.
 TA="$TMP/deterministic-a"; TB="$TMP/deterministic-b"; TC="$TMP/host-codex"
 mkdir -p "$TA" "$TB" "$TC"
@@ -101,6 +142,9 @@ for target in "$TA" "$TC"; do
   check "$label manifest logs/runs is a directory" test -d "$target/.harness/logs/runs"
   check "$label gitignore contains logs entry" grep -Fxq '.harness/logs/' "$target/.gitignore"
   check "$label gitignore contains registry lock entry" grep -Fxq '.harness/.registry.lock/' "$target/.gitignore"
+  check "$label feature registry starts at revision 1" test "$(jq -r '.revision' "$target/feature_list.json")" = 1
+  check "$label init.sh is executable" test -x "$target/init.sh"
+  check "$label checklist.sh is executable" test -x "$target/checklist.sh"
   check "$label Brief persists all categories and advisory marker" jq -e '
     .schema_version == 1 and .advisory == true
     and (.goal | type == "string" and test("[^[:space:]]"))

@@ -50,8 +50,8 @@ while IFS= read -r test_file; do
   literal_call=false
   assigned_call=false
   grep -Eq '^[[:space:]]*(if[[:space:]]+)?bash[[:space:]].*(^|/)install\.sh(["[:space:]]|$)' "$test_file" && literal_call=true
-  if grep -Eq '^[A-Z_]*INSTALL=".*install\.sh"' "$test_file" \
-     && grep -Eq 'bash[[:space:]]+"\$[A-Z_]*INSTALL"' "$test_file"; then
+  if grep -Eq '^[A-Z0-9_]*INSTALL(ER)?=".*install\.sh"' "$test_file" \
+     && grep -Eq 'bash[[:space:]]+"\$[A-Z0-9_]*INSTALL(ER)?"' "$test_file"; then
     assigned_call=true
   fi
   if [ "$literal_call" = true ] || [ "$assigned_call" = true ]; then

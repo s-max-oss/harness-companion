@@ -459,7 +459,13 @@ _lr_mkdir_acquire() {
     return 3
   }
 
-  while [ "$SECONDS" -lt "$deadline" ]; do
+  # Metadata preparation can consume the entire timeout on process-starved
+  # MSYS hosts. A fresh lock must still receive one atomic publish attempt;
+  # otherwise acquire_lock can report contention without ever touching the
+  # shared path. Subsequent retries remain bounded by the original deadline.
+  local first_attempt=1
+  while [ "$first_attempt" -eq 1 ] || [ "$SECONDS" -lt "$deadline" ]; do
+    first_attempt=0
     # Never follow a caller-controlled symlink at the shared lock path.
     if [ -L "$lock_dir" ] || { [ -e "$lock_dir" ] && [ ! -d "$lock_dir" ]; }; then
       rm -rf "$candidate" 2>/dev/null || true

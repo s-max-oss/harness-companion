@@ -114,6 +114,24 @@ if [ -n "${TOK1:-}" ]; then
   fi
 fi
 
+# Slow platform metadata must not consume the whole timeout before the first
+# atomic publish attempt. This deterministically models process-starved MSYS.
+T1B="$TMPROOT/t1b"
+mkdir -p "$T1B"
+rm -rf "$T1B/lock"
+ORIGINAL_PROCESS_START_DEF="$(declare -f _lr_process_start_time)"
+_lr_process_start_time() { sleep 2; return 1; }
+LOCK_REGISTRY_TOKEN=""
+T1B_RC=0
+acquire_lock "$T1B/lock" 1 >/dev/null 2>&1 || T1B_RC=$?
+eval "$ORIGINAL_PROCESS_START_DEF"
+if [ "$T1B_RC" = "0" ] && [ -f "$T1B/lock/.claim" ]; then
+  assert_pass "T1b: slow metadata still permits first fresh-lock publish attempt"
+  release_lock "$T1B/lock" "$LOCK_REGISTRY_TOKEN" >/dev/null 2>&1 || true
+else
+  assert_fail "T1b: slow metadata fresh-lock acquisition" "rc=$T1B_RC claim=$([ -f "$T1B/lock/.claim" ] && echo yes || echo no)"
+fi
+
 # ============================================================================
 # T2: owner_token_no_release
 # ============================================================================
@@ -148,6 +166,8 @@ if [ -n "${TOK_A:-}" ]; then
   else
     assert_fail "T2: owner release" "exit=$?"
   fi
+else
+  assert_fail "T2: owner acquires fresh lock" "acquire_lock returned empty"
 fi
 
 # ============================================================================
@@ -391,8 +411,10 @@ CFG
 P1=$!
 ( cd "$T11" && bash "$ROOT_DIR/core/harness-verify.sh" "p2" --write ) > "$T11/p2.log" 2>&1 &
 P2=$!
-wait "$P1" 2>/dev/null || true
-wait "$P2" 2>/dev/null || true
+P1_RC=0
+P2_RC=0
+wait "$P1" 2>/dev/null || P1_RC=$?
+wait "$P2" 2>/dev/null || P2_RC=$?
 
 rev_after="$(jq -r '.revision' "$T11/feature_list.json" 2>/dev/null)"
 n_assocs="$(jq -r '[.features[] | .evidence_associations | length] | add' "$T11/feature_list.json" 2>/dev/null)"
@@ -404,7 +426,10 @@ lock_remaining="no"
 if [ "$rev_after" = "52" ] && [ "$n_assocs" = "2" ] && [ "$p1_n" = "1" ] && [ "$p2_n" = "1" ] && [ "$lock_remaining" = "no" ]; then
   assert_pass "T11: revision 50→52, both p1+p2 associations preserved, lock_dir cleaned"
 else
-  assert_fail "T11: parallel --write serialization" "rev=$rev_after n=$n_assocs p1=$p1_n p2=$p2_n lock=$lock_remaining"
+  p1_tail="$(tail -20 "$T11/p1.log" 2>/dev/null | tr '\n' '|')"
+  p2_tail="$(tail -20 "$T11/p2.log" 2>/dev/null | tr '\n' '|')"
+  assert_fail "T11: parallel --write serialization" \
+    "rev=$rev_after n=$n_assocs p1=$p1_n p2=$p2_n lock=$lock_remaining writer_rcs=$P1_RC,$P2_RC p1_log=$p1_tail p2_log=$p2_tail"
 fi
 
 # ============================================================================

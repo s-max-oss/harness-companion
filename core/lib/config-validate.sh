@@ -198,13 +198,13 @@ validate_config_schema() {
         return 1
       fi
     fi
-    # Optional: timeout_seconds must be a strict positive integer <= 7200 (the
+    # Optional: timeout_seconds must be a strict positive integer <= 14400 (the
     # schema maximum). Float values like 300.5 are rejected — the cap is an
     # integer-second contract; fractional values would silently round down at
     # the harness-verify boundary and violate the auditable effective timeout.
     if jq -e ".verification.commands[$i] | has(\"timeout_seconds\")" "$config" >/dev/null 2>&1; then
-      if ! jq -e ".verification.commands[$i].timeout_seconds | type == \"number\" and (. % 1 == 0) and . >= 1 and . <= 7200" "$config" >/dev/null 2>&1; then
-        echo "validate_config_schema: command[$i] ('$cmd_id') timeout_seconds must be an integer in [1, 7200]" >&2
+      if ! jq -e ".verification.commands[$i].timeout_seconds | type == \"number\" and (. % 1 == 0) and . >= 1 and . <= 14400" "$config" >/dev/null 2>&1; then
+        echo "validate_config_schema: command[$i] ('$cmd_id') timeout_seconds must be an integer in [1, 14400]" >&2
         return 1
       fi
     fi

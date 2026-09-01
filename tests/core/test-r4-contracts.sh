@@ -522,47 +522,47 @@ else
 fi
 
 # ============================================================================
-# timeout_seconds boundary (schema maximum raised to 7200 by path (b))
+# timeout_seconds boundary (four-hour canonical command budget)
 # ============================================================================
 echo ""
-echo "=== timeout_seconds boundary: 1..7200 accepted, >7200 rejected ==="
+echo "=== timeout_seconds boundary: 1..14400 accepted, >14400 rejected ==="
 
-# 9a: timeout_seconds == 7200 (the new canonical maximum) must be ACCEPTED
-cat > "$NEG/cfg-timeout-7200.json" <<'CFG'
+# 9a: timeout_seconds == 14400 (the canonical maximum) must be ACCEPTED
+cat > "$NEG/cfg-timeout-14400.json" <<'CFG'
 {
   "project_type": "generic",
   "verification": {
     "commands": [
-      {"id":"x","command":["bash","-c","true"],"required_for_passing":true,"timeout_seconds":7200}
+      {"id":"x","command":["bash","-c","true"],"required_for_passing":true,"timeout_seconds":14400}
     ]
   }
 }
 CFG
-if validate_config_schema "$NEG/cfg-timeout-7200.json" 2>/dev/null; then
-  assert_pass "9a: timeout_seconds=7200 accepted (new maximum)"
+if validate_config_schema "$NEG/cfg-timeout-14400.json" 2>/dev/null; then
+  assert_pass "9a: timeout_seconds=14400 accepted (canonical maximum)"
 else
-  assert_fail "9a: timeout_seconds=7200 should be accepted" "validator rejected it"
+  assert_fail "9a: timeout_seconds=14400 should be accepted" "validator rejected it"
 fi
 
-# 9b: timeout_seconds == 7201 (> maximum) must be REJECTED
-cat > "$NEG/cfg-timeout-7201.json" <<'CFG'
+# 9b: timeout_seconds == 14401 (> maximum) must be REJECTED
+cat > "$NEG/cfg-timeout-14401.json" <<'CFG'
 {
   "project_type": "generic",
   "verification": {
     "commands": [
-      {"id":"x","command":["bash","-c","true"],"required_for_passing":true,"timeout_seconds":7201}
+      {"id":"x","command":["bash","-c","true"],"required_for_passing":true,"timeout_seconds":14401}
     ]
   }
 }
 CFG
-if validate_config_schema "$NEG/cfg-timeout-7201.json" 2>/dev/null; then
-  assert_fail "9b: timeout_seconds=7201 rejected" "validator accepted a value above the maximum"
+if validate_config_schema "$NEG/cfg-timeout-14401.json" 2>/dev/null; then
+  assert_fail "9b: timeout_seconds=14401 rejected" "validator accepted a value above the maximum"
 else
-  err="$(validate_config_schema "$NEG/cfg-timeout-7201.json" 2>&1 >/dev/null)"
+  err="$(validate_config_schema "$NEG/cfg-timeout-14401.json" 2>&1 >/dev/null)"
   if printf '%s' "$err" | grep -q "timeout_seconds"; then
-    assert_pass "9b: timeout_seconds=7201 rejected (err mentions timeout_seconds)"
+    assert_pass "9b: timeout_seconds=14401 rejected (err mentions timeout_seconds)"
   else
-    assert_fail "9b: timeout_seconds=7201 rejection message" "got: $err"
+    assert_fail "9b: timeout_seconds=14401 rejection message" "got: $err"
   fi
 fi
 

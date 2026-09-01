@@ -89,8 +89,8 @@ record_result() {
 }
 
 # The core contracts are fixture-isolated, but on Windows/MSYS their process
-# startup cost makes a fully sequential run exceed the auditable 7200-second
-# command ceiling before the release archive can finish. Run only those core
+# startup cost makes a fully sequential run consume too much of the auditable
+# command budget before the release archive can finish. Run only those core
 # contracts two at a time. The lock-registry contract is intentionally serial:
 # its T11 already launches two nested harness-verify writers, and an additional
 # peer suite can exhaust the Windows/MSYS fork budget before either writer gets

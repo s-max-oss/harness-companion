@@ -1,0 +1,42 @@
+{
+  "migration_id": "2026-09-01-four-hour-canonical-budget",
+  "authorized_scope": "ONE-TIME ONLY — raise only the canonical full-suite timeout from 7200 to 14400 seconds; preserve the command, suite inventory, assertions, evidence rules, and frozen history",
+  "reason": "The user explicitly authorized a four-hour budget after the current-HEAD canonical run exhausted 7200 seconds with 34 of 40 suites completed, all 34 at rc=0 and no assertion failures. The six suites that did not start were then run through their formal runner-compatible entry points and all passed; dirty-worktree-manifest took 2087 seconds and release-archive took 1181 seconds. This migration changes elapsed-time capacity only and does not permit partial-run stitching or targeted evidence to replace one successful current-HEAD canonical run.",
+  "applied_by": "Codex with explicit in-session user approval, 2026-09-01",
+  "authorization_parent": "7cbbe44e0e54a189dfd2bcc8e82686f87345d32f",
+  "from_base": "7cbbe44e0e54a189dfd2bcc8e82686f87345d32f",
+  "to_head": "7cbbe44e0e54a189dfd2bcc8e82686f87345d32f",
+  "changes": [
+    {
+      "path": ".harness/config.json",
+      "semantic_change": "Raise verification.commands[0].timeout_seconds from 7200 to 14400. The canonical command remains exactly [\"bash\",\"tests/run-all.sh\"], required_for_passing remains true, and no suite or assertion is removed.",
+      "old_sha256": "8ace63957d822f1a0b530ad3aa83619682cc48155d75c4746286d8f0574a49a6",
+      "old_size": 386,
+      "new_sha256": "682ccdd1908b3674cbcf4da96032e28ab5b50bdb320a1ad3b6d396c2d48684ff",
+      "new_size": 387
+    },
+    {
+      "path": ".harness/.template-snapshot.json",
+      "semantic_change": "Rebind only the recorded .harness/config.json digest to the approved four-hour contract; all other template entries and provenance fields remain byte-for-byte semantically unchanged.",
+      "old_sha256": "973d1efb4f8c5777fd923247876cd7a702f9b4468897c5a7c8141335d2c9597e",
+      "old_size": 1141,
+      "new_sha256": "6f8f9ec1748acf0b2dad44c3c2e69cfe0278dee9d4a2d3667353ffd4f67589d3",
+      "new_size": 1141
+    },
+    {
+      "path": ".harness/PROJECT_BRIEF.json",
+      "semantic_change": "Recompute template_manifest_digest so the advisory Brief remains exactly bound to the updated template snapshot; no user intent or operational authorization changes.",
+      "old_sha256": "81046bebc003cd76ab449a6efc6ba04e10fbdc84af1aa661d8b59be65c53f351",
+      "old_size": 6583,
+      "new_sha256": "aa77fdbc37b5ce8c250118b25c58232e70a09980f5e41caf8999c2268ae34776",
+      "new_size": 6583
+    }
+  ],
+  "dwm_fixture_binding": {
+    "fixture_path": "tests/fixtures/dirty-worktree-manifest.jsonl",
+    "note": "Exactly the three immutable entries above are re-bound to their new hashes and sizes. The fixture is not re-generated; every other line remains unchanged."
+  },
+  "exclusion_clause": "No immutable runtime path other than the three listed above may change under this migration. Historical NDJSON, prior migrations, the canonical command, suite inventory, assertions, runner parallelism, and evidence gates are outside scope and remain unchanged.",
+  "single_application_marker": "applied=true",
+  "acceptance_rule": "A single current-HEAD canonical bash tests/run-all.sh run must complete within 14400 seconds with every discovered suite rc=0. Targeted runs are diagnostic only and cannot be combined into passing evidence."
+}

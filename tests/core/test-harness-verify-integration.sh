@@ -16,6 +16,7 @@
 #  12. --write successful evidence association
 #  13. Association record is written correctly
 #  14. Runtime-manifest registration failures are fatal and propagated
+#  15. Missing GNU timeout fails closed before creating run artifacts
 
 set -uo pipefail
 
@@ -1060,6 +1061,110 @@ create_feature_list "$T18" "feat-register-failure"
 run_verify "feat-register-failure" "$T18"
 assert_exit_code "runtime-manifest registration failure exits 2" "2" "$VERIFY_RC"
 assert_contains "runtime-manifest registration failure says FATAL" "$VERIFY_OUT" "FATAL: failed to register runtime artifacts"
+
+# ============================================================================
+# Test 19: Missing timeout prerequisite fails closed before command/run writes
+# ============================================================================
+echo ""
+echo "========== Test 19: Missing GNU Timeout Fails Closed =========="
+
+T19="$TMPROOT/test19"
+mkdir -p "$T19"
+create_config "$T19" '[
+  {"id":"must-not-run","command":["bash","-c","touch should-not-exist"],"required_for_passing":true,"timeout_seconds":300}
+]'
+create_feature_list "$T19" "feat-timeout-missing"
+
+# Restrict PATH to the only external tools reached before the timeout preflight.
+# Wrapper scripts use absolute paths resolved before PATH is restricted, so the
+# test models complete absence without depending on symlink support.
+T19_BIN="$T19/bin"
+mkdir -p "$T19_BIN"
+for tool in dirname jq; do
+  tool_path="$(builtin type -P "$tool")"
+  printf '#!/bin/bash\nexec %q "$@"\n' "$tool_path" > "$T19_BIN/$tool"
+  chmod +x "$T19_BIN/$tool"
+done
+set +e
+VERIFY_OUT="$(PATH="$T19_BIN" "$VERIFY_SCRIPT" "feat-timeout-missing" "$T19" 2>&1)"
+VERIFY_RC=$?
+set -e
+
+assert_exit_code "missing timeout exits 2" "2" "$VERIFY_RC"
+assert_contains "missing timeout diagnostic is fail-closed" "$VERIFY_OUT" "GNU timeout is required"
+if [ ! -e "$T19/should-not-exist" ] && [ ! -d "$T19/.harness/logs/runs" ]; then
+  echo "PASS: missing timeout starts no command and creates no run artifacts"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: missing timeout must create neither command output nor run artifacts"
+  FAILED=$((FAILED + 1))
+fi
+
+# An executable named timeout is insufficient: Windows timeout.exe, BusyBox,
+# and PATH shims must be rejected unless they identify as GNU coreutils.
+T19_FAKE="$T19/fake-bin"
+mkdir -p "$T19_FAKE"
+cat > "$T19_FAKE/timeout" <<'FAKE_TIMEOUT'
+#!/bin/bash
+if [ "${1:-}" = "--version" ]; then
+  echo 'timeout: Windows-compatible impostor 1.0'
+  exit 0
+fi
+touch "${TIMEOUT_IMPOSTOR_RAN:?}"
+exit 0
+FAKE_TIMEOUT
+chmod +x "$T19_FAKE/timeout"
+cp "$T19_FAKE/timeout" "$T19_FAKE/gtimeout"
+TIMEOUT_IMPOSTOR_RAN="$T19/impostor-ran" PATH="$T19_FAKE:$PATH" run_verify "feat-timeout-missing" "$T19"
+assert_exit_code "non-GNU timeout impostor exits 2" "2" "$VERIFY_RC"
+assert_contains "non-GNU timeout impostor diagnostic" "$VERIFY_OUT" "GNU timeout is required"
+if [ ! -e "$T19/impostor-ran" ]; then
+  echo "PASS: non-GNU timeout impostor is never used to execute a command"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: non-GNU timeout impostor must not execute a verification command"
+  FAILED=$((FAILED + 1))
+fi
+
+# ============================================================================
+# Test 20: TERM-ignoring commands are killed after a finite grace interval
+# ============================================================================
+echo ""
+echo "========== Test 20: Timeout Kill-After Is Hard-Bounded =========="
+
+T20="$TMPROOT/test20"
+mkdir -p "$T20"
+create_config "$T20" '[
+  {"id":"ignore-term","command":["bash","-c","trap : TERM; while :; do sleep 1; done"],"required_for_passing":true,"timeout_seconds":1}
+]'
+create_feature_list "$T20" "feat-hard-timeout"
+GNU_TIMEOUT=""
+for timeout_name in timeout gtimeout; do
+  timeout_candidate="$(builtin type -P "$timeout_name" 2>/dev/null || true)"
+  [ -n "$timeout_candidate" ] || continue
+  timeout_version="$("$timeout_candidate" --version 2>/dev/null)"
+  timeout_version="${timeout_version%%$'\n'*}"
+  case "$timeout_version" in
+    'timeout (GNU coreutils) '*) GNU_TIMEOUT="$timeout_candidate"; break ;;
+  esac
+done
+set +e
+VERIFY_OUT="$("$GNU_TIMEOUT" --kill-after=1s 30s "$VERIFY_SCRIPT" "feat-hard-timeout" "$T20" 2>&1)"
+VERIFY_RC=$?
+set -e
+assert_exit_code "TERM-ignoring command completes as a verification failure" "1" "$VERIFY_RC"
+assert_contains "TERM-ignoring command is reported failed" "$VERIFY_OUT" "FAILED"
+RUN_ID20="$(echo "$VERIFY_OUT" | grep -oE '[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+' | head -1)"
+LOG20="$T20/.harness/logs/runs/${RUN_ID20}.ndjson"
+if [ -n "$RUN_ID20" ] && [ -f "$LOG20" ] \
+   && [ "$(jq -r 'select(.event=="command_completed") | .exit_code' "$LOG20")" = "137" ] \
+   && [ "$(jq -r 'select(.event=="run_failed") | .overall_result' "$LOG20")" = "failed" ]; then
+  echo "PASS: kill-after writes a complete failed run with exit_code 137"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: kill-after must write command_completed(137) and run_failed"
+  FAILED=$((FAILED + 1))
+fi
 
 # ============================================================================
 # Summary

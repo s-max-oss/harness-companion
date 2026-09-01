@@ -18,11 +18,32 @@
 #
 # Exit 0 only if every test script exits 0.
 #
-# Requires: bash, find, timeout (falls back to plain invocation when absent).
+# Requires: bash, find, GNU timeout. Missing timeout fails closed before tests.
 
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+resolve_gnu_timeout() {
+  local name candidate version
+  for name in timeout gtimeout; do
+    candidate="$(builtin type -P "$name" 2>/dev/null || true)"
+    [ -n "$candidate" ] || continue
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    version="$("$candidate" --version 2>/dev/null)"
+    version="${version%%$'\n'*}"
+    case "$version" in
+      'timeout (GNU coreutils) '*) printf '%s\n' "$candidate"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+TIMEOUT_BIN="$(resolve_gnu_timeout)"
+if [ -z "$TIMEOUT_BIN" ]; then
+  echo "ERROR: GNU timeout is required; refusing to run suites without bounded execution." >&2
+  exit 2
+fi
 
 # AC-12 / ISO-4: the entire suite runs under a disposable HOME containing a
 # simulated installed-skill sentinel. This prevents a test from reaching a
@@ -36,10 +57,6 @@ mkdir -p "$(dirname "$SUITE_SENTINEL")" || exit 1
 printf 'full-suite-isolation-sentinel\n' > "$SUITE_SENTINEL"
 SUITE_SENTINEL_SHA="$(sha256sum "$SUITE_SENTINEL" | awk '{print $1}')"
 
-# timeout available? (coreutils; absent on some minimal shells)
-HAS_TIMEOUT=1
-command -v timeout >/dev/null 2>&1 || HAS_TIMEOUT=0
-
 run_test() {
   local rel="$1"
   local log rc res
@@ -47,22 +64,12 @@ run_test() {
   if [ "$rel" = "tests/release/test-version-sync.sh" ]; then
     # P0-7: shared install + test method — byte-for-byte the same sequence CI
     # Phase 5d runs via scripts/version-sync-gate.sh.
-    if [ "$HAS_TIMEOUT" = "1" ]; then
-      timeout -k 60 3000 bash "$ROOT/scripts/version-sync-gate.sh" "$ROOT" 2>&1 | tee "$log" | tail -3
-      rc=${PIPESTATUS[0]}
-    else
-      bash "$ROOT/scripts/version-sync-gate.sh" "$ROOT" 2>&1 | tee "$log" | tail -3
-      rc=${PIPESTATUS[0]}
-    fi
+    "$TIMEOUT_BIN" --kill-after=60s 3000s bash "$ROOT/scripts/version-sync-gate.sh" "$ROOT" 2>&1 | tee "$log" | tail -3
+    rc=${PIPESTATUS[0]}
   else
     # stdin from /dev/null so a SessionStart hook reading stdin can never block.
-    if [ "$HAS_TIMEOUT" = "1" ]; then
-      timeout -k 60 3000 bash "$ROOT/$rel" < /dev/null 2>&1 | tee "$log" | tail -3
-      rc=${PIPESTATUS[0]}
-    else
-      bash "$ROOT/$rel" < /dev/null 2>&1 | tee "$log" | tail -3
-      rc=${PIPESTATUS[0]}
-    fi
+    "$TIMEOUT_BIN" --kill-after=60s 3000s bash "$ROOT/$rel" < /dev/null 2>&1 | tee "$log" | tail -3
+    rc=${PIPESTATUS[0]}
   fi
   res="$(grep -E 'Results:|passed,' "$log" | tail -1)"
   echo "  [RC=$rc]"

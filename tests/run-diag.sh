@@ -13,10 +13,29 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUTDIR="${1:-/tmp/fullrun-$(date +%H%M%S)}"
-mkdir -p "$OUTDIR"
 
-HAS_TIMEOUT=1
-command -v timeout >/dev/null 2>&1 || HAS_TIMEOUT=0
+resolve_gnu_timeout() {
+  local name candidate version
+  for name in timeout gtimeout; do
+    candidate="$(builtin type -P "$name" 2>/dev/null || true)"
+    [ -n "$candidate" ] || continue
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    version="$("$candidate" --version 2>/dev/null)"
+    version="${version%%$'\n'*}"
+    case "$version" in
+      'timeout (GNU coreutils) '*) printf '%s\n' "$candidate"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+TIMEOUT_BIN="$(resolve_gnu_timeout)"
+if [ -z "$TIMEOUT_BIN" ]; then
+  echo "ERROR: GNU timeout is required; refusing to run diagnostic suites without bounded execution." >&2
+  exit 2
+fi
+
+mkdir -p "$OUTDIR"
 
 run_test() {
   local rel="$1" idx="$2"
@@ -24,21 +43,11 @@ run_test() {
   local rc
   echo "========== RUNNING $rel ==========" | tee -a "$OUTDIR/summary.txt"
   if [ "$rel" = "tests/release/test-version-sync.sh" ]; then
-    if [ "$HAS_TIMEOUT" = "1" ]; then
-      timeout -k 60 1500 bash "$ROOT/scripts/version-sync-gate.sh" "$ROOT" < /dev/null > "$log" 2>&1
-      rc=$?
-    else
-      bash "$ROOT/scripts/version-sync-gate.sh" "$ROOT" < /dev/null > "$log" 2>&1
-      rc=$?
-    fi
+    "$TIMEOUT_BIN" --kill-after=60s 1500s bash "$ROOT/scripts/version-sync-gate.sh" "$ROOT" < /dev/null > "$log" 2>&1
+    rc=$?
   else
-    if [ "$HAS_TIMEOUT" = "1" ]; then
-      timeout -k 60 1500 bash "$ROOT/$rel" < /dev/null > "$log" 2>&1
-      rc=$?
-    else
-      bash "$ROOT/$rel" < /dev/null > "$log" 2>&1
-      rc=$?
-    fi
+    "$TIMEOUT_BIN" --kill-after=60s 1500s bash "$ROOT/$rel" < /dev/null > "$log" 2>&1
+    rc=$?
   fi
   local res
   res="$(grep -E 'Results:|passed,|Failed:|FAILED:' "$log" | tail -1)"

@@ -10,7 +10,7 @@
 # Exit codes:
 #   0  all required commands passed
 #   1  at least one required command failed OR no_checks (0 required steps)
-#   2  config not found, or jq missing
+#   2  prerequisite/config failure (including jq or GNU timeout missing)
 #
 # v2 key changes:
 #   - Canonical NDJSON run log (5 event types)
@@ -51,6 +51,21 @@ register_run_or_die() {
     echo "FATAL: failed to register runtime artifacts for run '$RUN_ID'" >&2
     exit 2
   fi
+}
+
+resolve_gnu_timeout() {
+  local name candidate version
+  for name in timeout gtimeout; do
+    candidate="$(builtin type -P "$name" 2>/dev/null || true)"
+    [ -n "$candidate" ] || continue
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    version="$("$candidate" --version 2>/dev/null)"
+    version="${version%%$'\n'*}"
+    case "$version" in
+      'timeout (GNU coreutils) '*) printf '%s\n' "$candidate"; return 0 ;;
+    esac
+  done
+  return 1
 }
 
 FEATURE_ID=""
@@ -117,6 +132,17 @@ fi
 if ! command -v jq >/dev/null 2>&1; then
   echo "Error: jq is required for /harness:verify." >&2
   echo "Install: winget install jqlang.jq (Windows) | brew install jq (macOS) | apt-get install jq (Linux)" >&2
+  exit 2
+fi
+
+# Every verification command is governed by the timeout_seconds value bound
+# into .harness/config.json. Running without the enforcing binary would turn a
+# finite, auditable budget into an unbounded process, so absence is a hard
+# prerequisite failure rather than a compatibility fallback.
+TIMEOUT_BIN="$(resolve_gnu_timeout)"
+if [ -z "$TIMEOUT_BIN" ]; then
+  echo "Error: GNU timeout is required to enforce verification command budgets (fail-closed)." >&2
+  echo "Install GNU coreutils and retry; no verification command was started." >&2
   exit 2
 fi
 
@@ -402,13 +428,8 @@ while IFS= read -r -u 3 cmd_id; do
   echo "[run]   $cmd_id: ${ARGV[*]}"
 
   EXIT_CODE=0
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "${TIMEOUT_SECS}s" "${ARGV[@]}" </dev/null >"$LOG_FILE" 2>&1
-    EXIT_CODE=$?
-  else
-    "${ARGV[@]}" </dev/null >"$LOG_FILE" 2>&1
-    EXIT_CODE=$?
-  fi
+  "$TIMEOUT_BIN" --kill-after=5s "${TIMEOUT_SECS}s" "${ARGV[@]}" </dev/null >"$LOG_FILE" 2>&1
+  EXIT_CODE=$?
 
   END_MS="$(date +%s)000"
   DURATION_MS=$((END_MS - START_MS))

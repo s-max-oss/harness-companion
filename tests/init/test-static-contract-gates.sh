@@ -38,5 +38,50 @@ else
   fail "AC-16 base commit is available for an auditable line-count gate" "$AC16_BASE_SHA"
 fi
 
+# A non-GNU executable at the front of PATH is a regression-safe negative
+# environment: if the prerequisite check disappears, the shim records the
+# unexpected suite invocation and returns immediately rather than recursively
+# starting another full suite.
+TIMEOUT_TEST_ROOT="$(mktemp -d)"
+FAKE_BIN="$TIMEOUT_TEST_ROOT/bin"
+IMPOSTOR_RAN="$TIMEOUT_TEST_ROOT/impostor-ran"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/timeout" <<'FAKE_TIMEOUT'
+#!/bin/bash
+if [ "${1:-}" = "--version" ]; then
+  echo 'timeout: non-GNU test impostor'
+  exit 0
+fi
+touch "${TIMEOUT_IMPOSTOR_RAN:?}"
+exit 99
+FAKE_TIMEOUT
+chmod +x "$FAKE_BIN/timeout"
+cp "$FAKE_BIN/timeout" "$FAKE_BIN/gtimeout"
+
+RUN_ALL_OUT="$(TIMEOUT_IMPOSTOR_RAN="$IMPOSTOR_RAN" PATH="$FAKE_BIN:$PATH" bash "$ROOT/tests/run-all.sh" 2>&1)"
+RUN_ALL_RC=$?
+DIAG_PARENT="$(mktemp -d)"
+DIAG_OUT_DIR="$DIAG_PARENT/out"
+RUN_DIAG_OUT="$(TIMEOUT_IMPOSTOR_RAN="$IMPOSTOR_RAN" PATH="$FAKE_BIN:$PATH" bash "$ROOT/tests/run-diag.sh" "$DIAG_OUT_DIR" 2>&1)"
+RUN_DIAG_RC=$?
+
+if [ "$RUN_ALL_RC" -eq 2 ] && printf '%s' "$RUN_ALL_OUT" | grep -qF 'GNU timeout is required' \
+   && [ ! -e "$IMPOSTOR_RAN" ]; then
+  pass "full-suite runner rejects a non-GNU timeout before suite execution"
+else
+  fail "full-suite runner rejects a non-GNU timeout before suite execution" \
+    "rc=$RUN_ALL_RC output=$RUN_ALL_OUT impostor_ran=$([ -e "$IMPOSTOR_RAN" ] && echo yes || echo no)"
+fi
+
+if [ "$RUN_DIAG_RC" -eq 2 ] && printf '%s' "$RUN_DIAG_OUT" | grep -qF 'GNU timeout is required' \
+   && [ ! -e "$DIAG_OUT_DIR" ] && [ ! -e "$IMPOSTOR_RAN" ]; then
+  pass "diagnostic runner rejects a non-GNU timeout before creating output"
+else
+  fail "diagnostic runner rejects a non-GNU timeout before creating output" \
+    "rc=$RUN_DIAG_RC output=$RUN_DIAG_OUT outdir_exists=$([ -e "$DIAG_OUT_DIR" ] && echo yes || echo no) impostor_ran=$([ -e "$IMPOSTOR_RAN" ] && echo yes || echo no)"
+fi
+rm -rf "$DIAG_PARENT"
+rm -rf "$TIMEOUT_TEST_ROOT"
+
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

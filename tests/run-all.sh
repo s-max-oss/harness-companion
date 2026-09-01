@@ -49,6 +49,10 @@ fi
 # simulated installed-skill sentinel. This prevents a test from reaching a
 # developer's real ~/.claude or ~/.agents tree and proves the simulated install
 # remains untouched across the complete suite.
+# Preserve only the caller's read-only validator discovery root before HOME is
+# isolated. Release tests may inspect an installed validator there, but all
+# installer and test writes remain bound to the disposable HOME below.
+export HARNESS_VALIDATOR_SEARCH_HOME="${HARNESS_VALIDATOR_SEARCH_HOME:-${HOME:-}}"
 SUITE_ISOLATION_ROOT="$(mktemp -d)" || exit 1
 trap 'rm -rf "$SUITE_ISOLATION_ROOT"' EXIT
 export HOME="$SUITE_ISOLATION_ROOT/home"

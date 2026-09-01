@@ -81,7 +81,30 @@ safe_mktemp() {
 
 # Preserve the caller's read-only validator search root before isolating all
 # installer activity. Validator discovery must not be disabled by the sandbox.
-VALIDATOR_SEARCH_HOME="${HOME:-}"
+VALIDATOR_SEARCH_HOME="${HARNESS_VALIDATOR_SEARCH_HOME:-${HOME:-}}"
+# A valid explicit override never traverses the search root. Otherwise, a
+# non-empty root must be canonical and option-safe before find sees it. An
+# empty root remains valid for documented SKIP_OK/headless environments.
+if [ -n "${HARNESS_VALIDATOR:-}" ] \
+   || { [ -n "${CODEX_VALIDATOR_PATH:-}" ] && [ -f "$CODEX_VALIDATOR_PATH" ]; }; then
+  VALIDATOR_SEARCH_HOME=""
+elif [ -n "$VALIDATOR_SEARCH_HOME" ]; then
+  case "$VALIDATOR_SEARCH_HOME" in
+    /*) ;;
+    *)
+      echo "FATAL: validator search root must be an absolute existing directory" >&2
+      exit 1
+      ;;
+  esac
+  if [ ! -d "$VALIDATOR_SEARCH_HOME" ]; then
+    echo "FATAL: validator search root must be an absolute existing directory" >&2
+    exit 1
+  fi
+  VALIDATOR_SEARCH_HOME="$(cd -- "$VALIDATOR_SEARCH_HOME" 2>/dev/null && pwd -P)" || {
+    echo "FATAL: validator search root could not be canonicalized" >&2
+    exit 1
+  }
+fi
 
 # ISO-2: archive install/uninstall round-trips use a disposable home even
 # though project-mode targets are already temporary directories.
@@ -107,16 +130,21 @@ find_validator() {
 
   # 2. Common install locations (cross-platform)
   local cand
-  for cand in \
-    "$VALIDATOR_SEARCH_HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py" \
-    "$VALIDATOR_SEARCH_HOME/.codex/scripts/validate_plugin.py" \
-    "/usr/local/share/codex/scripts/validate_plugin.py"; do
-    [ -f "$cand" ] && { echo "$cand"; return 0; }
-  done
+  if [ -n "$VALIDATOR_SEARCH_HOME" ]; then
+    for cand in \
+      "$VALIDATOR_SEARCH_HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py" \
+      "$VALIDATOR_SEARCH_HOME/.codex/scripts/validate_plugin.py"; do
+      [ -f "$cand" ] && { echo "$cand"; return 0; }
+    done
+  fi
+  cand="/usr/local/share/codex/scripts/validate_plugin.py"
+  [ -f "$cand" ] && { echo "$cand"; return 0; }
 
   # 3. Last resort: find under $HOME (best-effort, may be slow)
-  local found
-  found="$(find "$VALIDATOR_SEARCH_HOME" -maxdepth 6 -name "validate_plugin.py" -path "*plugin-creator*" 2>/dev/null | head -1)"
+  local found=""
+  if [ -n "$VALIDATOR_SEARCH_HOME" ]; then
+    found="$(find "$VALIDATOR_SEARCH_HOME" -maxdepth 6 -name "validate_plugin.py" -path "*plugin-creator*" 2>/dev/null | head -1)"
+  fi
   if [ -n "$found" ] && [ -f "$found" ]; then
     echo "$found"
     return 0
@@ -398,7 +426,7 @@ if [ "$VALIDATOR_STATUS" = "skip-approved" ]; then
   SKIPPED=$((SKIPPED + 1))
 else
   echo "Validator: $VALIDATOR"
-  if PYTHONIOENCODING=utf-8 python3 "$VALIDATOR" "$FULL_ARCHIVE_DIR" 2>&1; then
+  if PYTHONIOENCODING=utf-8 PYTHONDONTWRITEBYTECODE=1 python3 -B "$VALIDATOR" "$FULL_ARCHIVE_DIR" 2>&1; then
     echo "PASS: validate_plugin.py"
     PASSED=$((PASSED + 1))
   else

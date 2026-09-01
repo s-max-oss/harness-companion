@@ -57,9 +57,9 @@
                 "type": "integer",
                 "multipleOf": 1,
                 "minimum": 1,
-                "maximum": 7200,
+                "maximum": 14400,
                 "default": 300,
-                "description": "Per-command timeout in seconds (strict integer, no fractional values). Default 300 (5 minutes). Maximum 7200 (2 hours)."
+                "description": "Per-command timeout in seconds (strict integer, no fractional values). Default 300 (5 minutes). Maximum 14400 (4 hours)."
               },
               "applies_when": {
                 "type": "object",

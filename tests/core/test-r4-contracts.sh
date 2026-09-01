@@ -527,6 +527,13 @@ fi
 echo ""
 echo "=== timeout_seconds boundary: 1..14400 accepted, >14400 rejected ==="
 
+schema_timeout_max="$(jq -r '.properties.verification.properties.commands.items.properties.timeout_seconds.maximum // empty' templates/.harness/config.schema.json 2>/dev/null | tr -d '\r')"
+if [ "$schema_timeout_max" = "14400" ]; then
+  assert_pass "9-schema: published JSON Schema maximum is 14400"
+else
+  assert_fail "9-schema: published JSON Schema maximum is 14400" "got: $schema_timeout_max"
+fi
+
 # 9a: timeout_seconds == 14400 (the canonical maximum) must be ACCEPTED
 cat > "$NEG/cfg-timeout-14400.json" <<'CFG'
 {
@@ -586,6 +593,40 @@ else
   else
     assert_fail "9c: timeout_seconds=0 rejection message" "got: $err"
   fi
+fi
+
+# 9d: fractional timeout must be REJECTED (strict integer contract)
+cat > "$NEG/cfg-timeout-fractional.json" <<'CFG'
+{
+  "project_type": "generic",
+  "verification": {
+    "commands": [
+      {"id":"x","command":["bash","-c","true"],"required_for_passing":true,"timeout_seconds":300.5}
+    ]
+  }
+}
+CFG
+if validate_config_schema "$NEG/cfg-timeout-fractional.json" 2>/dev/null; then
+  assert_fail "9d: timeout_seconds=300.5 rejected" "validator accepted a fractional value"
+else
+  assert_pass "9d: timeout_seconds=300.5 rejected"
+fi
+
+# 9e: negative timeout must be REJECTED (minimum is 1)
+cat > "$NEG/cfg-timeout-negative.json" <<'CFG'
+{
+  "project_type": "generic",
+  "verification": {
+    "commands": [
+      {"id":"x","command":["bash","-c","true"],"required_for_passing":true,"timeout_seconds":-1}
+    ]
+  }
+}
+CFG
+if validate_config_schema "$NEG/cfg-timeout-negative.json" 2>/dev/null; then
+  assert_fail "9e: timeout_seconds=-1 rejected" "validator accepted a negative value"
+else
+  assert_pass "9e: timeout_seconds=-1 rejected"
 fi
 
 # ============================================================================

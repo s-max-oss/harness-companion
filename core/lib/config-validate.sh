@@ -203,7 +203,7 @@ validate_config_schema() {
     # integer-second contract; fractional values would silently round down at
     # the harness-verify boundary and violate the auditable effective timeout.
     if jq -e ".verification.commands[$i] | has(\"timeout_seconds\")" "$config" >/dev/null 2>&1; then
-      if ! jq -e ".verification.commands[$i].timeout_seconds | type == \"number\" and (. % 1 == 0) and . >= 1 and . <= 14400" "$config" >/dev/null 2>&1; then
+      if ! jq -e ".verification.commands[$i].timeout_seconds | type == \"number\" and floor == . and . >= 1 and . <= 14400" "$config" >/dev/null 2>&1; then
         echo "validate_config_schema: command[$i] ('$cmd_id') timeout_seconds must be an integer in [1, 14400]" >&2
         return 1
       fi

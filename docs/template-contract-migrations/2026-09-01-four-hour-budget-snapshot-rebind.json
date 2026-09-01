@@ -1,0 +1,24 @@
+{
+  "authorization_parent": "5f287bc953a8a92a0b4335cc37053a1d44aa3638",
+  "changes": [
+    {
+      "authorized_sha256": "9335a4c201ce7d6acdb14682e91c444ae38f3738d5f368450e0851468a711072",
+      "path": "AGENTS.md",
+      "snapshot_sha256": "6e787f7a6167a18110dfb9bd1462836e36c5cea472da0271dfe915bdbe634d69"
+    },
+    {
+      "authorized_sha256": "f4002d56713b3376be93f08d4007525df28cf8269e704b815ebd1922241082bf",
+      "path": "CLAUDE.md",
+      "snapshot_sha256": "c204933931aa87a9db52ab4da9a06bb50c1453de526cb19bae5b5f142425ace4"
+    },
+    {
+      "authorized_sha256": "9b59de363fdc8dfc6e94ba66186a062d4ca1b41553e1978ed9fd3b4fc2591a1d",
+      "path": "init.sh",
+      "snapshot_sha256": "4e85bfa808dce352d09de2481c1fd7fcfab0b746ea1fe4670d6c7ae7376f9f36"
+    }
+  ],
+  "migration_id": "2026-09-01-four-hour-budget-snapshot-rebind",
+  "reason": "The explicitly approved four-hour self-host verification budget changed the frozen snapshot bytes only by rebinding .harness/config.json. Preserve the already reviewed rc.3 AGENTS.md, CLAUDE.md, and init.sh authorizations against that new snapshot digest without recapturing their historical template entries.",
+  "schema_version": 1,
+  "snapshot_sha256": "6f8f9ec1748acf0b2dad44c3c2e69cfe0278dee9d4a2d3667353ffd4f67589d3"
+}

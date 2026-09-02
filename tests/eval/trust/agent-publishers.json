@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "agents": {
+    "codex": {
+      "publisher_subject": "CN=\"OpenAI OpCo, LLC\", O=\"OpenAI OpCo, LLC\", L=San Francisco, S=California, C=US",
+      "publisher_thumbprints": [
+        "24659C19300FCA361D448709FA3780BD1CBDD133"
+      ],
+      "install_subpath": "AppData/Local/OpenAI/Codex/bin",
+      "executable_names": [
+        "codex",
+        "codex.exe"
+      ],
+      "version_pattern": "^codex-cli [0-9]+\\.[0-9]+\\.[0-9]+([+-][0-9A-Za-z.-]+)?$"
+    }
+  }
+}

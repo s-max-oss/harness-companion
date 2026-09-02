@@ -45,8 +45,9 @@ authority and evidence hash, promotes the result, then signs it in the
 attestation against the checked-in public anchor, so self-reported booleans and
 hashes cannot promote fake output.
 
-Synthetic plumbing accepts `codex` or `claude`. The real release subject is
-currently Codex; the Reviewer may be Codex or Claude. The Reviewer is a fresh,
+Synthetic plumbing accepts `codex` or `claude`. The real release subject and
+Reviewer are currently Codex; another real CLI is refused until it has an
+equivalent pinned publisher/install policy. The Reviewer is a fresh,
 non-persistent session with tools disabled. Every subject turn is also a new
 non-persistent session reconstructed from the checked-in Skill plus recorded
 prior dialog. A result passes only when all objective checks and every semantic

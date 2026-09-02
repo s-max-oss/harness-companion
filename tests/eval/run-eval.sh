@@ -9,8 +9,14 @@ SCHEMA="$SCRIPT_DIR/reviewer-output.schema.json"
 DEFAULT_CANDIDATES="$SCRIPT_DIR/candidates"
 DEFAULT_RESULTS="$SCRIPT_DIR/results"
 ACL_HELPER="$SCRIPT_DIR/windows-isolation-acl.ps1"
+ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
 ATTESTER="$SCRIPT_DIR/attest-result.sh"
+ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
+AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
+WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+TRUSTED_WINDOWS_TIMEOUT="/c/Program Files/Git/usr/bin/timeout.exe"
+TRUSTED_WINDOWS_ENV="/c/Program Files/Git/usr/bin/env.exe"
 
 die() { echo "eval: $*" >&2; exit 2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
@@ -21,7 +27,44 @@ sha() { sha256sum "$1" | awk '{print $1}'; }
 # commands such as Get-Acl fail to autoload. The ACL helper needs only inbox
 # Windows modules, so let powershell.exe reconstruct its native defaults.
 windows_powershell() {
-  env -u PSModulePath powershell.exe "$@"
+  [ -f "$WINDOWS_POWERSHELL" ] && [ ! -L "$WINDOWS_POWERSHELL" ] || return 127
+  [ -f "$TRUSTED_WINDOWS_ENV" ] && [ -x "$TRUSTED_WINDOWS_ENV" ] && [ ! -L "$TRUSTED_WINDOWS_ENV" ] || return 127
+  "$TRUSTED_WINDOWS_ENV" -u PSModulePath "$WINDOWS_POWERSHELL" "$@"
+}
+
+official_agent_identity() {
+  local agent="$1" executable="$2" executable_win identity policy expected_subject expected_thumbprints
+  [ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
+  policy="$(jq -ce --arg agent "$agent" '.agents[$agent]' "$AGENT_PUBLISHERS")" || return 1
+  expected_subject="$(jq -r '.publisher_subject' <<< "$policy")" || return 1
+  expected_thumbprints="$(jq -c '.publisher_thumbprints' <<< "$policy")" || return 1
+  executable_win="$(cygpath -w "$executable")" || return 1
+  identity="$(HARNESS_EVAL_AUTH_PATH="$executable_win" windows_powershell -NoProfile -Command '
+    $sig = Get-AuthenticodeSignature -LiteralPath $env:HARNESS_EVAL_AUTH_PATH
+    $subject = if ($null -ne $sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { "" }
+    $thumbprint = if ($null -ne $sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { "" }
+    [ordered]@{status=[string]$sig.Status;subject=$subject;thumbprint=$thumbprint} | ConvertTo-Json -Compress
+  ' | tr -d '\r')" || return 1
+  jq -e --arg expected_subject "$expected_subject" --argjson expected_thumbprints "$expected_thumbprints" '
+    .status == "Valid"
+    and .subject == $expected_subject
+    and (.thumbprint as $thumbprint | ($expected_thumbprints | index($thumbprint)) != null)
+  ' <<< "$identity" >/dev/null || return 1
+  printf '%s\n' "$identity"
+}
+
+official_agent_path() {
+  local agent="$1" executable="$2" user_home="$3" executable_host home_host install_subpath prefix relative executable_names
+  executable_host="$(host_path "$executable")" || return 1
+  home_host="$(host_path "$user_home")" || return 1
+  install_subpath="$(jq -r --arg agent "$agent" '.agents[$agent].install_subpath // empty | ascii_downcase' "$AGENT_PUBLISHERS")" || return 1
+  executable_names="$(jq -c --arg agent "$agent" '.agents[$agent].executable_names // [] | map(ascii_downcase)' "$AGENT_PUBLISHERS")" || return 1
+  [ -n "$install_subpath" ] && [ "$executable_names" != '[]' ] || return 1
+  prefix="$home_host/$install_subpath/"
+  case "$executable_host" in "$prefix"*) ;; *) return 1 ;; esac
+  relative="${executable_host#"$prefix"}"
+  [[ "$relative" =~ ^[0-9a-f]{16}/([^/]+)$ ]] || return 1
+  jq -e --arg name "${BASH_REMATCH[1]}" 'index($name) != null' <<< "$executable_names" >/dev/null
 }
 
 resolve_gnu_timeout() {
@@ -40,6 +83,15 @@ canonical_executable() {
   p="$(command -v "$1")" || return 1
   d="$(cd "$(dirname "$p")" && pwd -P)" || return 1
   printf '%s/%s\n' "$d" "$(basename "$p")"
+}
+
+host_path() {
+  local path="$1"
+  if command -v cygpath >/dev/null 2>&1; then path="$(cygpath -aw "$path")" || return 1; fi
+  python - "$path" <<'PY'
+import os, sys
+print(os.path.normcase(os.path.realpath(sys.argv[1])).replace(os.sep, "/"))
+PY
 }
 
 tree_manifest() {
@@ -135,27 +187,50 @@ SYNTHETIC="${HARNESS_EVAL_SYNTHETIC:-0}"
 case "$SYNTHETIC" in 0|1) ;; *) die "HARNESS_EVAL_SYNTHETIC must be 0 or 1" ;; esac
 mkdir -p "$OUTPUT_DIR"
 output_abs="$(cd "$OUTPUT_DIR" && pwd -P)"
-if [ "$SYNTHETIC" = 1 ] && { [ "$output_abs" = "$(cd "$DEFAULT_CANDIDATES" && pwd -P)" ] || [ "$output_abs" = "$(cd "$DEFAULT_RESULTS" && pwd -P)" ]; }; then
+output_host="$(host_path "$output_abs")"
+default_candidates_host="$(host_path "$(cd "$DEFAULT_CANDIDATES" && pwd -P)")"
+default_results_host="$(host_path "$(cd "$DEFAULT_RESULTS" && pwd -P)")"
+if [ "$SYNTHETIC" = 1 ] && { [ "$output_host" = "$default_candidates_host" ] || [ "$output_host" = "$default_results_host" ]; }; then
   die "synthetic runs cannot write to canonical eval directories"
 fi
-if [ "$SYNTHETIC" = 0 ] && [ "$output_abs" = "$(cd "$DEFAULT_RESULTS" && pwd -P)" ]; then
+if [ "$SYNTHETIC" = 0 ] && [ "$output_host" = "$default_results_host" ]; then
   die "run-eval writes unsigned candidates only; attest them separately"
 fi
 
-for cmd in jq sha256sum find cp mktemp git python tar env "$AGENT" "$REVIEWER"; do need "$cmd"; done
-[ -f "$PUBLISHER" ] && [ ! -L "$PUBLISHER" ] || die "no-replace publisher missing or unsafe"
-[ -f "$ATTESTER" ] && [ ! -L "$ATTESTER" ] || die "post-eval attester missing or unsafe"
+for cmd in jq sha256sum find cp mktemp git python tar "$AGENT" "$REVIEWER"; do need "$cmd"; done
+for path in "$PUBLISHER" "$ATTESTER" "$ACL_RECOVERY" "$AGENT_PUBLISHERS"; do
+  [ -f "$path" ] && [ ! -L "$path" ] || die "eval authority missing or unsafe: $path"
+done
+jq -e '.schema_version == 1 and (.agents.codex.publisher_thumbprints | length > 0)' "$AGENT_PUBLISHERS" >/dev/null \
+  || die "Agent publisher trust policy is invalid"
+real_user_home=""
+real_user_home_win=""
 if [ "$SYNTHETIC" = 0 ]; then
   [ -z "${HARNESS_EVAL_SIGNING_KEY:-}" ] || die "signing material must not be present during Agent evaluation"
   [ "$AGENT" = codex ] || die "release-eligible real eval requires Codex native sandbox isolation; Claude needs an external OS/container boundary"
   case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) die "release-eligible real eval currently requires the native Windows elevated sandbox" ;; esac
   need powershell.exe
+  need cygpath
+  need iconv
+  need base64
+  [ -f "$TRUSTED_WINDOWS_ENV" ] && [ -x "$TRUSTED_WINDOWS_ENV" ] && [ ! -L "$TRUSTED_WINDOWS_ENV" ] || die "trusted Git-for-Windows env is missing or unsafe"
+  case "$("$TRUSTED_WINDOWS_ENV" --version 2>/dev/null | head -1)" in 'env (GNU coreutils) '*) ;; *) die "trusted env identity is invalid" ;; esac
   [ -f "$ACL_HELPER" ] && [ ! -L "$ACL_HELPER" ] || die "Windows isolation helper missing or unsafe"
+  [ -f "$ISOLATION_PROBE" ] && [ ! -L "$ISOLATION_PROBE" ] || die "Windows isolation probe missing or unsafe"
+  real_user_home_win="$(windows_powershell -NoProfile -Command '[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)' | tr -d '\r')"
+  [ -n "$real_user_home_win" ] || die "could not resolve the token-backed Windows user profile"
+  real_user_home="$(cygpath -u "$real_user_home_win")"
 fi
 TURN_TIMEOUT_SECONDS="${HARNESS_EVAL_TURN_TIMEOUT_SECONDS:-1800}"
 case "$TURN_TIMEOUT_SECONDS" in ''|*[!0-9]*) die "HARNESS_EVAL_TURN_TIMEOUT_SECONDS must be a positive integer" ;; esac
 [ "$TURN_TIMEOUT_SECONDS" -gt 0 ] || die "HARNESS_EVAL_TURN_TIMEOUT_SECONDS must be greater than zero"
-TIMEOUT_BIN="$(resolve_gnu_timeout)" || die "GNU timeout is required for bounded Agent turns"
+if [ "$SYNTHETIC" = 0 ]; then
+  TIMEOUT_BIN="$TRUSTED_WINDOWS_TIMEOUT"
+  [ -f "$TIMEOUT_BIN" ] && [ -x "$TIMEOUT_BIN" ] && [ ! -L "$TIMEOUT_BIN" ] || die "trusted Git-for-Windows timeout is missing or unsafe"
+  case "$("$TIMEOUT_BIN" --version 2>/dev/null | head -1)" in 'timeout (GNU coreutils) '*) ;; *) die "trusted timeout identity is invalid" ;; esac
+else
+  TIMEOUT_BIN="$(resolve_gnu_timeout)" || die "GNU timeout is required for bounded Agent turns"
+fi
 
 [ -f "$CASE" ] && [ ! -L "$CASE" ] || die "case missing or unsafe: $CASE"
 CASE="$(cd "$(dirname "$CASE")" && pwd -P)/$(basename "$CASE")"
@@ -175,7 +250,9 @@ case "$fixture_mode" in copy|git_archive) ;; *) die "unsupported fixture_mode: $
 fixture="$SCRIPT_DIR/$fixture_rel"
 [ -d "$fixture" ] || die "fixture not found: $fixture_rel"
 fixture_abs="$(cd "$fixture" && pwd -P)"
-case "$fixture_abs/" in "$SCRIPT_DIR"/*) ;; *) die "fixture escapes tests/eval" ;; esac
+fixture_host="$(host_path "$fixture_abs")"
+script_dir_host="$(host_path "$SCRIPT_DIR")"
+case "$fixture_host/" in "$script_dir_host"/*) ;; *) die "fixture escapes tests/eval" ;; esac
 
 if [ "$SYNTHETIC" = 0 ]; then
   work_root="${HARNESS_EVAL_WORK_ROOT:-/c/Users/Public/harness-companion-eval}"
@@ -188,17 +265,36 @@ fi
 controller="$tmp/controller"
 isolation_active=false
 acl_state="$ROOT/.harness/eval-acl-state.json"
+acl_lock="$ROOT/.harness/eval-acl.lock"
+acl_lock_owner="$acl_lock/owner.pid"
+acl_lock_owned=false
+restore_failed=false
 cleanup() {
   if [ "$isolation_active" = true ]; then
-    windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
+    if windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
       -WorkspaceRoot "$(cd "$ROOT/.." && pwd -P)" -ControllerRoot "$controller" \
-      -UserHome "${USERPROFILE:-$HOME}" -StateFile "$acl_state" >/dev/null 2>&1 || true
-    isolation_active=false
+      -UserHome "$real_user_home" -StateFile "$acl_state" >/dev/null 2>&1; then
+      isolation_active=false
+    else
+      restore_failed=true
+      echo "eval: ACL restoration failed; recovery state retained; run tests/eval/recover-windows-isolation.sh after this process exits" >&2
+    fi
   fi
   if [ "${agent_lock_owned:-false}" = true ]; then rmdir "$agent_lock" >/dev/null 2>&1 || true; fi
-  if [ -n "${tmp:-}" ] && [ -d "$tmp" ]; then rm -rf -- "$tmp"; fi
+  if [ "$acl_lock_owned" = true ]; then
+    rm -f -- "$acl_lock_owner" >/dev/null 2>&1 || true
+    rmdir "$acl_lock" >/dev/null 2>&1 || true
+  fi
+  if [ "$restore_failed" = false ]; then
+    if [ -n "${tmp:-}" ] && [ -d "$tmp" ]; then rm -rf -- "$tmp"; fi
+  fi
 }
 trap cleanup EXIT
+if [ "$SYNTHETIC" = 0 ]; then
+  if ! mkdir "$acl_lock" 2>/dev/null; then die "another real eval owns the global ACL transition lock: $acl_lock"; fi
+  acl_lock_owned=true
+  printf '%s\n' "$$" > "$acl_lock_owner"
+fi
 agent_lock="$OUTPUT_DIR/.eval-agent.lock"
 if ! mkdir "$agent_lock" 2>/dev/null; then die "another eval Agent run is active or stale: $agent_lock"; fi
 agent_lock_owned=true
@@ -254,8 +350,48 @@ fi
 
 subject_executable="$(canonical_executable "$AGENT")" || die "cannot resolve subject executable"
 reviewer_executable="$(canonical_executable "$REVIEWER")" || die "cannot resolve reviewer executable"
-subject_version="$("$AGENT" --version 2>&1 | head -1)"
-reviewer_version="$("$REVIEWER" --version 2>&1 | head -1)"
+subject_version="$("$subject_executable" --version 2>&1 | head -1)"
+reviewer_version="$("$reviewer_executable" --version 2>&1 | head -1)"
+subject_executable_sha="$(sha "$subject_executable")"
+reviewer_executable_sha="$(sha "$reviewer_executable")"
+subject_authenticode='null'
+reviewer_authenticode='null'
+subject_launch=("$subject_executable")
+reviewer_launch=("$reviewer_executable")
+if [ "$SYNTHETIC" = 0 ]; then
+  official_agent_path "$AGENT" "$subject_executable" "$real_user_home" || die "subject executable is outside the trusted $AGENT install location"
+  official_agent_path "$REVIEWER" "$reviewer_executable" "$real_user_home" || die "reviewer executable is outside the trusted $REVIEWER install location"
+  subject_authenticode="$(official_agent_identity "$AGENT" "$subject_executable")" || die "subject executable is not an authentic signed $AGENT binary"
+  reviewer_authenticode="$(official_agent_identity "$REVIEWER" "$reviewer_executable")" || die "reviewer executable is not an authentic signed $REVIEWER binary"
+  subject_version_pattern="$(jq -r --arg agent "$AGENT" '.agents[$agent].version_pattern // empty' "$AGENT_PUBLISHERS")"
+  reviewer_version_pattern="$(jq -r --arg agent "$REVIEWER" '.agents[$agent].version_pattern // empty' "$AGENT_PUBLISHERS")"
+  jq -en --arg version "$subject_version" --arg pattern "$subject_version_pattern" '$version | test($pattern)' >/dev/null \
+    || die "subject executable version identity is invalid"
+  jq -en --arg version "$reviewer_version" --arg pattern "$reviewer_version_pattern" '$version | test($pattern)' >/dev/null \
+    || die "reviewer executable version identity is invalid"
+  sandbox_doctor="$("$subject_executable" doctor --json 2>/dev/null)" || die "could not inspect Codex Windows sandbox readiness"
+  jq -e '
+    .checks["sandbox.helpers"].status == "ok"
+    and .checks["sandbox.helpers"].details["sandbox backend"] == "elevated"
+    and .checks["sandbox.helpers"].details["sandbox provisioning"] == "complete"
+  ' <<< "$sandbox_doctor" >/dev/null || die "Codex elevated Windows sandbox is not provisioned and ready"
+
+  system_root_win="$(windows_powershell -NoProfile -Command '[Environment]::GetEnvironmentVariable("SystemRoot", "Machine")' | tr -d '\r')"
+  program_files_win="$(windows_powershell -NoProfile -Command '[Environment]::GetEnvironmentVariable("ProgramFiles", "Machine")' | tr -d '\r')"
+  [ -n "$system_root_win" ] && [ -n "$program_files_win" ] || die "could not resolve system tool roots"
+  system_root_posix="$(cygpath -u "$system_root_win")"
+  program_files_posix="$(cygpath -u "$program_files_win")"
+  sandbox_path="$system_root_posix/System32/WindowsPowerShell/v1.0:$system_root_posix/System32:$system_root_posix:$program_files_posix/Git/bin:$program_files_posix/Git/usr/bin"
+  for tool_dir in "$system_root_posix/System32/WindowsPowerShell/v1.0" "$system_root_posix/System32" "$program_files_posix/Git/bin" "$program_files_posix/Git/usr/bin"; do
+    [ -d "$tool_dir" ] && [ ! -L "$tool_dir" ] || die "system tool directory missing or unsafe: $tool_dir"
+  done
+  user_home_posix="$real_user_home"
+  case ":${sandbox_path,,}:" in
+    *":${user_home_posix,,}:"*|*":${user_home_posix,,}/"*) die "sandbox tool path must not include the user home" ;;
+  esac
+  subject_launch=("$TRUSTED_WINDOWS_ENV" "PATH=$sandbox_path" "$subject_executable")
+  if [ "$REVIEWER" = codex ]; then reviewer_launch=("$TRUSTED_WINDOWS_ENV" "PATH=$sandbox_path" "$reviewer_executable"); fi
+fi
 
 transcript="$controller/transcript.jsonl"
 subject_events="$controller/subject-events.jsonl"
@@ -314,7 +450,7 @@ $input
 EOF
   if [ "$AGENT" = codex ]; then
     (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
-      codex exec --ephemeral --cd "$target" --sandbox workspace-write \
+      "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
       -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' \
       --disable browser_use --disable in_app_browser --disable computer_use \
       --disable apps --disable plugins --disable skill_search --disable multi_agent \
@@ -324,7 +460,7 @@ EOF
     session="$(jq -rs '[.[] | select(.type == "thread.started") | .thread_id] | first // ""' "$raw" 2>/dev/null || true)"
   else
     (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
-      claude --print --safe-mode --no-session-persistence --verbose --output-format stream-json \
+      "$subject_executable" --print --safe-mode --no-session-persistence --verbose --output-format stream-json \
       --permission-mode acceptEdits --strict-mcp-config --model "$MODEL" \
       --system-prompt-file "$prompt" 'Respond to the newest user message now.') \
       > "$raw" 2> "$err" || rc=$?
@@ -365,14 +501,68 @@ if [ "$SYNTHETIC" = 0 ]; then
     [ -f "$acl_state" ] && [ ! -L "$acl_state" ] || die "unsafe stale ACL restoration state: $acl_state"
     windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
       -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
-      -UserHome "${USERPROFILE:-$HOME}" -StateFile "$acl_state" \
+      -UserHome "$real_user_home" -StateFile "$acl_state" \
       || die "could not restore stale eval ACL state"
   fi
   windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Enter \
     -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
-    -UserHome "${USERPROFILE:-$HOME}" -StateFile "$acl_state" -EvidenceFile "$isolation_evidence" \
+    -UserHome "$real_user_home" -StateFile "$acl_state" -EvidenceFile "$isolation_evidence" \
     || die "could not establish Windows eval isolation"
   isolation_active=true
+
+  probe_target="$target/.harness-eval-isolation-sentinel"
+  probe_raw="$controller/isolation-probe-events.jsonl"
+  probe_err="$controller/isolation-probe.stderr"
+  probe_prompt="$controller/isolation-probe.prompt"
+  probe_nonce="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
+  printf '%s\n' "$probe_nonce" > "$probe_target"
+  probe_target_sha="$(sha "$probe_target")"
+  probe_payload="$(jq -cnS \
+    --arg nonce "$probe_nonce" \
+    --arg target_file "$(cygpath -w "$probe_target")" \
+    --arg source_file "$(cygpath -w "$ROOT/SKILL.md")" \
+    --arg controller_file "$(cygpath -w "$controller/runtime.manifest")" \
+    --arg user_home "$real_user_home_win" \
+    '{nonce:$nonce,target_file:$target_file,source_file:$source_file,controller_file:$controller_file,user_home:$user_home}')"
+  probe_payload_b64="$(printf '%s' "$probe_payload" | base64 | tr -d '\r\n')"
+  probe_encoded="$(iconv -f UTF-8 -t UTF-16LE < "$ISOLATION_PROBE" | base64 | tr -d '\r\n')"
+  [ -n "$probe_encoded" ] || die "could not encode effective isolation probe"
+  probe_command="cmd.exe /d /c \"set HARNESS_EVAL_PROBE_PAYLOAD=$probe_payload_b64&&powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $probe_encoded\""
+  printf 'Run exactly this one command with the shell tool, with no edits, prefixes, suffixes, pipelines, or additional commands. Do not use any other tool.\n%s\n' "$probe_command" > "$probe_prompt"
+  probe_rc=0
+  (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
+    "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
+    -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' \
+    --disable browser_use --disable in_app_browser --disable computer_use \
+    --disable apps --disable plugins --disable skill_search --disable multi_agent \
+    --skip-git-repo-check --ignore-user-config --ignore-rules --model "$MODEL" --json - \
+    < "$probe_prompt") > "$probe_raw" 2> "$probe_err" || probe_rc=$?
+  [ "$probe_rc" -eq 0 ] || die "effective isolation probe Agent failed (exit $probe_rc)"
+  [ "$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$probe_raw")" -eq 1 ] \
+    || die "effective isolation probe did not execute exactly one command"
+  probe_event="$(jq -cs '[.[] | select(.type == "item.completed" and .item.type == "command_execution")][0].item' "$probe_raw")"
+  jq -e --arg command "$probe_command" '.command == $command and .status == "completed" and .exit_code == 0' <<< "$probe_event" >/dev/null \
+    || die "effective isolation probe command did not match the controller command"
+  probe_output="$(jq -r '.aggregated_output' <<< "$probe_event" | tr -d '\r')"
+  probe_result="$(jq -Rcs 'split("\n") | map(select(length > 0)) | last | fromjson' <<< "$probe_output")" \
+    || die "effective isolation probe returned invalid JSON"
+  jq -e --arg nonce "$probe_nonce" '
+    .nonce == $nonce
+    and (.identity | ascii_downcase | endswith("\\codexsandboxoffline"))
+    and .target_file_readable == true
+    and .target_writeable == true
+    and .source_workspace_readable == false
+    and .controller_readable == false
+    and .user_home_readable == false
+  ' <<< "$probe_result" >/dev/null || die "effective isolation probe did not prove the required access boundary"
+  [ "$(sha "$probe_target")" = "$probe_target_sha" ] || die "effective isolation probe target changed during execution"
+  rm -f -- "$probe_target"
+  [ ! -e "$probe_target" ] && [ ! -L "$probe_target" ] || die "effective isolation probe target cleanup failed"
+  jq --argjson command_event "$probe_event" --argjson result "$probe_result" --argjson payload "$probe_payload" --arg path "$sandbox_path" '
+    .schema_version = 2
+    | .probe = {command_event:$command_event,result:$result,payload:$payload,sanitized_path:($path | split(":"))}
+  ' "$isolation_evidence" > "$controller/isolation.with-probe.json"
+  mv "$controller/isolation.with-probe.json" "$isolation_evidence"
 else
   jq -n '{schema_version:1,isolation:"synthetic-fake-cli",release_eligible:false}' > "$isolation_evidence"
 fi
@@ -460,7 +650,7 @@ review_err="$controller/reviewer.stderr"
 review_rc=0
 if [ "$REVIEWER" = codex ]; then
   (cd "$review_root" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
-    codex exec --ephemeral --cd "$review_root" --sandbox read-only --skip-git-repo-check \
+    "${reviewer_launch[@]}" exec --ephemeral --cd "$review_root" --sandbox read-only --skip-git-repo-check \
     -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' \
     --disable shell_tool --disable unified_exec --disable browser_use --disable in_app_browser \
     --disable computer_use --disable apps --disable plugins --disable skill_search --disable multi_agent \
@@ -478,7 +668,7 @@ else
     cat "$review_prompt"
   } > "$reviewer_claude_prompt"
   (cd "$review_root" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
-    claude --print --safe-mode --no-session-persistence --verbose --output-format stream-json \
+    "$reviewer_executable" --print --safe-mode --no-session-persistence --verbose --output-format stream-json \
     --restricted --tools '' --strict-mcp-config --model "$REVIEWER_MODEL" --json-schema "$(cat "$SCHEMA")" \
     < "$reviewer_claude_prompt") \
     > "$review_raw" 2> "$review_err" || review_rc=$?
@@ -515,9 +705,12 @@ release_eligible=false
 if [ "$isolation_active" = true ]; then
   windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
     -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
-    -UserHome "${USERPROFILE:-$HOME}" -StateFile "$acl_state" \
+    -UserHome "$real_user_home" -StateFile "$acl_state" \
     || die "could not restore eval isolation ACLs"
   isolation_active=false
+  rm -f -- "$acl_lock_owner"
+  rmdir "$acl_lock" || die "could not release the global ACL transition lock"
+  acl_lock_owned=false
 fi
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
@@ -552,13 +745,14 @@ jq -n \
   --arg reviewer_verdict "$reviewer_verdict" --arg notes "$review_notes" \
   --arg case_sha256 "$case_sha" --arg skill_sha256 "$skill_sha" --arg runtime_manifest_sha256 "$runtime_manifest_sha" \
   --arg runner_sha256 "$runner_sha" --arg reviewer_schema_sha256 "$schema_sha" --arg canonical_rubric_sha256 "$rubric_sha" \
-  --arg attester_sha256 "$(sha "$ATTESTER")" --arg isolation_helper_sha256 "$(sha "$ACL_HELPER")" --arg publisher_sha256 "$(sha "$PUBLISHER")" \
-  --arg subject_name "$AGENT" --arg subject_executable "$subject_executable" --arg subject_cli_version "$subject_version" --arg subject_model "$MODEL" \
-  --arg reviewer_name "$REVIEWER" --arg reviewer_executable "$reviewer_executable" --arg reviewer_cli_version "$reviewer_version" --arg reviewer_model "$REVIEWER_MODEL" --arg reviewer_session_id "$reviewer_session" \
+  --arg attester_sha256 "$(sha "$ATTESTER")" --arg isolation_helper_sha256 "$(sha "$ACL_HELPER")" --arg isolation_recovery_sha256 "$(sha "$ACL_RECOVERY")" --arg isolation_probe_sha256 "$(sha "$ISOLATION_PROBE")" --arg agent_publishers_sha256 "$(sha "$AGENT_PUBLISHERS")" --arg publisher_sha256 "$(sha "$PUBLISHER")" \
+  --arg subject_name "$AGENT" --arg subject_executable "$subject_executable" --arg subject_executable_sha256 "$subject_executable_sha" --arg subject_cli_version "$subject_version" --arg subject_model "$MODEL" \
+  --arg reviewer_name "$REVIEWER" --arg reviewer_executable "$reviewer_executable" --arg reviewer_executable_sha256 "$reviewer_executable_sha" --arg reviewer_cli_version "$reviewer_version" --arg reviewer_model "$REVIEWER_MODEL" --arg reviewer_session_id "$reviewer_session" \
+  --argjson subject_authenticode "$subject_authenticode" --argjson reviewer_authenticode "$reviewer_authenticode" \
   --argjson subject_session_ids "$subject_sessions" --argjson passed "$passed" --argjson synthetic "$([ "$SYNTHETIC" = 1 ] && echo true || echo false)" \
   --argjson release_eligible "$release_eligible" --argjson rubric_details "$rubric_details" --argjson artifact_hashes "$artifact_hashes" \
   --slurpfile objective_checks "$objective_checks" \
-  '{schema_version:3,case:$case,case_version:$case_version,spec_version:"2.0.0-rc.3",scenario_ref:$scenario_ref,timestamp:$timestamp,passed:$passed,synthetic:$synthetic,release_eligible:$release_eligible,rubric_score:$rubric_score,rubric_details:$rubric_details,objective_checks:$objective_checks,reviewer_verdict:$reviewer_verdict,notes:$notes,authority:{case_sha256:$case_sha256,skill_sha256:$skill_sha256,runtime_manifest_sha256:$runtime_manifest_sha256,runner_sha256:$runner_sha256,reviewer_schema_sha256:$reviewer_schema_sha256,canonical_rubric_sha256:$canonical_rubric_sha256,attester_sha256:$attester_sha256,isolation_helper_sha256:$isolation_helper_sha256,publisher_sha256:$publisher_sha256},subject:{name:$subject_name,executable:$subject_executable,cli_version:$subject_cli_version,model:$subject_model,session_ids:$subject_session_ids},reviewer:{name:$reviewer_name,executable:$reviewer_executable,cli_version:$reviewer_cli_version,model:$reviewer_model,session_id:$reviewer_session_id,tools_disabled:true},isolation:{kind:(if $synthetic then "synthetic-fake-cli" else "windows-native-elevated-acl" end),source_workspace_denied:($synthetic|not),user_home_denied:($synthetic|not),controller_denied:($synthetic|not)},artifact_hashes:$artifact_hashes,attestation:{required:($synthetic|not),status:(if $synthetic then "not-applicable" else "pending" end),identity:null,namespace:null,signer_fingerprint:null}}' \
+  '{schema_version:3,case:$case,case_version:$case_version,spec_version:"2.0.0-rc.3",scenario_ref:$scenario_ref,timestamp:$timestamp,passed:$passed,synthetic:$synthetic,release_eligible:$release_eligible,rubric_score:$rubric_score,rubric_details:$rubric_details,objective_checks:$objective_checks,reviewer_verdict:$reviewer_verdict,notes:$notes,authority:{case_sha256:$case_sha256,skill_sha256:$skill_sha256,runtime_manifest_sha256:$runtime_manifest_sha256,runner_sha256:$runner_sha256,reviewer_schema_sha256:$reviewer_schema_sha256,canonical_rubric_sha256:$canonical_rubric_sha256,attester_sha256:$attester_sha256,isolation_helper_sha256:$isolation_helper_sha256,isolation_recovery_sha256:$isolation_recovery_sha256,isolation_probe_sha256:$isolation_probe_sha256,agent_publishers_sha256:$agent_publishers_sha256,publisher_sha256:$publisher_sha256},subject:{name:$subject_name,executable:$subject_executable,executable_sha256:$subject_executable_sha256,authenticode:$subject_authenticode,cli_version:$subject_cli_version,model:$subject_model,session_ids:$subject_session_ids},reviewer:{name:$reviewer_name,executable:$reviewer_executable,executable_sha256:$reviewer_executable_sha256,authenticode:$reviewer_authenticode,cli_version:$reviewer_cli_version,model:$reviewer_model,session_id:$reviewer_session_id,tools_disabled:true},isolation:{kind:(if $synthetic then "synthetic-fake-cli" else "windows-native-elevated-acl" end),source_workspace_denied:($synthetic|not),user_home_denied:($synthetic|not),controller_denied:($synthetic|not)},artifact_hashes:$artifact_hashes,attestation:{required:($synthetic|not),status:(if $synthetic then "not-applicable" else "pending" end),identity:null,namespace:null,signer_fingerprint:null}}' \
   > "$stage/$base.json"
 
 publish_args=()

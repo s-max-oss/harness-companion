@@ -97,8 +97,20 @@ check "FE-14 starts from a real clean archive and injects a user edit" jq -e '
 check "runner is syntactically valid" bash -n "$EVAL/run-eval.sh"
 check "post-eval attester is syntactically valid" bash -n "$EVAL/attest-result.sh"
 check "release gate is syntactically valid" bash -n "$EVAL/check-results.sh"
-check "real eval sanitizes cross-edition PSModulePath before ACL operations" grep -Fq 'env -u PSModulePath powershell.exe "$@"' "$EVAL/run-eval.sh"
+check "real eval sanitizes cross-edition PSModulePath through a trusted absolute env" grep -Fq '"$TRUSTED_WINDOWS_ENV" -u PSModulePath "$WINDOWS_POWERSHELL" "$@"' "$EVAL/run-eval.sh"
 check "all eval ACL invocations use the sanitized PowerShell wrapper" bash -c '! grep -Eq "^[[:space:]]*powershell[.]exe[[:space:]]" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval fails closed unless the elevated Codex sandbox is provisioned" bash -c 'grep -Fq "sandbox backend" "$1" && grep -Fq "sandbox provisioning" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval authenticates Agent executables independently of PATH" bash -c 'grep -Fq "Get-AuthenticodeSignature" "$1" && grep -Fq "publisher_thumbprints" "$1" && grep -Fq "subject executable is not an authentic" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval uses a protected absolute GNU timeout" bash -c 'grep -Fq "TRUSTED_WINDOWS_TIMEOUT=\"/c/Program Files/Git/usr/bin/timeout.exe\"" "$1" && grep -Fq "TIMEOUT_BIN=\"\$TRUSTED_WINDOWS_TIMEOUT\"" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval launches Codex through a trusted absolute env under a system-only PATH" bash -c 'grep -Fq "TRUSTED_WINDOWS_ENV=\"/c/Program Files/Git/usr/bin/env.exe\"" "$1" && grep -Fq "subject_launch=(\"\$TRUSTED_WINDOWS_ENV\" \"PATH=\$sandbox_path\" \"\$subject_executable\")" "$1" && grep -Fq "System32/WindowsPowerShell/v1.0" "$1" && ! grep -q "RuntimeRoot\|CodexBinRoot" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval records an effective Offline-sandbox access probe" bash -c 'grep -Fq "codexsandboxoffline" "$1" && grep -Fq "source_workspace_readable == false" "$1" && grep -Fq "controller_readable == false" "$1" && grep -Fq "user_home_readable == false" "$1"' _ "$EVAL/run-eval.sh"
+check "all real eval output directories share one ACL transition lock" grep -Fq 'acl_lock="$ROOT/.harness/eval-acl.lock"' "$EVAL/run-eval.sh"
+check "crashed eval ACL state has an explicit liveness-checked recovery command" bash -c 'grep -Fq "kill -0" "$1" && grep -Fq "ACL restoration complete" "$1"' _ "$EVAL/recover-windows-isolation.sh"
+check "real eval binds the token-resolved user profile instead of caller USERPROFILE" bash -c 'grep -Fq "GetFolderPath([Environment+SpecialFolder]::UserProfile)" "$1" && ! grep -Fq "\${USERPROFILE:-\$HOME}" "$1"' _ "$EVAL/run-eval.sh"
+check "real Agent publisher identity is pinned by exact certificate and install policy" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin"' "$EVAL/trust/agent-publishers.json"
+check "Windows canonical path comparisons are case-normalized" bash -c 'grep -Fq "output_host=\"\$(host_path" "$1" && grep -Fq "allowed_signers_host=\"\$(host_path" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh"
+check "release gate performs a concluding set-wide evidence pass" grep -Fq 'evidence source set changed during concluding verification' "$EVAL/check-results.sh"
+check "release gate holds the publication lock and rechecks directory membership" bash -c 'grep -Fq "directory_manifest \"\$RESULTS_DIR\" \"\$tmp/results.before.manifest\"" "$1" && grep -Fq "result membership or content changed during validation" "$1"' _ "$EVAL/check-results.sh"
 check "ACL state captures and restores DACL only without SeSecurityPrivilege" bash -c 'grep -Fq "AccessControlSections]::Access" "$1" && ! grep -Fq "AccessControlSections]::All" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
 check "ACL recovery skips only an explicit ItemNotFoundException" grep -Fq 'catch [System.Management.Automation.ItemNotFoundException]' "$EVAL/windows-isolation-acl.ps1"
 check "ACL recovery binds a stable Windows file identity" bash -c 'grep -Fq "GetFileInformationByHandle" "$1" && grep -Fq "expectedIdentity" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
@@ -207,6 +219,23 @@ jq -cn --arg id "$session" --arg text "$text" '{type:"result",session_id:$id,res
 FAKE
 chmod +x "$TMP/bin/claude"
 
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    mkdir -p "$TMP/untrusted-real-candidates"
+    if PATH="$TMP/bin:$PATH" bash "$EVAL/run-eval.sh" "$EVAL/cases/vague-goal.json" \
+      --agent=codex --reviewer=codex --model=fake --reviewer-model=fake \
+      --output-dir="$TMP/untrusted-real-candidates" > "$TMP/untrusted-real.log" 2>&1; then
+      bad "real eval rejects a PATH-injected fake Codex before Agent launch"
+    elif grep -Eq 'subject executable (is outside the trusted codex install location|is not an authentic signed codex binary)' "$TMP/untrusted-real.log"; then
+      ok "real eval rejects a PATH-injected fake Codex before Agent launch"
+    else
+      sed 's/^/  untrusted-real: /' "$TMP/untrusted-real.log" >&2
+      bad "real eval rejects a PATH-injected fake Codex before Agent launch"
+    fi
+    ;;
+  *) ok "real Codex Authenticode rejection is Windows-only" ;;
+esac
+
 if PATH="$TMP/bin:$PATH" FAKE_EVAL_STATE="$TMP/fake-state" HARNESS_EVAL_SYNTHETIC=1 \
   bash "$EVAL/run-eval.sh" "$EVAL/cases/vague-goal.json" --agent=codex --reviewer=codex \
   --model=fake-subject --reviewer-model=fake-reviewer --output-dir="$TMP/results" > "$TMP/runner.log" 2>&1; then
@@ -240,6 +269,17 @@ if PATH="$TMP/bin:$PATH" FAKE_EVAL_STATE="$TMP/fake-state" HARNESS_EVAL_SYNTHETI
 else
   ok "synthetic runner rejects a canonical-results symlink alias"
 fi
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if PATH="$TMP/bin:$PATH" FAKE_EVAL_STATE="$TMP/fake-state" HARNESS_EVAL_SYNTHETIC=1 \
+      bash "$EVAL/run-eval.sh" "$EVAL/cases/vague-goal.json" --model=fake --output-dir="$EVAL/RESULTS" >/dev/null 2>&1; then
+      bad "synthetic runner rejects case-varied canonical results path"
+    else
+      ok "synthetic runner rejects case-varied canonical results path"
+    fi
+    ;;
+  *) ok "case-varied canonical path check is Windows-only" ;;
+esac
 
 # Flipping self-reported fields remains insufficient: there is no release-key
 # attestation, so the production gate must still reject the result.
@@ -287,19 +327,49 @@ mkdir -p "$TMP/attest-candidates" "$TMP/attested-results"
 for f in "$base".*; do cp "$f" "$TMP/attest-candidates/"; done
 attest_candidate="$TMP/attest-candidates/$(basename "$result")"
 attest_base="${attest_candidate%.json}"
-jq -n '{
-  schema_version:1,
+test_probe_payload="$(jq -cnS '{nonce:"test-nonce",target_file:"C:\\target\\.harness-eval-isolation-sentinel",source_file:"C:\\workspace\\SKILL.md",controller_file:"C:\\controller\\runtime.manifest",user_home:"C:\\home"}')"
+test_probe_payload_b64="$(printf '%s' "$test_probe_payload" | base64 | tr -d '\r\n')"
+test_probe_program_b64="$(iconv -f UTF-8 -t UTF-16LE < "$EVAL/windows-isolation-probe.ps1" | base64 | tr -d '\r\n')"
+test_probe_command="cmd.exe /d /c \"set HARNESS_EVAL_PROBE_PAYLOAD=$test_probe_payload_b64&&powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $test_probe_program_b64\""
+test_probe_result="$(jq -cn '{nonce:"test-nonce",identity:"test-host\\codexsandboxoffline",target_file_readable:true,target_writeable:true,source_workspace_readable:false,controller_readable:false,user_home_readable:false}')"
+jq -n --arg command "$test_probe_command" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" '{
+  schema_version:2,
   isolation:"windows-native-elevated-acl",
   controller_visible_to_agent:false,
   source_workspace_visible_to_agent:false,
   user_home_visible_to_agent:false,
-  checks:[range(0;6) | {read_execute_denied:true}]
+  network:"codex-workspace-write-offline",
+  sandbox_accounts:[
+    {Name:"CodexSandboxOffline",Sid:"S-1-5-21-1-2-3-1001"},
+    {Name:"CodexSandboxOnline",Sid:"S-1-5-21-1-2-3-1002"}
+  ],
+  denied_roots:["C:/workspace","C:/home","C:/controller"],
+  checks:[
+    {path:"C:/workspace",sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
+    {path:"C:/workspace",sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true},
+    {path:"C:/home",sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
+    {path:"C:/home",sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true},
+    {path:"C:/controller",sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
+    {path:"C:/controller",sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true}
+  ],
+  probe:{
+    command_event:{type:"command_execution",command:$command,aggregated_output:$output,exit_code:0,status:"completed"},
+    payload:$payload,
+    result:$result,
+    sanitized_path:["/c/Windows/System32/WindowsPowerShell/v1.0","/c/Windows/System32","/c/Windows","/c/Program Files/Git/bin","/c/Program Files/Git/usr/bin"]
+  }
 }' > "$attest_base.isolation.json"
 isolation_sha="$(sha256sum "$attest_base.isolation.json" | cut -d ' ' -f 1)"
-jq --arg isolation_sha "$isolation_sha" '
+test_publisher_subject="$(jq -r '.agents.codex.publisher_subject' "$EVAL/trust/agent-publishers.json")"
+test_publisher_thumbprint="$(jq -r '.agents.codex.publisher_thumbprints[0]' "$EVAL/trust/agent-publishers.json")"
+jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher_subject" --arg publisher_thumbprint "$test_publisher_thumbprint" '
   .synthetic=false
   | .release_eligible=false
   | .reviewer_verdict="REVIEWED"
+  | .subject.executable_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  | .subject.authenticode={status:"Valid",subject:$publisher_subject,thumbprint:$publisher_thumbprint}
+  | .reviewer.executable_sha256="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  | .reviewer.authenticode={status:"Valid",subject:$publisher_subject,thumbprint:$publisher_thumbprint}
   | .isolation={kind:"windows-native-elevated-acl",source_workspace_denied:true,user_home_denied:true,controller_denied:true}
   | .artifact_hashes.isolation=$isolation_sha
   | .attestation={required:true,status:"pending",identity:null,namespace:null,signer_fingerprint:null}
@@ -325,6 +395,52 @@ check "attested result is release-eligible and binds its candidate" jq -e \
 check "attested result signature verifies against its independent anchor" \
   bash -c 'ssh-keygen -Y verify -q -f "$1" -I harness-eval-release -n harness-eval -s "$2" < "$3"' \
   _ "$TMP/test-release-signers" "${attested%.json}.attestation.sig" "$attested"
+
+# The release gate validates a private snapshot, then verifies that every
+# authoritative source still has the same identity and bytes before passing.
+mkdir -p "$TMP/gate-race-results"
+attested_base="${attested%.json}"
+for f in "$attested_base".*; do cp "$f" "$TMP/gate-race-results/"; done
+cat > "$TMP/gate-race-hook.sh" <<'HOOK'
+#!/bin/bash
+set -euo pipefail
+printf '\n' >> "$1"
+HOOK
+chmod +x "$TMP/gate-race-hook.sh"
+if HARNESS_EVAL_GATE_TEST_AFTER_SNAPSHOT_HOOK="$TMP/gate-race-hook.sh" \
+  bash "$EVAL/check-results.sh" --cases-dir="$TMP/cases" --results-dir="$TMP/gate-race-results" \
+  > "$TMP/gate-race.log" 2>&1; then
+  bad "release gate rejects evidence changed after its private snapshot"
+elif grep -Fq 'evidence changed during validation' "$TMP/gate-race.log"; then
+  ok "release gate rejects evidence changed after its private snapshot"
+else
+  sed 's/^/  gate-race: /' "$TMP/gate-race.log" >&2
+  bad "release gate rejects evidence changed after its private snapshot"
+fi
+
+# A passing result object supplied beside a nonce-only command output is not
+# proof that the effective sandbox process observed those values.
+mkdir -p "$TMP/probe-tamper-candidates" "$TMP/probe-tamper-results"
+for f in "$attest_base".*; do cp "$f" "$TMP/probe-tamper-candidates/"; done
+probe_tamper_candidate="$TMP/probe-tamper-candidates/$(basename "$attest_candidate")"
+probe_tamper_base="${probe_tamper_candidate%.json}"
+jq '.probe.command_event.aggregated_output="{\"nonce\":\"test-nonce\"}\n"' "$probe_tamper_base.isolation.json" > "$TMP/probe-tamper-isolation.tmp"
+mv "$TMP/probe-tamper-isolation.tmp" "$probe_tamper_base.isolation.json"
+probe_tamper_sha="$(sha256sum "$probe_tamper_base.isolation.json" | cut -d ' ' -f 1)"
+jq --arg isolation_sha "$probe_tamper_sha" '.artifact_hashes.isolation=$isolation_sha' "$probe_tamper_candidate" > "$TMP/probe-tamper-candidate.tmp"
+mv "$TMP/probe-tamper-candidate.tmp" "$probe_tamper_candidate"
+if bash "$EVAL/attest-result.sh" "$probe_tamper_candidate" \
+  --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/probe-tamper-candidates" \
+  --results-dir="$TMP/probe-tamper-results" --allowed-signers="$TMP/test-release-signers" \
+  > "$TMP/probe-tamper.log" 2>&1; then
+  bad "attester binds effective probe claims to command output"
+elif grep -Fq 'isolation evidence is incomplete' "$TMP/probe-tamper.log"; then
+  ok "attester binds effective probe claims to command output"
+else
+  sed 's/^/  probe-tamper: /' "$TMP/probe-tamper.log" >&2
+  bad "attester binds effective probe claims to command output"
+fi
+
 attested_sha="$(sha256sum "$attested" | cut -d ' ' -f 1)"
 if bash "$EVAL/attest-result.sh" "$attest_candidate" \
   --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/attest-candidates" \

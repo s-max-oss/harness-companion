@@ -15,7 +15,12 @@ ALLOWED_SIGNERS="$SCRIPT_DIR/trust/release-allowed-signers"
 RUNNER="$SCRIPT_DIR/run-eval.sh"
 SCHEMA="$SCRIPT_DIR/reviewer-output.schema.json"
 ACL_HELPER="$SCRIPT_DIR/windows-isolation-acl.ps1"
+ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
+ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
+AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
 PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
+WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+TRUSTED_WINDOWS_ENV="/c/Program Files/Git/usr/bin/env.exe"
 
 die() { echo "eval-attest: $*" >&2; exit 2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
@@ -191,14 +196,64 @@ PY
 }
 
 host_path() {
-  if command -v cygpath >/dev/null 2>&1; then
-    cygpath -am "$1" | tr '[:upper:]' '[:lower:]'
-  else
-    python - "$1" <<'PY'
+  local path="$1"
+  if command -v cygpath >/dev/null 2>&1; then path="$(cygpath -aw "$path")" || return 1; fi
+  python - "$path" <<'PY'
 import os, sys
 print(os.path.normcase(os.path.realpath(sys.argv[1])).replace(os.sep, "/"))
 PY
-  fi
+}
+
+windows_powershell() {
+  [ -f "$WINDOWS_POWERSHELL" ] && [ ! -L "$WINDOWS_POWERSHELL" ] || return 127
+  [ -f "$TRUSTED_WINDOWS_ENV" ] && [ -x "$TRUSTED_WINDOWS_ENV" ] && [ ! -L "$TRUSTED_WINDOWS_ENV" ] || return 127
+  "$TRUSTED_WINDOWS_ENV" -u PSModulePath "$WINDOWS_POWERSHELL" "$@"
+}
+
+official_agent_identity() {
+  local agent="$1" executable="$2" executable_win identity policy expected_subject expected_thumbprints
+  [ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
+  policy="$(jq -ce --arg agent "$agent" '.agents[$agent]' "$AGENT_PUBLISHERS")" || return 1
+  expected_subject="$(jq -r '.publisher_subject' <<< "$policy")" || return 1
+  expected_thumbprints="$(jq -c '.publisher_thumbprints' <<< "$policy")" || return 1
+  executable_win="$(cygpath -w "$executable")" || return 1
+  identity="$(HARNESS_EVAL_AUTH_PATH="$executable_win" windows_powershell -NoProfile -Command '
+    $sig = Get-AuthenticodeSignature -LiteralPath $env:HARNESS_EVAL_AUTH_PATH
+    $subject = if ($null -ne $sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { "" }
+    $thumbprint = if ($null -ne $sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { "" }
+    [ordered]@{status=[string]$sig.Status;subject=$subject;thumbprint=$thumbprint} | ConvertTo-Json -Compress
+  ' | tr -d '\r')" || return 1
+  jq -e --arg expected_subject "$expected_subject" --argjson expected_thumbprints "$expected_thumbprints" '
+    .status == "Valid"
+    and .subject == $expected_subject
+    and (.thumbprint as $thumbprint | ($expected_thumbprints | index($thumbprint)) != null)
+  ' <<< "$identity" >/dev/null || return 1
+  printf '%s\n' "$identity"
+}
+
+official_agent_path() {
+  local agent="$1" executable="$2" user_home="$3" executable_host home_host install_subpath prefix relative executable_names
+  executable_host="$(host_path "$executable")" || return 1
+  home_host="$(host_path "$user_home")" || return 1
+  install_subpath="$(jq -r --arg agent "$agent" '.agents[$agent].install_subpath // empty | ascii_downcase' "$AGENT_PUBLISHERS")" || return 1
+  executable_names="$(jq -c --arg agent "$agent" '.agents[$agent].executable_names // [] | map(ascii_downcase)' "$AGENT_PUBLISHERS")" || return 1
+  [ -n "$install_subpath" ] && [ "$executable_names" != '[]' ] || return 1
+  prefix="$home_host/$install_subpath/"
+  case "$executable_host" in "$prefix"*) ;; *) return 1 ;; esac
+  relative="${executable_host#"$prefix"}"
+  [[ "$relative" =~ ^[0-9a-f]{16}/([^/]+)$ ]] || return 1
+  jq -e --arg name "${BASH_REMATCH[1]}" 'index($name) != null' <<< "$executable_names" >/dev/null
+}
+
+expected_probe_command() {
+  local evidence="$1" payload payload_b64 probe_b64
+  payload="$(jq -cS '.probe.payload' "$evidence")" || return 1
+  [ "$payload" != null ] || return 1
+  payload_b64="$(printf '%s' "$payload" | base64 | tr -d '\r\n')" || return 1
+  probe_b64="$(iconv -f UTF-8 -t UTF-16LE < "$ISOLATION_PROBE" | base64 | tr -d '\r\n')" || return 1
+  [ -n "$probe_b64" ] || return 1
+  printf 'cmd.exe /d /c "set HARNESS_EVAL_PROBE_PAYLOAD=%s&&powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand %s"\n' \
+    "$payload_b64" "$probe_b64"
 }
 
 runtime_file_manifest() {
@@ -250,8 +305,8 @@ for arg in "$@"; do
   esac
 done
 
-for cmd in jq sha256sum python ssh-keygen mktemp cp find tr grep; do need "$cmd"; done
-for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$PUBLISHER" "$ALLOWED_SIGNERS"; do
+for cmd in jq sha256sum python ssh-keygen mktemp cp find tr grep iconv base64; do need "$cmd"; done
+for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$AGENT_PUBLISHERS" "$PUBLISHER" "$ALLOWED_SIGNERS"; do
   [ -f "$path" ] && [ ! -L "$path" ] || die "authority missing or unsafe: $path"
 done
 [ -n "$SIGNING_KEY" ] && [ -f "$SIGNING_KEY" ] && [ ! -L "$SIGNING_KEY" ] || die "a regular non-symlink signing key is required"
@@ -263,17 +318,32 @@ candidates_abs="$(cd "$CANDIDATES_DIR" && pwd -P)"
 results_abs="$(cd "$RESULTS_DIR" && pwd -P)"
 allowed_signers_abs="$(cd "$(dirname "$ALLOWED_SIGNERS")" && pwd -P)/$(basename "$ALLOWED_SIGNERS")"
 canonical_allowed_signers="$(cd "$(dirname "$SCRIPT_DIR/trust/release-allowed-signers")" && pwd -P)/release-allowed-signers"
-if [ "$allowed_signers_abs" = "$canonical_allowed_signers" ]; then
+candidates_host="$(host_path "$candidates_abs")"
+results_host="$(host_path "$results_abs")"
+allowed_signers_host="$(host_path "$allowed_signers_abs")"
+canonical_allowed_signers_host="$(host_path "$canonical_allowed_signers")"
+canonical_candidates_host="$(host_path "$(cd "$SCRIPT_DIR/candidates" && pwd -P)")"
+canonical_results_host="$(host_path "$(cd "$SCRIPT_DIR/results" && pwd -P)")"
+production_trust=false
+real_user_home=""
+if [ "$allowed_signers_host" = "$canonical_allowed_signers_host" ]; then
+  production_trust=true
+  need cygpath
+  [ -f "$TRUSTED_WINDOWS_ENV" ] && [ -x "$TRUSTED_WINDOWS_ENV" ] && [ ! -L "$TRUSTED_WINDOWS_ENV" ] || die "trusted Git-for-Windows env is missing or unsafe"
+  case "$("$TRUSTED_WINDOWS_ENV" --version 2>/dev/null | head -1)" in 'env (GNU coreutils) '*) ;; *) die "trusted env identity is invalid" ;; esac
+  real_user_home_win="$(windows_powershell -NoProfile -Command '[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)' | tr -d '\r')"
+  [ -n "$real_user_home_win" ] || die "could not resolve the token-backed Windows user profile"
+  real_user_home="$(cygpath -u "$real_user_home_win")"
   key_host="$(host_path "$SIGNING_KEY")"
   workspace_host="$(host_path "$(cd "$ROOT/.." && pwd -P)")"
-  user_home_host="$(host_path "${USERPROFILE:-$HOME}")"
+  user_home_host="$(host_path "$real_user_home")"
   case "$key_host" in
     "$workspace_host"/*|"$user_home_host"/*) ;;
     *) die "signing key must be inside a root denied to eval sandbox accounts" ;;
   esac
 else
-  [ "$candidates_abs" != "$(cd "$SCRIPT_DIR/candidates" && pwd -P)" ] \
-    && [ "$results_abs" != "$(cd "$SCRIPT_DIR/results" && pwd -P)" ] \
+  [ "$candidates_host" != "$canonical_candidates_host" ] \
+    && [ "$results_host" != "$canonical_results_host" ] \
     || die "custom trust anchors are test-only and cannot publish to canonical directories"
 fi
 candidate_lock="$CANDIDATES_DIR/.eval-agent.lock"
@@ -296,7 +366,8 @@ if ! mkdir "$publication_lock" 2>/dev/null; then die "result publication lock ex
 
 [ -f "$CANDIDATE" ] && [ ! -L "$CANDIDATE" ] || die "candidate missing or unsafe"
 candidate_abs="$(cd "$(dirname "$CANDIDATE")" && pwd -P)/$(basename "$CANDIDATE")"
-case "$candidate_abs" in "$candidates_abs"/*.json) ;; *) die "candidate is outside the authoritative candidate directory" ;; esac
+candidate_host="$(host_path "$candidate_abs")"
+case "$candidate_host" in "$candidates_host"/*.json) ;; *) die "candidate is outside the authoritative candidate directory" ;; esac
 case "$(basename "$candidate_abs")" in *.reviewer-output.json|*[!A-Za-z0-9._-]*) die "unsafe candidate name" ;; esac
 
 tmp="$(mktemp -d "$RESULTS_DIR/.attest.XXXXXX")" || die "attestation staging failed"
@@ -342,14 +413,93 @@ for ((i=0; i<${#artifact_suffixes[@]}; i++)); do
 done
 
 jq -e 'type == "object"' "$snapshot_base.project-brief.json" >/dev/null || die "captured PROJECT_BRIEF.json is invalid"
-jq -e '
-  .schema_version == 1
-  and .isolation == "windows-native-elevated-acl"
-  and .controller_visible_to_agent == false
-  and .source_workspace_visible_to_agent == false
-  and .user_home_visible_to_agent == false
-  and (.checks | type == "array" and length == 6 and all(.[]; .read_execute_denied == true))
+expected_probe="$(expected_probe_command "$snapshot_base.isolation.json")" \
+  || die "could not reconstruct the effective isolation probe command"
+if [ "$production_trust" = true ]; then
+  evidence_user_home="$(jq -r '.denied_roots[1] // empty' "$snapshot_base.isolation.json")"
+  [ -n "$evidence_user_home" ] \
+    && [ "$(host_path "$evidence_user_home")" = "$(host_path "$real_user_home")" ] \
+    || die "isolation evidence is not bound to the token-resolved user profile"
+fi
+jq -e --arg expected_probe "$expected_probe" '
+  def norm: gsub("\\\\"; "/") | ascii_downcase | sub("/+$"; "");
+  . as $e
+  | ([$e.denied_roots[] | norm]) as $roots
+  | ($e.probe.payload.target_file | norm) as $target
+  | ($e.probe.payload.source_file | norm) as $source
+  | ($e.probe.payload.controller_file | norm) as $controller_file
+  | ($e.probe.payload.user_home | norm) as $user_home
+  | $e.schema_version == 2
+  and $e.isolation == "windows-native-elevated-acl"
+  and $e.controller_visible_to_agent == false
+  and $e.source_workspace_visible_to_agent == false
+  and $e.user_home_visible_to_agent == false
+  and $e.network == "codex-workspace-write-offline"
+  and ($e.sandbox_accounts | type == "array" and length == 2)
+  and ([$e.sandbox_accounts[].Name] | sort == ["CodexSandboxOffline", "CodexSandboxOnline"])
+  and ([$e.sandbox_accounts[].Sid] | unique | length == 2 and all(.[]; test("^S-[0-9-]+$")))
+  and ($e.denied_roots | type == "array" and length == 3 and (unique | length == 3) and all(.[]; type == "string" and length > 0))
+  and ($e.checks | type == "array" and length == 6 and all(.[]; .read_execute_denied == true))
+  and ([
+    $e.denied_roots[] as $root
+    | $e.sandbox_accounts[] as $account
+    | (([$e.checks[] | select(
+      .path == $root
+      and .sandbox_account == $account.Name
+      and .sandbox_sid == $account.Sid
+      and .read_execute_denied == true
+    )] | length) == 1)
+  ] | length == 6 and all)
+  and $e.probe.command_event.type == "command_execution"
+  and $e.probe.command_event.status == "completed"
+  and $e.probe.command_event.exit_code == 0
+  and $e.probe.command_event.command == $expected_probe
+  and (($e.probe.command_event.aggregated_output
+    | gsub("\r"; "") | split("\n") | map(select(length > 0)) | last | fromjson) == $e.probe.result)
+  and ($e.probe.payload | keys | sort == ["controller_file","nonce","source_file","target_file","user_home"])
+  and ($e.probe.result | keys | sort == ["controller_readable","identity","nonce","source_workspace_readable","target_file_readable","target_writeable","user_home_readable"])
+  and $e.probe.payload.nonce == $e.probe.result.nonce
+  and ($e.probe.result.nonce | type == "string" and length > 0)
+  and ($source | startswith($roots[0] + "/")) and ($source | endswith("/skill.md"))
+  and $user_home == $roots[1]
+  and ($controller_file | startswith($roots[2] + "/")) and ($controller_file | endswith("/runtime.manifest"))
+  and ([range(0; $roots|length) as $i | ($target | startswith($roots[$i] + "/") | not)] | all)
+  and ($e.probe.result.identity | ascii_downcase | endswith("\\codexsandboxoffline"))
+  and $e.probe.result.target_file_readable == true
+  and $e.probe.result.target_writeable == true
+  and $e.probe.result.source_workspace_readable == false
+  and $e.probe.result.controller_readable == false
+  and $e.probe.result.user_home_readable == false
+  and ($e.probe.sanitized_path | type == "array" and length >= 4
+    and all(.[]; type == "string" and length > 0 and ((ascii_downcase | contains("/users/")) | not)))
   ' "$snapshot_base.isolation.json" >/dev/null || die "isolation evidence is incomplete"
+
+executable_snapshot_manifests=()
+if [ "$production_trust" = true ]; then
+  for role in subject reviewer; do
+    agent_name="$(jq -r --arg role "$role" '.[$role].name // empty' "$snapshot_candidate")"
+    agent_executable="$(jq -r --arg role "$role" '.[$role].executable // empty' "$snapshot_candidate")"
+    agent_sha="$(jq -r --arg role "$role" '.[$role].executable_sha256 // empty' "$snapshot_candidate")"
+    agent_version="$(jq -r --arg role "$role" '.[$role].cli_version // empty' "$snapshot_candidate")"
+    official_agent_path "$agent_name" "$agent_executable" "$real_user_home" \
+      || die "$role executable is outside the trusted $agent_name install location"
+    executable_snapshot="$tmp/$role-$agent_name.exe"
+    executable_manifest="$tmp/$role-executable.manifest.json"
+    snapshot_inputs "$executable_manifest" "$agent_executable" "$executable_snapshot" \
+      || die "$role executable could not be snapshotted safely"
+    executable_snapshot_manifests+=("$executable_manifest")
+    actual_identity="$(official_agent_identity "$agent_name" "$executable_snapshot")" \
+      || die "$role executable is not an authentic signed $agent_name binary"
+    [ "$agent_sha" = "$(sha "$executable_snapshot")" ] || die "$role executable hash mismatch"
+    version_pattern="$(jq -r --arg agent "$agent_name" '.agents[$agent].version_pattern // empty' "$AGENT_PUBLISHERS")"
+    snapshot_version="$("$executable_snapshot" --version 2>&1 | head -1)"
+    [ "$agent_version" = "$snapshot_version" ] || die "$role executable version mismatch"
+    jq -en --arg version "$snapshot_version" --arg pattern "$version_pattern" '$version | test($pattern)' >/dev/null \
+      || die "$role executable version identity is invalid"
+    jq -e --arg role "$role" --argjson actual "$actual_identity" '.[$role].authenticode == $actual' "$snapshot_candidate" >/dev/null \
+      || die "$role Authenticode identity mismatch"
+  done
+fi
 
 signer_public="$(ssh-keygen -y -f "$SIGNING_KEY" | tr -d '\r')" || die "could not read signing key"
 signer_fingerprint="$(printf '%s\n' "$signer_public" | ssh-keygen -lf - -E sha256 | awk '{print $2}' | tr -d '\r')"
@@ -357,12 +507,16 @@ authorized_fingerprints="$(awk '$1 == "harness-eval-release" {print $2, $3}' "$A
   | ssh-keygen -lf - -E sha256 | awk '{print $2}' | tr -d '\r')"
 printf '%s\n' "$authorized_fingerprints" | grep -Fxq -- "$signer_fingerprint" \
   || die "signing key is not authorized by the selected trust anchor"
+codex_publisher_subject="$(jq -r '.agents.codex.publisher_subject // empty' "$AGENT_PUBLISHERS")"
+codex_publisher_thumbprints="$(jq -c '.agents.codex.publisher_thumbprints // []' "$AGENT_PUBLISHERS")"
+[ -n "$codex_publisher_subject" ] && [ "$codex_publisher_thumbprints" != '[]' ] || die "Agent publisher policy is invalid"
 
 jq -e \
   --arg name "$case_name" --arg version "$case_version" --arg scenario "$scenario" \
   --arg case_sha "$(sha "$case_file")" --arg skill_sha "$(sha "$ROOT/SKILL.md")" --arg runtime_sha "$(sha "$tmp/runtime.manifest")" \
   --arg runner_sha "$(sha "$RUNNER")" --arg schema_sha "$(sha "$SCHEMA")" --arg rubric_sha "$(sha "$tmp/rubric.json")" \
-  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg publisher_sha "$(sha "$PUBLISHER")" \
+  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg publisher_sha "$(sha "$PUBLISHER")" \
+  --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" \
   --argjson input_count "$input_count" '
     .schema_version == 3 and .case == $name and .case_version == $version
     and .spec_version == "2.0.0-rc.3" and .scenario_ref == $scenario
@@ -374,6 +528,9 @@ jq -e \
     and .authority.runtime_manifest_sha256 == $runtime_sha and .authority.runner_sha256 == $runner_sha
     and .authority.reviewer_schema_sha256 == $schema_sha and .authority.canonical_rubric_sha256 == $rubric_sha
     and .authority.attester_sha256 == $attester_sha and .authority.isolation_helper_sha256 == $isolation_sha
+    and .authority.isolation_recovery_sha256 == $recovery_sha
+    and .authority.isolation_probe_sha256 == $probe_sha
+    and .authority.agent_publishers_sha256 == $agent_publishers_sha
     and .authority.publisher_sha256 == $publisher_sha
     and .isolation.kind == "windows-native-elevated-acl"
     and .isolation.source_workspace_denied == true and .isolation.user_home_denied == true and .isolation.controller_denied == true
@@ -382,9 +539,17 @@ jq -e \
     and (.rubric_score | capture("^(?<p>[0-9]+)/(?<t>[0-9]+)$") | (.p|tonumber) == (.t|tonumber))
     and .subject.name == "codex"
     and (.subject.executable | type == "string" and test("/(codex|codex.exe)$"; "i"))
+    and (.subject.executable_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+    and (.subject.authenticode.status == "Valid")
+    and .subject.authenticode.subject == $codex_publisher_subject
+    and (.subject.authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
     and (.subject.cli_version | type == "string" and length > 0) and (.subject.model | type == "string" and length > 0)
     and (.subject.session_ids | type == "array" and length == $input_count and (unique|length) == $input_count and all(.[]; type == "string" and length > 0))
-    and (.reviewer.name == "codex" or .reviewer.name == "claude") and .reviewer.tools_disabled == true
+    and .reviewer.name == "codex" and .reviewer.tools_disabled == true
+    and (.reviewer.executable_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+    and (.reviewer.authenticode.status == "Valid")
+    and .reviewer.authenticode.subject == $codex_publisher_subject
+    and (.reviewer.authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
     and (.reviewer.cli_version | type == "string" and length > 0) and (.reviewer.model | type == "string" and length > 0)
     and (.reviewer.session_id | type == "string" and length > 0)
     and (.reviewer.session_id as $rid | (.subject.session_ids | index($rid)) == null)
@@ -415,7 +580,7 @@ for suffix in "${artifact_suffixes[@]}"; do cp "$snapshot_base.$suffix" "$tmp/$b
 # promoted. Production use cannot opt into this hook while publishing to the
 # canonical trust directories.
 if [ -n "${HARNESS_EVAL_TEST_AFTER_SNAPSHOT_HOOK:-}" ] || [ -n "${HARNESS_EVAL_TEST_DURING_RECHECK_HOOK:-}" ] || [ -n "${HARNESS_EVAL_TEST_AFTER_FIRST_RECHECK_HOOK:-}" ]; then
-  [ "$allowed_signers_abs" != "$canonical_allowed_signers" ] && [ "$candidates_abs" != "$(cd "$SCRIPT_DIR/candidates" && pwd -P)" ] && [ "$results_abs" != "$(cd "$SCRIPT_DIR/results" && pwd -P)" ] || die "snapshot hook is test-only"
+  [ "$allowed_signers_host" != "$canonical_allowed_signers_host" ] && [ "$candidates_host" != "$canonical_candidates_host" ] && [ "$results_host" != "$canonical_results_host" ] || die "snapshot hook is test-only"
 fi
 if [ -n "${HARNESS_EVAL_TEST_AFTER_SNAPSHOT_HOOK:-}" ]; then
   [ -f "$HARNESS_EVAL_TEST_AFTER_SNAPSHOT_HOOK" ] && [ ! -L "$HARNESS_EVAL_TEST_AFTER_SNAPSHOT_HOOK" ] || die "snapshot hook missing or unsafe"
@@ -430,6 +595,10 @@ fi
 
 HARNESS_EVAL_TEST_DURING_RECHECK_TARGET="$candidate_abs" verify_snapshot_sources "$snapshot_manifest" || die "candidate input drifted after validation"
 [ "$(sha "$snapshot_candidate")" = "$candidate_sha" ] || die "private candidate snapshot changed"
+for executable_manifest in "${executable_snapshot_manifests[@]}"; do
+  (unset HARNESS_EVAL_TEST_DURING_RECHECK_HOOK HARNESS_EVAL_TEST_DURING_RECHECK_TARGET HARNESS_EVAL_TEST_AFTER_FIRST_RECHECK_HOOK
+   verify_snapshot_sources "$executable_manifest") || die "Agent executable drifted after identity verification"
+done
 
 publish_args=()
 for suffix in "${artifact_suffixes[@]}"; do publish_args+=("$tmp/$base_name.$suffix" "$RESULTS_DIR/$base_name.$suffix"); done

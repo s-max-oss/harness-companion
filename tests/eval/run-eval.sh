@@ -155,30 +155,25 @@ start_executable_guard() {
   local manifest="$controller/executable-guard.manifest.json"
   local ready="$controller/executable-guard.ready.json"
   local stderr="$controller/executable-guard.stderr"
-  local i subject_win reviewer_win
+  local subject_win reviewer_win ready_json ready_fd
   subject_win="$(cygpath -w "$subject_launch_executable")" || return 1
   reviewer_win="$(cygpath -w "$reviewer_launch_executable")" || return 1
   jq -n --arg subject "$subject_win" --arg reviewer "$reviewer_win" \
     '{schema_version:1,paths:([$subject,$reviewer] | unique)}' > "$manifest" || return 1
   executable_guard_stop="$controller/executable-guard.stop"
   rm -f -- "$ready" "$executable_guard_stop"
-  windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$EXECUTABLE_GUARD" \
+  exec {ready_fd}< <(windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$EXECUTABLE_GUARD" \
     -ManifestFile "$(cygpath -w "$manifest")" -ReadyFile "$(cygpath -w "$ready")" \
-    -StopFile "$(cygpath -w "$executable_guard_stop")" > /dev/null 2> "$stderr" &
+    -StopFile "$(cygpath -w "$executable_guard_stop")" 2> "$stderr")
   executable_guard_pid=$!
   executable_guard_active=true
-  for i in $(seq 1 100); do
-    if [ -f "$ready" ]; then
-      jq -e --argjson expected "$(jq -c '.paths | length' "$manifest")" \
-        '.schema_version == 1 and .handle_count == $expected and (.paths | length) == $expected' "$ready" >/dev/null \
-        || return 1
-      verify_guarded_executables
-      return
-    fi
-    kill -0 "$executable_guard_pid" 2>/dev/null || return 1
-    sleep 0.1
-  done
-  return 1
+  IFS= read -r -t 10 ready_json <&"$ready_fd" || { exec {ready_fd}<&-; return 1; }
+  exec {ready_fd}<&-
+  jq -e --argjson expected "$(jq -c '.paths | length' "$manifest")" \
+    '.schema_version == 1 and .handle_count == $expected and (.paths | length) == $expected' <<< "$ready_json" >/dev/null \
+    || return 1
+  [ -f "$ready" ] && [ "$(tr -d '\r\n' < "$ready")" = "$ready_json" ] || return 1
+  verify_guarded_executables
 }
 
 stop_executable_guard() {

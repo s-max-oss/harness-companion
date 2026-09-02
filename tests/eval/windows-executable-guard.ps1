@@ -30,6 +30,8 @@ try {
         handle_count = $handles.Count
     } | ConvertTo-Json -Compress
     [System.IO.File]::WriteAllText($ReadyFile, $ready + "`n", [System.Text.UTF8Encoding]::new($false))
+    [Console]::Out.WriteLine($ready)
+    [Console]::Out.Flush()
 
     while (-not [System.IO.File]::Exists($StopFile)) {
         Start-Sleep -Milliseconds 100

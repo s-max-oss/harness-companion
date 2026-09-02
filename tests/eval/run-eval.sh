@@ -16,6 +16,14 @@ die() { echo "eval: $*" >&2; exit 2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 sha() { sha256sum "$1" | awk '{print $1}'; }
 
+# Codex Desktop runs under PowerShell 7 and exports its PSModulePath. Passing
+# that cross-edition module path into Windows PowerShell 5.1 can make built-in
+# commands such as Get-Acl fail to autoload. The ACL helper needs only inbox
+# Windows modules, so let powershell.exe reconstruct its native defaults.
+windows_powershell() {
+  env -u PSModulePath powershell.exe "$@"
+}
+
 resolve_gnu_timeout() {
   local name candidate version
   for name in timeout gtimeout; do
@@ -134,7 +142,7 @@ if [ "$SYNTHETIC" = 0 ] && [ "$output_abs" = "$(cd "$DEFAULT_RESULTS" && pwd -P)
   die "run-eval writes unsigned candidates only; attest them separately"
 fi
 
-for cmd in jq sha256sum find cp mktemp git python tar "$AGENT" "$REVIEWER"; do need "$cmd"; done
+for cmd in jq sha256sum find cp mktemp git python tar env "$AGENT" "$REVIEWER"; do need "$cmd"; done
 [ -f "$PUBLISHER" ] && [ ! -L "$PUBLISHER" ] || die "no-replace publisher missing or unsafe"
 [ -f "$ATTESTER" ] && [ ! -L "$ATTESTER" ] || die "post-eval attester missing or unsafe"
 if [ "$SYNTHETIC" = 0 ]; then
@@ -182,7 +190,7 @@ isolation_active=false
 acl_state="$ROOT/.harness/eval-acl-state.json"
 cleanup() {
   if [ "$isolation_active" = true ]; then
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
+    windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
       -WorkspaceRoot "$(cd "$ROOT/.." && pwd -P)" -ControllerRoot "$controller" \
       -UserHome "${USERPROFILE:-$HOME}" -StateFile "$acl_state" >/dev/null 2>&1 || true
     isolation_active=false
@@ -355,12 +363,12 @@ if [ "$SYNTHETIC" = 0 ]; then
   workspace_root="$(cd "$ROOT/.." && pwd -P)"
   if [ -e "$acl_state" ] || [ -L "$acl_state" ]; then
     [ -f "$acl_state" ] && [ ! -L "$acl_state" ] || die "unsafe stale ACL restoration state: $acl_state"
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
+    windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
       -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
       -UserHome "${USERPROFILE:-$HOME}" -StateFile "$acl_state" \
       || die "could not restore stale eval ACL state"
   fi
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Enter \
+  windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Enter \
     -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
     -UserHome "${USERPROFILE:-$HOME}" -StateFile "$acl_state" -EvidenceFile "$isolation_evidence" \
     || die "could not establish Windows eval isolation"
@@ -505,7 +513,7 @@ release_eligible=false
 # controller publishes the unsigned candidate. Signing is a separate command
 # and no private-key path has existed in this process or any Agent environment.
 if [ "$isolation_active" = true ]; then
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
+  windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
     -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
     -UserHome "${USERPROFILE:-$HOME}" -StateFile "$acl_state" \
     || die "could not restore eval isolation ACLs"

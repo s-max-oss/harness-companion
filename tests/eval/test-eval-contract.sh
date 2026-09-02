@@ -97,6 +97,8 @@ check "FE-14 starts from a real clean archive and injects a user edit" jq -e '
 check "runner is syntactically valid" bash -n "$EVAL/run-eval.sh"
 check "post-eval attester is syntactically valid" bash -n "$EVAL/attest-result.sh"
 check "release gate is syntactically valid" bash -n "$EVAL/check-results.sh"
+check "real eval sanitizes cross-edition PSModulePath before ACL operations" grep -Fq 'env -u PSModulePath powershell.exe "$@"' "$EVAL/run-eval.sh"
+check "all eval ACL invocations use the sanitized PowerShell wrapper" bash -c '! grep -Eq "^[[:space:]]*powershell[.]exe[[:space:]]" "$1"' _ "$EVAL/run-eval.sh"
 check "reviewer schema is non-empty and parses" jq -e '.properties.checks.minItems == 1' "$EVAL/reviewer-output.schema.json"
 if grep -q -- '--eval' "$ROOT/scripts/harness-init.sh"; then bad "executor contains no eval/pseudo-dialog mode"; else ok "executor contains no eval/pseudo-dialog mode"; fi
 if grep -Eq '(^|[^A-Za-z0-9_])SIGNING_KEY=|ssh-keygen[[:space:]]+-Y[[:space:]]+sign' "$EVAL/run-eval.sh"; then

@@ -1,0 +1,26 @@
+{
+  "name": "repo-user-conflict",
+  "version": "1",
+  "scenario_ref": "FE-05",
+  "fixture": "fixtures/rust-cargo",
+  "mock_user_inputs": [
+    "This is a Python project. Goal: add a status command. Success means it prints ready and tests pass.",
+    "Use the repository evidence: keep Rust and Cargo, and record that resolution.",
+    "Use safe defaults for the rest.",
+    "Approve the Brief and initialize."
+  ],
+  "expected_dialog_signals": {"did_not_ask": [], "asked_at_most_per_round": null, "covered_categories": ["stack conflict"], "conflict_resolution_format": "repo value + user value + use repo + use user + tell me more + defer", "never_re_asked": ["resolved stack conflict"], "explanation_complete": true},
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "detected_type": "rust", "stack": "rust"},
+  "reviewer_rubric": {
+    "checks": [
+      "Agent surfaced both the user's Python claim and the repository's Rust evidence",
+      "Agent offered grounded resolution choices and did not silently pick a side",
+      "Agent asked one precise conflict question separately from missing-field questions",
+      "Agent recorded the chosen repository resolution in conflicts_resolved"
+    ],
+    "pass_criteria": "all checks pass; zero silent picks",
+    "fail_criteria": "conflict is hidden, silently resolved, batched, or not recorded",
+    "minimum_bar": "4/4 checks pass"
+  }
+}

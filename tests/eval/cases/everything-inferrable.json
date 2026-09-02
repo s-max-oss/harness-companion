@@ -1,0 +1,27 @@
+{
+  "name": "everything-inferrable",
+  "version": "1",
+  "scenario_ref": "FE-03",
+  "fixture": "fixtures/node-jest",
+  "mock_user_inputs": [
+    "Keep going with harness init.",
+    "Goal: add a health endpoint. Success means GET /health returns 200 and Jest passes.",
+    "Defaults are fine for all other decisions.",
+    "Approve and initialize."
+  ],
+  "expected_dialog_signals": {"did_not_ask": ["stack", "test_framework", "existing_harness"], "asked_at_most_per_round": null, "covered_categories": ["goal", "success_criteria"], "conflict_resolution_format": "not applicable", "never_re_asked": ["Node", "Jest"], "explanation_complete": true},
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "detected_type": "node", "stack": "node", "test_framework": "jest"},
+  "reviewer_rubric": {
+    "checks": [
+      "Agent inferred Node, Jest, and existing instructions from repository evidence",
+      "Agent asked only for the missing goal and success criteria",
+      "Agent never re-asked inferred facts",
+      "Agent applied documented defaults to remaining fields",
+      "Agent presented a complete annotated Brief and a four-category post-init explanation"
+    ],
+    "pass_criteria": "all checks pass; zero re-asks",
+    "fail_criteria": "repository facts are re-asked, defaults are omitted, or explanation is incomplete",
+    "minimum_bar": "5/5 checks pass"
+  }
+}

@@ -435,6 +435,43 @@ else
   fi
 fi
 
+# ---- Phase B5: rc.3 forward-eval release gate -----------------------------
+# Case definitions are part of every archive and must always parse. Real-Agent
+# result artifacts are required only for a release-intent run (tag CI or an
+# explicit local pre-tag invocation), so ordinary branch/PR CI remains green
+# while conversation evals are being collected.
+echo "=== Phase B5: Forward-eval contract and release results ==="
+EVAL_CASE_COUNT="$(find tests/eval/cases -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
+EVAL_CASE_PARSE=true
+if [ "$EVAL_CASE_COUNT" -eq 14 ]; then
+  while IFS= read -r eval_case; do
+    jq -e 'type == "object" and (.name|type=="string") and (.version|type=="string") and (.scenario_ref|test("^FE-[0-9]{2}$"))' \
+      "$eval_case" >/dev/null 2>&1 || EVAL_CASE_PARSE=false
+  done < <(find tests/eval/cases -maxdepth 1 -type f -name '*.json' | LC_ALL=C sort)
+else
+  EVAL_CASE_PARSE=false
+fi
+if [ "$EVAL_CASE_PARSE" = true ]; then
+  echo "PASS: B5a — 14 versioned forward-eval cases parse"
+  PASSED=$((PASSED + 1))
+else
+  echo "FAIL: B5a — expected 14 valid versioned forward-eval cases, got $EVAL_CASE_COUNT"
+  FAILED=$((FAILED + 1))
+fi
+
+if [ -n "${GITHUB_TAG:-}" ] || [ "${HARNESS_REQUIRE_EVAL_RESULTS:-0}" = "1" ]; then
+  if bash tests/eval/check-results.sh; then
+    echo "PASS: B5b — all forward-eval cases have CONFIRMED passing results"
+    PASSED=$((PASSED + 1))
+  else
+    echo "FAIL: B5b — release blocked by failed, unconfirmed, or unrun forward eval"
+    FAILED=$((FAILED + 1))
+  fi
+else
+  echo "SKIP: B5b — result gate activates for GITHUB_TAG or HARNESS_REQUIRE_EVAL_RESULTS=1"
+  SKIPPED=$((SKIPPED + 1))
+fi
+
 # ---- Phase C: installer round-trip inside extracted archive ------------------
 echo ""
 echo "=== Phase C: Installer round-trip (install → verify → uninstall) ==="

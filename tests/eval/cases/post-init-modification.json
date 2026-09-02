@@ -1,0 +1,31 @@
+{
+  "name": "post-init-modification",
+  "version": "1",
+  "scenario_ref": "FE-09",
+  "fixture": "fixtures/node-jest",
+  "mock_user_inputs": [
+    "Goal: add API request validation. Success means invalid requests return 400 and tests pass. Use inferred values and safe defaults.",
+    "Approve this Brief and initialize.",
+    "Change the test framework to vitest, but preserve any user-modified files.",
+    "Apply the exact safe update plan you just described."
+  ],
+  "expected_dialog_signals": {"did_not_ask": ["unchanged Brief fields"], "asked_at_most_per_round": null, "covered_categories": ["post-init update", "3-way comparison"], "conflict_resolution_format": "explicit update choices", "never_re_asked": ["goal", "success criteria"], "explanation_complete": true},
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "detected_type": "node", "test_framework": "vitest"},
+  "runner_events": [
+    {"after_turn": 2, "action": "append_file", "path": "AGENTS.md", "content": "\nUSER_SENTINEL_FE09=preserve-me\n"}
+  ],
+  "objective_sentinels": [
+    {"kind": "file_contains", "path": "AGENTS.md", "content": "USER_SENTINEL_FE09=preserve-me"}
+  ],
+  "reviewer_rubric": {
+    "checks": [
+      "Agent preserved confirmed fields while changing only the requested test framework",
+      "Agent used the executor's dry-run/token/apply 3-way update path and protected user files",
+      "Agent confirmed exactly what changed after the update"
+    ],
+    "pass_criteria": "all checks pass; zero lost field edits",
+    "fail_criteria": "confirmed data or user files are lost, or update bypasses the 3-way plan",
+    "minimum_bar": "3/3 checks pass"
+  }
+}

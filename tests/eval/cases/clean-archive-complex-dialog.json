@@ -1,0 +1,34 @@
+{
+  "name": "clean-archive-complex-dialog",
+  "version": "1",
+  "scenario_ref": "FE-14",
+  "fixture": "fixtures/node-jest",
+  "fixture_mode": "git_archive",
+  "mock_user_inputs": [
+    "I need to build something. I think this is Python, but I don't really know.",
+    "Use what the repository actually shows. I want a team checklist; success means people can add and complete items and tests pass.",
+    "I don't know what cadence or operation preferences mean. Choose safe defaults and explain them.",
+    "The Brief makes sense. Approve and initialize.",
+    "I changed my mind: rename the goal to a release checklist, preserving everything else.",
+    "Apply the exact safe update plan after showing the revised Brief."
+  ],
+  "expected_dialog_signals": {"did_not_ask": ["known information", "unexplained jargon"], "asked_at_most_per_round": null, "covered_categories": ["vague goal", "stack conflict", "plain-language defaults", "confirmation", "post-init modification"], "conflict_resolution_format": "one grounded conflict at a time", "never_re_asked": ["resolved stack", "confirmed fields"], "explanation_complete": true},
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "detected_type": "node", "stack": "node", "test_framework": "jest"},
+  "runner_events": [
+    {"after_turn": 4, "action": "append_file", "path": "AGENTS.md", "content": "\nUSER_SENTINEL_FE14=archive-user-edit\n"}
+  ],
+  "objective_sentinels": [
+    {"kind": "file_contains", "path": "AGENTS.md", "content": "USER_SENTINEL_FE14=archive-user-edit"}
+  ],
+  "reviewer_rubric": {
+    "checks": [
+      "Agent handled vague answers, uncertainty, and the repository conflict gracefully without silent picks",
+      "Agent used only SKILL.md principles, asked no redundant questions, and explained unfamiliar concepts",
+      "Agent confirmed the Brief, initialized safely, then preserved unchanged fields through the post-init goal update"
+    ],
+    "pass_criteria": "all checks pass; zero spec leakage, re-asks, or silent picks",
+    "fail_criteria": "context leakage, redundant question, silent conflict resolution, or unsafe/lossy modification",
+    "minimum_bar": "3/3 checks pass"
+  }
+}

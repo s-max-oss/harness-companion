@@ -1,0 +1,25 @@
+{
+  "name": "unfamiliar-user",
+  "version": "1",
+  "scenario_ref": "FE-07",
+  "fixture": "fixtures/empty-repo",
+  "mock_user_inputs": [
+    "I don't know what any of this means, just set it up.",
+    "I want a personal notes app. It succeeds if I can add, search, and delete notes. Wait, what's a cadence?",
+    "Stable cadence and the other safe defaults sound good.",
+    "I understand the Brief now. Approve and initialize."
+  ],
+  "expected_dialog_signals": {"did_not_ask": ["unexplained jargon"], "asked_at_most_per_round": null, "covered_categories": ["goal", "success_criteria", "cadence explanation"], "conflict_resolution_format": "plain-language choices", "never_re_asked": ["explained choices"], "explanation_complete": true},
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "cadence": "stable"},
+  "reviewer_rubric": {
+    "checks": [
+      "Agent explained Harness and cadence in plain language without unexplained jargon",
+      "Agent introduced concepts before asking the user to choose and offered sensible defaults",
+      "The conversation was proportional and guided rather than interrogating or overwhelming"
+    ],
+    "pass_criteria": "all checks pass; zero unexplained jargon",
+    "fail_criteria": "unexplained jargon, unexplained choice, or overwhelming questionnaire",
+    "minimum_bar": "3/3 checks pass"
+  }
+}

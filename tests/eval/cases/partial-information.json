@@ -1,0 +1,27 @@
+{
+  "name": "partial-information",
+  "version": "1",
+  "scenario_ref": "FE-02",
+  "fixture": "fixtures/python-pytest",
+  "mock_user_inputs": [
+    "Python project, add auth, due Friday.",
+    "Success means protected routes reject anonymous users and the pytest suite passes.",
+    "Use safe defaults for the remaining choices.",
+    "Approve the Brief and initialize."
+  ],
+  "expected_dialog_signals": {"did_not_ask": ["stack", "goal", "deadline"], "asked_at_most_per_round": null, "covered_categories": ["success_criteria"], "conflict_resolution_format": "not applicable", "never_re_asked": ["stack", "goal", "deadline"], "explanation_complete": true},
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "detected_type": "python", "stack": "python"},
+  "reviewer_rubric": {
+    "checks": [
+      "Agent acknowledged the supplied Python stack, auth goal, and Friday deadline",
+      "Agent asked only for genuinely missing required information",
+      "Agent never re-asked stack, goal, or deadline",
+      "Agent applied remaining defaults without unnecessary optional optimization",
+      "Agent confirmed the Brief before writing and explained the completed init"
+    ],
+    "pass_criteria": "all checks pass; zero re-asks",
+    "fail_criteria": "known information is re-asked or execution occurs before confirmation",
+    "minimum_bar": "5/5 checks pass"
+  }
+}

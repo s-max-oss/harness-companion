@@ -1,0 +1,34 @@
+{
+  "name": "vague-goal",
+  "version": "1",
+  "scenario_ref": "FE-01",
+  "fixture": "fixtures/python-pytest",
+  "mock_user_inputs": [
+    "I need to build something.",
+    "A small web app for managing my team's tasks. Success means we can create, assign, and complete tasks and the existing tests pass.",
+    "Use the sensible defaults for everything else.",
+    "The Brief looks right. Approve it and initialize the project."
+  ],
+  "expected_dialog_signals": {
+    "did_not_ask": ["stack", "test_framework"],
+    "asked_at_most_per_round": null,
+    "covered_categories": ["goal", "success_criteria"],
+    "conflict_resolution_format": "repo value + user value + use repo + use user + tell me more + defer",
+    "never_re_asked": ["goal after clarified"],
+    "explanation_complete": true
+  },
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "detected_type": "python"},
+  "reviewer_rubric": {
+    "checks": [
+      "Agent did not ask for stack or test framework already inferrable from the repository",
+      "Agent followed up on the vague goal until goal and success criteria were clear",
+      "Agent did not switch to premature optional optimization before required intent was clear",
+      "Agent presented and explained a complete annotated Brief before execution",
+      "Post-init explanation covered generated, inferred, defaulted, and deferred decisions"
+    ],
+    "pass_criteria": "all checks pass; zero re-asks",
+    "fail_criteria": "any re-ask, premature topic switch, silent pick, pre-confirmation write, or incomplete explanation",
+    "minimum_bar": "5/5 checks pass"
+  }
+}

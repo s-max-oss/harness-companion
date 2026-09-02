@@ -1,0 +1,27 @@
+{
+  "name": "multiple-conflicts",
+  "version": "1",
+  "scenario_ref": "FE-06",
+  "fixture": "fixtures/python-pytest",
+  "mock_user_inputs": [
+    "Use Node and no tests. Goal: add session auth. Success means login persists across requests.",
+    "For the first conflict, use the repository's Python stack.",
+    "For the test conflict, keep the repository's pytest setup.",
+    "Use safe defaults and show the complete Brief.",
+    "I approve this Brief. Initialize the project."
+  ],
+  "expected_dialog_signals": {"did_not_ask": [], "asked_at_most_per_round": null, "covered_categories": ["stack conflict", "test framework conflict"], "conflict_resolution_format": "one conflict at a time", "never_re_asked": ["resolved conflicts"], "explanation_complete": true},
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "detected_type": "python", "stack": "python", "test_framework": "pytest"},
+  "reviewer_rubric": {
+    "checks": [
+      "Agent identified both the Node-versus-Python and no-tests-versus-pytest conflicts",
+      "Agent handled the conflicts one at a time with one precise question each",
+      "Agent did not batch conflict questions with unrelated missing-field questions",
+      "Agent recorded both chosen resolutions and made no silent pick"
+    ],
+    "pass_criteria": "all checks pass; zero silent picks",
+    "fail_criteria": "any conflict is silent, batched, repeated, or omitted from conflicts_resolved",
+    "minimum_bar": "4/4 checks pass"
+  }
+}

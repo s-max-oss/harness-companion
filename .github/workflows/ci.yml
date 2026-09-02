@@ -118,6 +118,16 @@ jobs:
           done
 
       # ------------------------------------------------------------------
+      # Phase 1c — rc.3 conversational forward-eval infrastructure
+      #
+      # This is an offline contract/plumbing test. Real Agent conversations
+      # are a host-level pre-release step; Phase 7 enforces their CONFIRMED
+      # result artifacts on tag/release-intent runs.
+      # ------------------------------------------------------------------
+      - name: Phase 1c — forward-eval contract
+        run: bash tests/eval/test-eval-contract.sh
+
+      # ------------------------------------------------------------------
       # Phase 2 — Claude Code adapter contract
       # ------------------------------------------------------------------
       - name: Phase 2 — Claude Code adapter contract

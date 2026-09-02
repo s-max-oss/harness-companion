@@ -1,0 +1,25 @@
+{
+  "name": "brief-rejection",
+  "version": "1",
+  "scenario_ref": "FE-08",
+  "fixture": "fixtures/python-pytest",
+  "mock_user_inputs": [
+    "Goal: add password login. Success means valid users can sign in and pytest passes. Use safe defaults.",
+    "No, that's wrong — change only the goal to passwordless email login.",
+    "Everything else in the revised Brief is still correct.",
+    "Approve the revised Brief and initialize."
+  ],
+  "expected_dialog_signals": {"did_not_ask": ["previously confirmed unchanged fields"], "asked_at_most_per_round": null, "covered_categories": ["goal revision", "confirmation"], "conflict_resolution_format": "not applicable", "never_re_asked": ["success criteria", "defaults"], "explanation_complete": true},
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "detected_type": "python"},
+  "reviewer_rubric": {
+    "checks": [
+      "Agent revised only the goal and preserved every unchanged confirmed field",
+      "Agent wrote no target files before the revised Brief was explicitly approved",
+      "Agent presented the revised complete Brief and explained the resulting init"
+    ],
+    "pass_criteria": "all checks pass; zero lost field edits",
+    "fail_criteria": "unchanged field is lost/re-asked or any pre-confirmation write occurs",
+    "minimum_bar": "3/3 checks pass"
+  }
+}

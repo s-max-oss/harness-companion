@@ -1,0 +1,24 @@
+{
+  "name": "post-init-explanation",
+  "version": "1",
+  "scenario_ref": "FE-10",
+  "fixture": "fixtures/python-pytest",
+  "mock_user_inputs": [
+    "Goal: add an audit log. Success means important actions are recorded and pytest passes. Infer what you can and use safe defaults.",
+    "Approve the complete Brief and initialize.",
+    "Explain what happened without making me read JSON."
+  ],
+  "expected_dialog_signals": {"did_not_ask": ["already supplied goal", "already supplied success criteria"], "asked_at_most_per_round": null, "covered_categories": ["generated", "inferred", "defaulted", "deferred"], "conflict_resolution_format": "not applicable", "never_re_asked": ["known fields"], "explanation_complete": true},
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "detected_type": "python"},
+  "reviewer_rubric": {
+    "checks": [
+      "Agent preserved the confirmed Brief and performed initialization only after approval",
+      "Agent explained generated, inferred, defaulted, and deferred categories conversationally",
+      "Agent highlighted useful next decisions without dumping JSON or an exhaustive manifest"
+    ],
+    "pass_criteria": "all checks pass; explanation covers all four categories",
+    "fail_criteria": "lost field, JSON dump, or any missing explanation category",
+    "minimum_bar": "3/3 checks pass"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "only-defaults-needed",
+  "version": "1",
+  "scenario_ref": "FE-04",
+  "fixture": "fixtures/empty-repo",
+  "mock_user_inputs": [
+    "Goal: create a documentation site. Success means it builds locally and has a getting-started page.",
+    "Apply the documented safe defaults to everything else.",
+    "The annotated Brief is correct. Approve and initialize."
+  ],
+  "expected_dialog_signals": {"did_not_ask": ["optional preference optimization"], "asked_at_most_per_round": null, "covered_categories": ["goal", "success_criteria", "defaults"], "conflict_resolution_format": "not applicable", "never_re_asked": ["goal", "success_criteria"], "explanation_complete": true},
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "cadence": "stable"},
+  "reviewer_rubric": {
+    "checks": [
+      "Agent preserved the supplied goal and success criteria without re-asking",
+      "Agent applied every safe documented default",
+      "Agent did not optimize optional preferences the user did not ask about",
+      "Agent presented a complete source-annotated Brief before execution",
+      "Agent explained generated, inferred, defaulted, and deferred outcomes after init"
+    ],
+    "pass_criteria": "all checks pass; zero re-asks",
+    "fail_criteria": "required supplied information is re-asked or optional interrogation replaces defaults",
+    "minimum_bar": "5/5 checks pass"
+  }
+}

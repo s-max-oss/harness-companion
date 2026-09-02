@@ -1,0 +1,24 @@
+{
+  "name": "skill-only-context",
+  "version": "1",
+  "scenario_ref": "FE-13",
+  "fixture": "fixtures/python-pytest",
+  "mock_user_inputs": [
+    "Please run guided harness init. Goal: add CSV export. Success means exports open correctly and pytest passes.",
+    "Use inferred facts and safe defaults.",
+    "Approve the annotated Brief and initialize."
+  ],
+  "expected_dialog_signals": {"did_not_ask": ["inferrable stack", "inferrable test framework"], "asked_at_most_per_round": null, "covered_categories": ["goal", "success criteria", "inference", "defaults"], "conflict_resolution_format": "grounded choices when needed", "never_re_asked": ["known fields"], "explanation_complete": true},
+  "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
+  "expected_brief_fields": {"advisory": true, "detected_type": "python"},
+  "reviewer_rubric": {
+    "checks": [
+      "Agent followed conversational init principles from SKILL.md without spec or expected-outcome leakage",
+      "Agent asked relevant non-redundant questions and inferred grounded repository facts",
+      "Agent explained decisions, confirmed before writing, and completed the post-init explanation"
+    ],
+    "pass_criteria": "all checks pass; zero context leakage",
+    "fail_criteria": "spec internals/expected outcomes appear, questions are redundant, or decisions are unexplained",
+    "minimum_bar": "3/3 checks pass"
+  }
+}

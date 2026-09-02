@@ -99,6 +99,15 @@ check "post-eval attester is syntactically valid" bash -n "$EVAL/attest-result.s
 check "release gate is syntactically valid" bash -n "$EVAL/check-results.sh"
 check "real eval sanitizes cross-edition PSModulePath before ACL operations" grep -Fq 'env -u PSModulePath powershell.exe "$@"' "$EVAL/run-eval.sh"
 check "all eval ACL invocations use the sanitized PowerShell wrapper" bash -c '! grep -Eq "^[[:space:]]*powershell[.]exe[[:space:]]" "$1"' _ "$EVAL/run-eval.sh"
+check "ACL state captures and restores DACL only without SeSecurityPrivilege" bash -c 'grep -Fq "AccessControlSections]::Access" "$1" && ! grep -Fq "AccessControlSections]::All" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
+check "ACL recovery skips only an explicit ItemNotFoundException" grep -Fq 'catch [System.Management.Automation.ItemNotFoundException]' "$EVAL/windows-isolation-acl.ps1"
+check "ACL recovery binds a stable Windows file identity" bash -c 'grep -Fq "GetFileInformationByHandle" "$1" && grep -Fq "expectedIdentity" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
+check "ACL reads and writes use verified open handles, not pathname ACL APIs" bash -c 'grep -Fq "GetKernelObjectSecurity" "$1" && grep -Fq "SetSecurityInfo" "$1" && ! grep -Eq "Get-Acl|^[[:space:]]*Set-Acl|[.]SetAccessControl[(]" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
+if command -v powershell.exe >/dev/null 2>&1; then
+  check "Windows ACL helper round-trips DACL and retains failed recovery state" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-isolation-acl.ps1" -Helper "$EVAL/windows-isolation-acl.ps1"
+else
+  ok "Windows ACL helper integration is Windows-only"
+fi
 check "reviewer schema is non-empty and parses" jq -e '.properties.checks.minItems == 1' "$EVAL/reviewer-output.schema.json"
 if grep -q -- '--eval' "$ROOT/scripts/harness-init.sh"; then bad "executor contains no eval/pseudo-dialog mode"; else ok "executor contains no eval/pseudo-dialog mode"; fi
 if grep -Eq '(^|[^A-Za-z0-9_])SIGNING_KEY=|ssh-keygen[[:space:]]+-Y[[:space:]]+sign' "$EVAL/run-eval.sh"; then

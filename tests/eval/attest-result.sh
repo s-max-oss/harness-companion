@@ -21,6 +21,175 @@ die() { echo "eval-attest: $*" >&2; exit 2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 sha() { sha256sum "$1" | awk '{print $1}'; }
 
+# Copy a candidate and every bound companion into private staging without
+# following links or replacing a destination. The source metadata is checked
+# before/after each read and again after the whole set has been imported, so a
+# concurrent replacement cannot create a mixed snapshot. A manifest retained
+# in private staging supports the final pre-publication recheck.
+snapshot_inputs() {
+  python - "$@" <<'PY'
+import hashlib, json, os, stat, sys
+
+manifest = sys.argv[1]
+args = sys.argv[2:]
+if len(args) == 0 or len(args) % 2:
+    raise SystemExit("snapshot requires SRC DST pairs")
+
+def signature(st):
+    # Windows may advance st_ctime when a freshly copied file is first opened;
+    # identity, size, mtime, and the independently checked digest are stable.
+    return {
+        "dev": int(st.st_dev), "ino": int(st.st_ino),
+        "size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns),
+    }
+
+def open_source(path):
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode):
+        raise SystemExit("unsafe snapshot source: " + path)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    opened = os.fstat(fd)
+    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        os.close(fd)
+        raise SystemExit("snapshot source changed while opening: " + path)
+    return fd, before
+
+records = []
+for source, destination in zip(args[0::2], args[1::2]):
+    source = os.path.abspath(source)
+    destination = os.path.abspath(destination)
+    fd, before = open_source(source)
+    out = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+        0o600,
+    )
+    digest = hashlib.sha256()
+    try:
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(out, view)
+                view = view[written:]
+        os.fsync(out)
+        after_fd = os.fstat(fd)
+    finally:
+        os.close(out)
+        os.close(fd)
+    if signature(before) != signature(after_fd):
+        raise SystemExit(
+            "snapshot source changed while reading: "
+            + source + " before=" + repr(signature(before))
+            + " after=" + repr(signature(after_fd))
+        )
+    after_path = os.lstat(source)
+    if not stat.S_ISREG(after_path.st_mode) or signature(before) != signature(after_path):
+        raise SystemExit("snapshot source was replaced: " + source)
+    records.append({
+        "source": source,
+        "snapshot": destination,
+        "sha256": digest.hexdigest(),
+        "signature": signature(before),
+    })
+
+# Close the set-level race: every source must still name the exact file
+# identity imported above after all members have been copied.
+for rec in records:
+    current = os.lstat(rec["source"])
+    if not stat.S_ISREG(current.st_mode) or signature(current) != rec["signature"]:
+        raise SystemExit("snapshot source set changed: " + rec["source"])
+
+fd = os.open(
+    manifest,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+    0o600,
+)
+with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+    json.dump(records, fh, sort_keys=True, separators=(",", ":"))
+    fh.write("\n")
+    fh.flush()
+    os.fsync(fh.fileno())
+PY
+}
+
+verify_snapshot_sources() {
+  python - "$1" <<'PY'
+import hashlib, json, os, stat, subprocess, sys
+
+recheck_hook = os.environ.get("HARNESS_EVAL_TEST_DURING_RECHECK_HOOK", "")
+recheck_target = os.path.normcase(os.path.abspath(
+    os.environ.get("HARNESS_EVAL_TEST_DURING_RECHECK_TARGET", "")
+))
+after_first_hook = os.environ.get("HARNESS_EVAL_TEST_AFTER_FIRST_RECHECK_HOOK", "")
+
+def signature(st):
+    # See snapshot_inputs: st_ctime is not a stable read-only signal on Windows.
+    return {
+        "dev": int(st.st_dev), "ino": int(st.st_ino),
+        "size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns),
+    }
+
+def digest_regular(path):
+    global recheck_hook
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode):
+        raise SystemExit("unsafe recheck source: " + path)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    opened = os.fstat(fd)
+    if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        os.close(fd)
+        raise SystemExit("recheck source changed while opening: " + path)
+    h = hashlib.sha256()
+    try:
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if signature(before) != signature(after):
+        raise SystemExit("recheck source changed while reading: " + path)
+    if recheck_hook and os.path.normcase(os.path.abspath(path)) == recheck_target:
+        subprocess.run(["bash", recheck_hook, path], check=True)
+        recheck_hook = ""
+    after_path = os.lstat(path)
+    if not stat.S_ISREG(after_path.st_mode) or signature(after_path) != signature(before):
+        raise SystemExit("recheck source path changed after reading: " + path)
+    return before, h.hexdigest()
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    records = json.load(fh)
+for index, rec in enumerate(records):
+    current, source_sha = digest_regular(rec["source"])
+    if signature(current) != rec["signature"] or source_sha != rec["sha256"]:
+        raise SystemExit("candidate input changed after snapshot: " + rec["source"])
+    _, snapshot_sha = digest_regular(rec["snapshot"])
+    if snapshot_sha != rec["sha256"]:
+        raise SystemExit("private snapshot changed: " + rec["snapshot"])
+    if index == 0 and after_first_hook:
+        subprocess.run(["bash", after_first_hook, rec["source"]], check=True)
+
+# Close the sequential-verification gap: an early source may change while later
+# records are being checked, so resolve every authoritative pathname once more.
+for rec in records:
+    current = os.lstat(rec["source"])
+    if not stat.S_ISREG(current.st_mode) or signature(current) != rec["signature"]:
+        raise SystemExit("candidate input set changed after final recheck: " + rec["source"])
+PY
+}
+
 host_path() {
   if command -v cygpath >/dev/null 2>&1; then
     cygpath -am "$1" | tr '[:upper:]' '[:lower:]'
@@ -107,27 +276,49 @@ else
     && [ "$results_abs" != "$(cd "$SCRIPT_DIR/results" && pwd -P)" ] \
     || die "custom trust anchors are test-only and cannot publish to canonical directories"
 fi
-[ ! -e "$CANDIDATES_DIR/.eval-agent.lock" ] && [ ! -L "$CANDIDATES_DIR/.eval-agent.lock" ] || die "Agent evaluation is still active or stale"
-[ ! -e "$CANDIDATES_DIR/.eval-write.lock" ] && [ ! -L "$CANDIDATES_DIR/.eval-write.lock" ] || die "candidate publication is incomplete"
-
+candidate_lock="$CANDIDATES_DIR/.eval-agent.lock"
+if ! mkdir "$candidate_lock" 2>/dev/null; then
+  die "Agent evaluation is active or candidate lock is stale: $candidate_lock"
+fi
+candidate_lock_owned=true
 publication_lock="$RESULTS_DIR/.eval-write.lock"
-if ! mkdir "$publication_lock" 2>/dev/null; then die "result publication lock exists: $publication_lock"; fi
 publication_started=false
 tmp=""
 cleanup() {
   if [ -n "$tmp" ] && [ -d "$tmp" ]; then rm -rf -- "$tmp"; fi
   if [ "$publication_started" = false ] && [ -d "$publication_lock" ]; then rmdir "$publication_lock" 2>/dev/null || true; fi
+  if [ "$candidate_lock_owned" = true ] && [ -d "$candidate_lock" ]; then rmdir "$candidate_lock" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
+
+[ ! -e "$CANDIDATES_DIR/.eval-write.lock" ] && [ ! -L "$CANDIDATES_DIR/.eval-write.lock" ] || die "candidate publication is incomplete"
+if ! mkdir "$publication_lock" 2>/dev/null; then die "result publication lock exists: $publication_lock"; fi
 
 [ -f "$CANDIDATE" ] && [ ! -L "$CANDIDATE" ] || die "candidate missing or unsafe"
 candidate_abs="$(cd "$(dirname "$CANDIDATE")" && pwd -P)/$(basename "$CANDIDATE")"
 case "$candidate_abs" in "$candidates_abs"/*.json) ;; *) die "candidate is outside the authoritative candidate directory" ;; esac
 case "$(basename "$candidate_abs")" in *.reviewer-output.json|*[!A-Za-z0-9._-]*) die "unsafe candidate name" ;; esac
 
-case_name="$(jq -r '.case // empty' "$candidate_abs")"
-case_version="$(jq -r '.case_version // empty' "$candidate_abs")"
-scenario="$(jq -r '.scenario_ref // empty' "$candidate_abs")"
+tmp="$(mktemp -d "$RESULTS_DIR/.attest.XXXXXX")" || die "attestation staging failed"
+base="${candidate_abs%.json}"
+base_name="$(basename "$base")"
+artifact_suffixes=(transcript.jsonl tree.sha256 subject-events.jsonl reviewer-events.jsonl turn-trees.jsonl evaluator-events.jsonl reviewer-output.json objective-checks.jsonl project-brief.json isolation.json)
+artifact_keys=(transcript tree subject_events reviewer_events turn_trees evaluator_events reviewer_output objective_checks project_brief isolation)
+
+snapshot_dir="$tmp/inputs"
+mkdir "$snapshot_dir" || die "private snapshot directory creation failed"
+snapshot_candidate="$snapshot_dir/$base_name.json"
+snapshot_manifest="$tmp/input-snapshot.json"
+snapshot_args=("$candidate_abs" "$snapshot_candidate")
+for suffix in "${artifact_suffixes[@]}"; do
+  snapshot_args+=("$base.$suffix" "$snapshot_dir/$base_name.$suffix")
+done
+snapshot_inputs "$snapshot_manifest" "${snapshot_args[@]}" || die "candidate snapshot failed"
+snapshot_base="$snapshot_dir/$base_name"
+
+case_name="$(jq -r '.case // empty' "$snapshot_candidate")"
+case_version="$(jq -r '.case_version // empty' "$snapshot_candidate")"
+scenario="$(jq -r '.scenario_ref // empty' "$snapshot_candidate")"
 case_file=""
 while IFS= read -r candidate_case; do
   if [ "$(jq -r '.name // empty' "$candidate_case")" = "$case_name" ]; then
@@ -136,27 +327,21 @@ while IFS= read -r candidate_case; do
   fi
 done < <(find "$CASES_DIR" -maxdepth 1 -type f -name '*.json' | LC_ALL=C sort)
 [ -n "$case_file" ] && [ ! -L "$case_file" ] || die "current case authority not found"
-
-tmp="$(mktemp -d "$RESULTS_DIR/.attest.XXXXXX")" || die "attestation staging failed"
+case "$base_name" in "$case_name.$case_version."*) ;; *) die "candidate filename does not match case authority" ;; esac
 
 runtime_file_manifest "$ROOT" "$tmp/runtime.manifest" || die "current runtime authority is unsafe"
 jq -cS '.reviewer_rubric' "$case_file" > "$tmp/rubric.json"
 input_count="$(jq '.mock_user_inputs | length' "$case_file")"
-base="${candidate_abs%.json}"
-base_name="$(basename "$base")"
-case "$base_name" in "$case_name.$case_version."*) ;; *) die "candidate filename does not match case authority" ;; esac
-artifact_suffixes=(transcript.jsonl tree.sha256 subject-events.jsonl reviewer-events.jsonl turn-trees.jsonl evaluator-events.jsonl reviewer-output.json objective-checks.jsonl project-brief.json isolation.json)
-artifact_keys=(transcript tree subject_events reviewer_events turn_trees evaluator_events reviewer_output objective_checks project_brief isolation)
 
 for ((i=0; i<${#artifact_suffixes[@]}; i++)); do
-  path="$base.${artifact_suffixes[$i]}"
+  path="$snapshot_base.${artifact_suffixes[$i]}"
   key="${artifact_keys[$i]}"
   [ -f "$path" ] && [ ! -L "$path" ] || die "candidate companion missing or unsafe: $path"
-  [ "$(jq -r --arg key "$key" '.artifact_hashes[$key] // empty' "$candidate_abs")" = "$(sha "$path")" ] \
+  [ "$(jq -r --arg key "$key" '.artifact_hashes[$key] // empty' "$snapshot_candidate")" = "$(sha "$path")" ] \
     || die "candidate companion hash mismatch: $key"
 done
 
-jq -e 'type == "object"' "$base.project-brief.json" >/dev/null || die "captured PROJECT_BRIEF.json is invalid"
+jq -e 'type == "object"' "$snapshot_base.project-brief.json" >/dev/null || die "captured PROJECT_BRIEF.json is invalid"
 jq -e '
   .schema_version == 1
   and .isolation == "windows-native-elevated-acl"
@@ -164,7 +349,7 @@ jq -e '
   and .source_workspace_visible_to_agent == false
   and .user_home_visible_to_agent == false
   and (.checks | type == "array" and length == 6 and all(.[]; .read_execute_denied == true))
-' "$base.isolation.json" >/dev/null || die "isolation evidence is incomplete"
+  ' "$snapshot_base.isolation.json" >/dev/null || die "isolation evidence is incomplete"
 
 signer_public="$(ssh-keygen -y -f "$SIGNING_KEY" | tr -d '\r')" || die "could not read signing key"
 signer_fingerprint="$(printf '%s\n' "$signer_public" | ssh-keygen -lf - -E sha256 | awk '{print $2}' | tr -d '\r')"
@@ -204,9 +389,9 @@ jq -e \
     and (.reviewer.session_id | type == "string" and length > 0)
     and (.reviewer.session_id as $rid | (.subject.session_ids | index($rid)) == null)
     and (.artifact_hashes | keys | sort == ["evaluator_events","isolation","objective_checks","project_brief","reviewer_events","reviewer_output","subject_events","transcript","tree","turn_trees"])
-  ' "$candidate_abs" >/dev/null || die "candidate is stale, failed, synthetic, unisolated, or structurally invalid"
+  ' "$snapshot_candidate" >/dev/null || die "candidate is stale, failed, synthetic, unisolated, or structurally invalid"
 
-candidate_sha="$(sha "$candidate_abs")"
+candidate_sha="$(sha "$snapshot_candidate")"
 promoted="$tmp/$base_name.json"
 jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg fingerprint "$signer_fingerprint" --arg candidate_sha "$candidate_sha" '
   .release_eligible = true
@@ -220,11 +405,31 @@ jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg fingerprint "$signer_fingerp
       candidate_sha256:$candidate_sha,
       attested_at:$now
     }
-' "$candidate_abs" > "$promoted"
+' "$snapshot_candidate" > "$promoted"
 
 ssh-keygen -Y sign -q -f "$SIGNING_KEY" -n harness-eval "$promoted"
 mv "$promoted.sig" "$tmp/$base_name.attestation.sig"
-for suffix in "${artifact_suffixes[@]}"; do cp "$base.$suffix" "$tmp/$base_name.$suffix"; done
+for suffix in "${artifact_suffixes[@]}"; do cp "$snapshot_base.$suffix" "$tmp/$base_name.$suffix"; done
+
+# Test-only hook for proving that an input swap after validation cannot be
+# promoted. Production use cannot opt into this hook while publishing to the
+# canonical trust directories.
+if [ -n "${HARNESS_EVAL_TEST_AFTER_SNAPSHOT_HOOK:-}" ] || [ -n "${HARNESS_EVAL_TEST_DURING_RECHECK_HOOK:-}" ] || [ -n "${HARNESS_EVAL_TEST_AFTER_FIRST_RECHECK_HOOK:-}" ]; then
+  [ "$allowed_signers_abs" != "$canonical_allowed_signers" ] && [ "$candidates_abs" != "$(cd "$SCRIPT_DIR/candidates" && pwd -P)" ] && [ "$results_abs" != "$(cd "$SCRIPT_DIR/results" && pwd -P)" ] || die "snapshot hook is test-only"
+fi
+if [ -n "${HARNESS_EVAL_TEST_AFTER_SNAPSHOT_HOOK:-}" ]; then
+  [ -f "$HARNESS_EVAL_TEST_AFTER_SNAPSHOT_HOOK" ] && [ ! -L "$HARNESS_EVAL_TEST_AFTER_SNAPSHOT_HOOK" ] || die "snapshot hook missing or unsafe"
+  bash "$HARNESS_EVAL_TEST_AFTER_SNAPSHOT_HOOK" "$candidate_abs" || die "snapshot hook failed"
+fi
+if [ -n "${HARNESS_EVAL_TEST_DURING_RECHECK_HOOK:-}" ]; then
+  [ -f "$HARNESS_EVAL_TEST_DURING_RECHECK_HOOK" ] && [ ! -L "$HARNESS_EVAL_TEST_DURING_RECHECK_HOOK" ] || die "recheck hook missing or unsafe"
+fi
+if [ -n "${HARNESS_EVAL_TEST_AFTER_FIRST_RECHECK_HOOK:-}" ]; then
+  [ -f "$HARNESS_EVAL_TEST_AFTER_FIRST_RECHECK_HOOK" ] && [ ! -L "$HARNESS_EVAL_TEST_AFTER_FIRST_RECHECK_HOOK" ] || die "set-recheck hook missing or unsafe"
+fi
+
+HARNESS_EVAL_TEST_DURING_RECHECK_TARGET="$candidate_abs" verify_snapshot_sources "$snapshot_manifest" || die "candidate input drifted after validation"
+[ "$(sha "$snapshot_candidate")" = "$candidate_sha" ] || die "private candidate snapshot changed"
 
 publish_args=()
 for suffix in "${artifact_suffixes[@]}"; do publish_args+=("$tmp/$base_name.$suffix" "$RESULTS_DIR/$base_name.$suffix"); done
@@ -243,6 +448,9 @@ python "$PUBLISHER" "$promoted" "$RESULTS_DIR/$base_name.json" \
   || die "authoritative result publication failed; lock retained"
 rmdir "$publication_lock"
 publication_lock=""
+publication_started=false
+rmdir "$candidate_lock" || die "candidate attestation lock cleanup failed"
+candidate_lock_owned=false
 
 echo "eval-attest: result=$RESULTS_DIR/$base_name.json"
 echo "eval-attest: candidate_sha256=$candidate_sha signer=$signer_fingerprint"

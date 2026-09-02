@@ -10,6 +10,42 @@ PASS=0; FAIL=0
 ok() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "FAIL: $1" >&2; FAIL=$((FAIL + 1)); }
 check() { local label="$1"; shift; if "$@"; then ok "$label"; else bad "$label"; fi; }
+tag_ci_gate_wired() {
+  local prelude tag_env branch_env
+  prelude="$(python - "$ROOT/.github/workflows/ci.yml" <<'PY'
+import sys, textwrap
+
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+starts = [i for i, line in enumerate(lines)
+          if line.strip() == "- name: Phase 7 — Release archive gate"]
+if len(starts) != 1:
+    raise SystemExit(1)
+start = starts[0]
+end = next((i for i in range(start + 1, len(lines))
+            if lines[i].startswith("      - name: ")), len(lines))
+block = lines[start:end]
+
+begins = [i for i, line in enumerate(block) if line.strip() == 'GITHUB_TAG=""']
+ends = [i for i, line in enumerate(block) if line.strip() == "export GITHUB_TAG"]
+calls = [i for i, line in enumerate(block)
+         if line.strip() == "if HARNESS_VALIDATOR_SKIP_OK=1 bash tests/release/test-release-archive.sh; then"]
+if len(begins) != 1 or len(ends) != 1 or len(calls) != 1:
+    raise SystemExit(1)
+begin, finish, call = begins[0], ends[0], calls[0]
+if not begin < finish < call:
+    raise SystemExit(1)
+print(textwrap.dedent("\n".join(block[begin:finish + 1])))
+PY
+  )" || return 1
+  tag_env="$(env -u HARNESS_REQUIRE_EVAL_RESULTS GITHUB_REF_TYPE=tag GITHUB_REF=refs/tags/v-test bash -c "$prelude"$'\nenv')" || return 1
+  branch_env="$(env -u HARNESS_REQUIRE_EVAL_RESULTS GITHUB_REF_TYPE=branch GITHUB_REF=refs/heads/main bash -c "$prelude"$'\nenv')" || return 1
+  printf '%s\n' "$tag_env" | grep -Fxq 'GITHUB_TAG=v-test' || return 1
+  printf '%s\n' "$tag_env" | grep -Fxq 'HARNESS_REQUIRE_EVAL_RESULTS=1' || return 1
+  printf '%s\n' "$branch_env" | grep -Fxq 'GITHUB_TAG=' || return 1
+  if printf '%s\n' "$branch_env" | grep -q '^HARNESS_REQUIRE_EVAL_RESULTS='; then
+    return 1
+  fi
+}
 
 mapfile -t cases < <(find "$EVAL/cases" -maxdepth 1 -type f -name '*.json' | LC_ALL=C sort)
 check "exactly 14 versioned forward-eval cases" test "${#cases[@]}" -eq 14
@@ -75,6 +111,7 @@ if grep -q 'signing key must be inside a root denied to eval sandbox accounts' "
 else
   bad "attester confines release keys to ACL-protected roots"
 fi
+check "tag CI explicitly enables the real-result gate in the Phase 7 execution path" tag_ci_gate_wired
 
 mkdir -p "$TMP/cases" "$TMP/results" "$TMP/results-official" "$TMP/bin" "$TMP/fake-state"
 cp "$EVAL/cases/vague-goal.json" "$TMP/cases/"
@@ -287,6 +324,63 @@ elif [ "$attested_sha" = "$(sha256sum "$attested" | cut -d ' ' -f 1)" ] && [ ! -
   ok "attester refuses replacement and releases a clean pre-publication lock"
 else
   bad "attester refuses replacement and releases a clean pre-publication lock"
+fi
+
+# An attacker that replaces a candidate after structural validation must not
+# race the attester into signing or publishing a different byte stream.
+mkdir -p "$TMP/swap-candidates" "$TMP/swap-results"
+for f in "$attest_base".*; do cp "$f" "$TMP/swap-candidates/"; done
+swap_candidate="$TMP/swap-candidates/$(basename "$attest_candidate")"
+cat > "$TMP/swap-after-snapshot.sh" <<'HOOK'
+#!/bin/bash
+set -euo pipefail
+printf '\n' >> "$1"
+HOOK
+chmod +x "$TMP/swap-after-snapshot.sh"
+if HARNESS_EVAL_TEST_AFTER_SNAPSHOT_HOOK="$TMP/swap-after-snapshot.sh" bash "$EVAL/attest-result.sh" "$swap_candidate" --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/swap-candidates" --results-dir="$TMP/swap-results" --allowed-signers="$TMP/test-release-signers" > "$TMP/swap-attest.log" 2>&1; then
+  bad "attester rejects a candidate swap after private snapshot"
+elif grep -Fq 'candidate input drifted after validation' "$TMP/swap-attest.log" && [ ! -e "$TMP/swap-results/$(basename "$attested")" ] && [ ! -e "$TMP/swap-results/.eval-write.lock" ] && [ ! -e "$TMP/swap-candidates/.eval-agent.lock" ]; then
+  ok "attester rejects a candidate swap after private snapshot"
+else
+  sed 's/^/  swap-attester: /' "$TMP/swap-attest.log" >&2
+  bad "attester rejects a candidate swap after private snapshot"
+fi
+
+# Exercise the narrower race after the verifier has read an opened descriptor
+# but before it re-resolves the pathname. Preserve bytes and mtime so identity
+# is the signal that closes the gap.
+mkdir -p "$TMP/recheck-candidates" "$TMP/recheck-results"
+for f in "$attest_base".*; do cp "$f" "$TMP/recheck-candidates/"; done
+recheck_candidate="$TMP/recheck-candidates/$(basename "$attest_candidate")"
+cat > "$TMP/swap-during-recheck.sh" <<'HOOK'
+#!/bin/bash
+set -euo pipefail
+replacement="$1.replacement"
+cp -p "$1" "$replacement"
+mv -f "$replacement" "$1"
+HOOK
+chmod +x "$TMP/swap-during-recheck.sh"
+if HARNESS_EVAL_TEST_DURING_RECHECK_HOOK="$TMP/swap-during-recheck.sh" bash "$EVAL/attest-result.sh" "$recheck_candidate" --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/recheck-candidates" --results-dir="$TMP/recheck-results" --allowed-signers="$TMP/test-release-signers" > "$TMP/recheck-attest.log" 2>&1; then
+  bad "attester detects pathname replacement during final recheck"
+elif grep -Fq 'recheck source path changed after reading' "$TMP/recheck-attest.log" && [ ! -e "$TMP/recheck-results/$(basename "$attested")" ] && [ ! -e "$TMP/recheck-results/.eval-write.lock" ] && [ ! -e "$TMP/recheck-candidates/.eval-agent.lock" ]; then
+  ok "attester detects pathname replacement during final recheck"
+else
+  sed 's/^/  recheck-attester: /' "$TMP/recheck-attest.log" >&2
+  bad "attester detects pathname replacement during final recheck"
+fi
+
+# Replace the first source only after its individual source+snapshot checks
+# have passed. The final all-source identity pass must still reject the set.
+mkdir -p "$TMP/set-recheck-candidates" "$TMP/set-recheck-results"
+for f in "$attest_base".*; do cp "$f" "$TMP/set-recheck-candidates/"; done
+set_recheck_candidate="$TMP/set-recheck-candidates/$(basename "$attest_candidate")"
+if HARNESS_EVAL_TEST_AFTER_FIRST_RECHECK_HOOK="$TMP/swap-during-recheck.sh" bash "$EVAL/attest-result.sh" "$set_recheck_candidate" --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/set-recheck-candidates" --results-dir="$TMP/set-recheck-results" --allowed-signers="$TMP/test-release-signers" > "$TMP/set-recheck-attest.log" 2>&1; then
+  bad "attester detects early-source replacement during later set verification"
+elif grep -Fq 'candidate input set changed after final recheck' "$TMP/set-recheck-attest.log" && [ ! -e "$TMP/set-recheck-results/$(basename "$attested")" ] && [ ! -e "$TMP/set-recheck-results/.eval-write.lock" ] && [ ! -e "$TMP/set-recheck-candidates/.eval-agent.lock" ]; then
+  ok "attester detects early-source replacement during later set verification"
+else
+  sed 's/^/  set-recheck-attester: /' "$TMP/set-recheck-attest.log" >&2
+  bad "attester detects early-source replacement during later set verification"
 fi
 
 mkdir -p "$TMP/results-claude"

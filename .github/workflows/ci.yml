@@ -380,6 +380,11 @@ jobs:
           GITHUB_TAG=""
           if [ "$GITHUB_REF_TYPE" = "tag" ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
             GITHUB_TAG="${GITHUB_REF#refs/tags/}"
+            # Defense in depth: B5b already activates for a non-empty
+            # GITHUB_TAG, but tag CI also sets the explicit release-intent bit
+            # so a future archive-download refactor cannot silently skip the
+            # real forward-eval result gate.
+            export HARNESS_REQUIRE_EVAL_RESULTS=1
           fi
           export GITHUB_TAG
           if [ -n "$GITHUB_TAG" ]; then

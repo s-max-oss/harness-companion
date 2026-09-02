@@ -100,14 +100,16 @@ check "release gate is syntactically valid" bash -n "$EVAL/check-results.sh"
 check "real eval sanitizes cross-edition PSModulePath through a trusted absolute env" grep -Fq '"$TRUSTED_WINDOWS_ENV" -u PSModulePath "$WINDOWS_POWERSHELL" "$@"' "$EVAL/run-eval.sh"
 check "all eval ACL invocations use the sanitized PowerShell wrapper" bash -c '! grep -Eq "^[[:space:]]*powershell[.]exe[[:space:]]" "$1"' _ "$EVAL/run-eval.sh"
 check "real eval fails closed unless the elevated Codex sandbox is provisioned" bash -c 'grep -Fq "sandbox backend" "$1" && grep -Fq "sandbox provisioning" "$1"' _ "$EVAL/run-eval.sh"
-check "real eval authenticates Agent executables independently of PATH" bash -c 'grep -Fq "Get-AuthenticodeSignature" "$1" && grep -Fq "publisher_thumbprints" "$1" && grep -Fq "subject executable is not an authentic" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval authenticates snapshotted Agent executables independently of PATH" bash -c 'grep -Fq "Get-AuthenticodeSignature" "$1" && grep -Fq "publisher_thumbprints" "$1" && grep -Fq "subject executable snapshot is not an authentic" "$1"' _ "$EVAL/run-eval.sh"
 check "real eval uses a protected absolute GNU timeout" bash -c 'grep -Fq "TRUSTED_WINDOWS_TIMEOUT=\"/c/Program Files/Git/usr/bin/timeout.exe\"" "$1" && grep -Fq "TIMEOUT_BIN=\"\$TRUSTED_WINDOWS_TIMEOUT\"" "$1"' _ "$EVAL/run-eval.sh"
-check "real eval launches Codex through a trusted absolute env under a system-only PATH" bash -c 'grep -Fq "TRUSTED_WINDOWS_ENV=\"/c/Program Files/Git/usr/bin/env.exe\"" "$1" && grep -Fq "subject_launch=(\"\$TRUSTED_WINDOWS_ENV\" \"PATH=\$sandbox_path\" \"\$subject_executable\")" "$1" && grep -Fq "System32/WindowsPowerShell/v1.0" "$1" && ! grep -q "RuntimeRoot\|CodexBinRoot" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval launches Codex through a trusted absolute env under a system-only PATH" bash -c 'grep -Fq "TRUSTED_WINDOWS_ENV=\"/c/Program Files/Git/usr/bin/env.exe\"" "$1" && grep -Fq "subject_launch=(\"\$TRUSTED_WINDOWS_ENV\" \"PATH=\$sandbox_path\" \"\$subject_launch_executable\")" "$1" && grep -Fq "System32/WindowsPowerShell/v1.0" "$1" && ! grep -q "RuntimeRoot\|CodexBinRoot" "$1"' _ "$EVAL/run-eval.sh"
 check "real eval records an effective Offline-sandbox access probe" bash -c 'grep -Fq "codexsandboxoffline" "$1" && grep -Fq "source_workspace_readable == false" "$1" && grep -Fq "controller_readable == false" "$1" && grep -Fq "user_home_readable == false" "$1"' _ "$EVAL/run-eval.sh"
 check "all real eval output directories share one ACL transition lock" grep -Fq 'acl_lock="$ROOT/.harness/eval-acl.lock"' "$EVAL/run-eval.sh"
 check "crashed eval ACL state has an explicit liveness-checked recovery command" bash -c 'grep -Fq "kill -0" "$1" && grep -Fq "ACL restoration complete" "$1"' _ "$EVAL/recover-windows-isolation.sh"
 check "real eval binds the token-resolved user profile instead of caller USERPROFILE" bash -c 'grep -Fq "GetFolderPath([Environment+SpecialFolder]::UserProfile)" "$1" && ! grep -Fq "\${USERPROFILE:-\$HOME}" "$1"' _ "$EVAL/run-eval.sh"
-check "real Agent publisher identity is pinned by exact certificate and install policy" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin"' "$EVAL/trust/agent-publishers.json"
+check "real Agent identity is pinned by certificate, install path, and approved build digest" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin" and (.agents.codex.approved_builds | length > 0 and all(.[]; (.cli_version | length > 0) and (.sha256 | test("^[0-9a-f]{64}$"))))' "$EVAL/trust/agent-publishers.json"
+check "real eval launches only handle-locked executable snapshots" bash -c 'grep -Fq "snapshot_executable \"\$subject_executable\" \"\$subject_launch_executable\"" "$1" && grep -Fq "start_executable_guard" "$1" && grep -Fq "verify_guarded_executables" "$1" && grep -Fq "FileShare]::Read" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/windows-executable-guard.ps1"
+check "probe invokes only hash-bound absolute system executables" bash -c 'grep -Fq "WINDOWS_POWERSHELL=\"/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe\"" "$1" && grep -Fq "WINDOWS_WHOAMI=\"/c/Windows/System32/whoami.exe\"" "$1" && grep -Fq "probe.executables" "$2" && ! grep -Fq "cmd.exe /d /c" "$1" && ! grep -Fq "& whoami.exe" "$3"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh" "$EVAL/windows-isolation-probe.ps1"
 check "Windows canonical path comparisons are case-normalized" bash -c 'grep -Fq "output_host=\"\$(host_path" "$1" && grep -Fq "allowed_signers_host=\"\$(host_path" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh"
 check "release gate performs a concluding set-wide evidence pass" grep -Fq 'evidence source set changed during concluding verification' "$EVAL/check-results.sh"
 check "release gate holds the publication lock and rechecks directory membership" bash -c 'grep -Fq "directory_manifest \"\$RESULTS_DIR\" \"\$tmp/results.before.manifest\"" "$1" && grep -Fq "result membership or content changed during validation" "$1"' _ "$EVAL/check-results.sh"
@@ -117,8 +119,11 @@ check "ACL recovery binds a stable Windows file identity" bash -c 'grep -Fq "Get
 check "ACL reads and writes use verified open handles, not pathname ACL APIs" bash -c 'grep -Fq "GetKernelObjectSecurity" "$1" && grep -Fq "SetSecurityInfo" "$1" && ! grep -Eq "Get-Acl|^[[:space:]]*Set-Acl|[.]SetAccessControl[(]" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
 if command -v powershell.exe >/dev/null 2>&1; then
   check "Windows ACL helper round-trips DACL and retains failed recovery state" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-isolation-acl.ps1" -Helper "$EVAL/windows-isolation-acl.ps1"
+  mkdir -p "$TMP/executable-guard-test"
+  check "Windows executable guard permits launch but blocks overwrite and replacement" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-executable-guard.ps1" -Guard "$(cygpath -w "$EVAL/windows-executable-guard.ps1")" -TempRoot "$(cygpath -w "$TMP/executable-guard-test")" -LaunchSource 'C:\Windows\System32\whoami.exe'
 else
   ok "Windows ACL helper integration is Windows-only"
+  ok "Windows executable guard integration is Windows-only"
 fi
 check "reviewer schema is non-empty and parses" jq -e '.properties.checks.minItems == 1' "$EVAL/reviewer-output.schema.json"
 if grep -q -- '--eval' "$ROOT/scripts/harness-init.sh"; then bad "executor contains no eval/pseudo-dialog mode"; else ok "executor contains no eval/pseudo-dialog mode"; fi
@@ -327,12 +332,18 @@ mkdir -p "$TMP/attest-candidates" "$TMP/attested-results"
 for f in "$base".*; do cp "$f" "$TMP/attest-candidates/"; done
 attest_candidate="$TMP/attest-candidates/$(basename "$result")"
 attest_base="${attest_candidate%.json}"
-test_probe_payload="$(jq -cnS '{nonce:"test-nonce",target_file:"C:\\target\\.harness-eval-isolation-sentinel",source_file:"C:\\workspace\\SKILL.md",controller_file:"C:\\controller\\runtime.manifest",user_home:"C:\\home"}')"
+test_powershell_posix="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+test_whoami_posix="/c/Windows/System32/whoami.exe"
+test_powershell_win="$(cygpath -w "$test_powershell_posix")"
+test_whoami_win="$(cygpath -w "$test_whoami_posix")"
+test_powershell_sha="$(sha256sum "$test_powershell_posix" | cut -d ' ' -f 1)"
+test_whoami_sha="$(sha256sum "$test_whoami_posix" | cut -d ' ' -f 1)"
+test_probe_payload="$(jq -cnS --arg whoami "$test_whoami_win" '{nonce:"test-nonce",target_file:"C:\\target\\.harness-eval-isolation-sentinel",source_file:"C:\\workspace\\SKILL.md",controller_file:"C:\\controller\\runtime.manifest",user_home:"C:\\home",whoami_file:$whoami}')"
 test_probe_payload_b64="$(printf '%s' "$test_probe_payload" | base64 | tr -d '\r\n')"
 test_probe_program_b64="$(iconv -f UTF-8 -t UTF-16LE < "$EVAL/windows-isolation-probe.ps1" | base64 | tr -d '\r\n')"
-test_probe_command="cmd.exe /d /c \"set HARNESS_EVAL_PROBE_PAYLOAD=$test_probe_payload_b64&&powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $test_probe_program_b64\""
+test_probe_command="\$env:HARNESS_EVAL_PROBE_PAYLOAD='$test_probe_payload_b64'; & '$test_powershell_win' -NoProfile -ExecutionPolicy Bypass -EncodedCommand '$test_probe_program_b64'"
 test_probe_result="$(jq -cn '{nonce:"test-nonce",identity:"test-host\\codexsandboxoffline",target_file_readable:true,target_writeable:true,source_workspace_readable:false,controller_readable:false,user_home_readable:false}')"
-jq -n --arg command "$test_probe_command" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" '{
+jq -n --arg command "$test_probe_command" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" '{
   schema_version:2,
   isolation:"windows-native-elevated-acl",
   controller_visible_to_agent:false,
@@ -356,19 +367,24 @@ jq -n --arg command "$test_probe_command" --arg output "$test_probe_result"$'\n'
     command_event:{type:"command_execution",command:$command,aggregated_output:$output,exit_code:0,status:"completed"},
     payload:$payload,
     result:$result,
+    executables:{powershell:{path:$powershell_path,sha256:$powershell_sha},whoami:{path:$whoami_path,sha256:$whoami_sha}},
     sanitized_path:["/c/Windows/System32/WindowsPowerShell/v1.0","/c/Windows/System32","/c/Windows","/c/Program Files/Git/bin","/c/Program Files/Git/usr/bin"]
   }
 }' > "$attest_base.isolation.json"
 isolation_sha="$(sha256sum "$attest_base.isolation.json" | cut -d ' ' -f 1)"
 test_publisher_subject="$(jq -r '.agents.codex.publisher_subject' "$EVAL/trust/agent-publishers.json")"
 test_publisher_thumbprint="$(jq -r '.agents.codex.publisher_thumbprints[0]' "$EVAL/trust/agent-publishers.json")"
-jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher_subject" --arg publisher_thumbprint "$test_publisher_thumbprint" '
+test_approved_version="$(jq -r '.agents.codex.approved_builds[0].cli_version' "$EVAL/trust/agent-publishers.json")"
+test_approved_sha="$(jq -r '.agents.codex.approved_builds[0].sha256' "$EVAL/trust/agent-publishers.json")"
+jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher_subject" --arg publisher_thumbprint "$test_publisher_thumbprint" --arg approved_version "$test_approved_version" --arg approved_sha "$test_approved_sha" '
   .synthetic=false
   | .release_eligible=false
   | .reviewer_verdict="REVIEWED"
-  | .subject.executable_sha256="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  | .subject.executable_sha256=$approved_sha
+  | .subject.cli_version=$approved_version
   | .subject.authenticode={status:"Valid",subject:$publisher_subject,thumbprint:$publisher_thumbprint}
-  | .reviewer.executable_sha256="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  | .reviewer.executable_sha256=$approved_sha
+  | .reviewer.cli_version=$approved_version
   | .reviewer.authenticode={status:"Valid",subject:$publisher_subject,thumbprint:$publisher_thumbprint}
   | .isolation={kind:"windows-native-elevated-acl",source_workspace_denied:true,user_home_denied:true,controller_denied:true}
   | .artifact_hashes.isolation=$isolation_sha
@@ -376,6 +392,19 @@ jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher
 ' "$attest_candidate" > "$TMP/attest-candidate.tmp"
 mv "$TMP/attest-candidate.tmp" "$attest_candidate"
 printf 'harness-eval-release %s\n' "$(ssh-keygen -y -f "$TMP/test-signing-key")" > "$TMP/test-release-signers"
+mkdir -p "$TMP/wrong-build-candidates" "$TMP/wrong-build-results"
+for f in "$attest_base".*; do cp "$f" "$TMP/wrong-build-candidates/"; done
+wrong_build_candidate="$TMP/wrong-build-candidates/$(basename "$attest_candidate")"
+jq '.subject.cli_version="codex-cli unapproved" | .reviewer.cli_version="codex-cli unapproved"' "$wrong_build_candidate" > "$TMP/wrong-build.tmp"
+mv "$TMP/wrong-build.tmp" "$wrong_build_candidate"
+if bash "$EVAL/attest-result.sh" "$wrong_build_candidate" \
+  --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/wrong-build-candidates" \
+  --results-dir="$TMP/wrong-build-results" --allowed-signers="$TMP/test-release-signers" \
+  > "$TMP/wrong-build.log" 2>&1; then
+  bad "attester rejects a same-publisher executable outside the approved build set"
+else
+  ok "attester rejects a same-publisher executable outside the approved build set"
+fi
 if bash "$EVAL/attest-result.sh" "$attest_candidate" \
   --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/attest-candidates" \
   --results-dir="$TMP/attested-results" --allowed-signers="$TMP/test-release-signers" \

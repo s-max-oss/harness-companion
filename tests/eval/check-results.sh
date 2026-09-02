@@ -10,9 +10,12 @@ ALLOWED_SIGNERS="$SCRIPT_DIR/trust/release-allowed-signers"
 ATTESTER="$SCRIPT_DIR/attest-result.sh"
 ACL_HELPER="$SCRIPT_DIR/windows-isolation-acl.ps1"
 ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
+EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
 ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
 PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
+WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+WINDOWS_WHOAMI="/c/Windows/System32/whoami.exe"
 for arg in "$@"; do
   case "$arg" in
     --cases-dir=*) CASES_DIR="${arg#*=}" ;;
@@ -25,9 +28,17 @@ for cmd in jq sha256sum find python ssh-keygen iconv base64 tr; do command -v "$
 [ -d "$CASES_DIR" ] && [ ! -L "$CASES_DIR" ] || { echo "eval-gate: cases directory missing or unsafe" >&2; exit 2; }
 [ -d "$RESULTS_DIR" ] && [ ! -L "$RESULTS_DIR" ] || { echo "eval-gate: results directory missing or unsafe" >&2; exit 1; }
 [ -f "$ALLOWED_SIGNERS" ] && [ ! -L "$ALLOWED_SIGNERS" ] || { echo "eval-gate: trusted signer anchor missing or unsafe" >&2; exit 2; }
-for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$AGENT_PUBLISHERS" "$PUBLISHER"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
+for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$PUBLISHER"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
 
 sha() { sha256sum "$1" | awk '{print $1}'; }
+host_path() {
+  local path="$1"
+  if command -v cygpath >/dev/null 2>&1; then path="$(cygpath -aw "$path")" || return 1; fi
+  python - "$path" <<'PY'
+import os, sys
+print(os.path.normcase(os.path.realpath(sys.argv[1])).replace(os.sep, "/"))
+PY
+}
 runtime_file_manifest() {
   python - "$1" "$2" <<'PY'
 import hashlib, json, os, stat, sys
@@ -64,14 +75,23 @@ PY
 }
 
 expected_probe_command() {
-  local evidence="$1" payload payload_b64 probe_b64
+  local evidence="$1" payload payload_b64 probe_b64 powershell_path powershell_sha whoami_path whoami_sha
   payload="$(jq -cS '.probe.payload' "$evidence")" || return 1
   [ "$payload" != null ] || return 1
+  powershell_path="$(jq -r '.probe.executables.powershell.path // empty' "$evidence")" || return 1
+  powershell_sha="$(jq -r '.probe.executables.powershell.sha256 // empty' "$evidence")" || return 1
+  whoami_path="$(jq -r '.probe.executables.whoami.path // empty' "$evidence")" || return 1
+  whoami_sha="$(jq -r '.probe.executables.whoami.sha256 // empty' "$evidence")" || return 1
+  [ "$(host_path "$powershell_path")" = "$(host_path "$WINDOWS_POWERSHELL")" ] || return 1
+  [ "$(host_path "$whoami_path")" = "$(host_path "$WINDOWS_WHOAMI")" ] || return 1
+  [ "$powershell_sha" = "$(sha "$WINDOWS_POWERSHELL")" ] || return 1
+  [ "$whoami_sha" = "$(sha "$WINDOWS_WHOAMI")" ] || return 1
+  [ "$(jq -r '.whoami_file // empty' <<< "$payload")" = "$whoami_path" ] || return 1
   payload_b64="$(printf '%s' "$payload" | base64 | tr -d '\r\n')" || return 1
   probe_b64="$(iconv -f UTF-8 -t UTF-16LE < "$ISOLATION_PROBE" | base64 | tr -d '\r\n')" || return 1
   [ -n "$probe_b64" ] || return 1
-  printf 'cmd.exe /d /c "set HARNESS_EVAL_PROBE_PAYLOAD=%s&&powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand %s"\n' \
-    "$payload_b64" "$probe_b64"
+  printf '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'"'%s'"'"'; & '"'"'%s'"'"' -NoProfile -ExecutionPolicy Bypass -EncodedCommand '"'"'%s'"'"'\n' \
+    "$payload_b64" "$powershell_path" "$probe_b64"
 }
 
 directory_manifest() {
@@ -264,13 +284,15 @@ schema_sha="$(sha "$SCRIPT_DIR/reviewer-output.schema.json")"
 attester_sha="$(sha "$ATTESTER")"
 isolation_helper_sha="$(sha "$ACL_HELPER")"
 isolation_probe_sha="$(sha "$ISOLATION_PROBE")"
+executable_guard_sha="$(sha "$EXECUTABLE_GUARD")"
 isolation_recovery_sha="$(sha "$ACL_RECOVERY")"
 agent_publishers_sha="$(sha "$AGENT_PUBLISHERS")"
 publisher_sha="$(sha "$PUBLISHER")"
 allowed_signers_sha="$(sha "$ALLOWED_SIGNERS")"
 codex_publisher_subject="$(jq -r '.agents.codex.publisher_subject // empty' "$AGENT_PUBLISHERS")"
 codex_publisher_thumbprints="$(jq -c '.agents.codex.publisher_thumbprints // []' "$AGENT_PUBLISHERS")"
-[ -n "$codex_publisher_subject" ] && [ "$codex_publisher_thumbprints" != '[]' ] || { echo "eval-gate: Agent publisher policy is invalid" >&2; exit 2; }
+codex_approved_builds="$(jq -c '.agents.codex.approved_builds // []' "$AGENT_PUBLISHERS")"
+[ -n "$codex_publisher_subject" ] && [ "$codex_publisher_thumbprints" != '[]' ] && [ "$codex_approved_builds" != '[]' ] || { echo "eval-gate: Agent publisher policy is invalid" >&2; exit 2; }
 trusted_fingerprint="$(awk '$1 == "harness-eval-release" {print $2, $3; exit}' "$ALLOWED_SIGNERS" | ssh-keygen -lf - -E sha256 | awk '{print $2}')"
 [ -n "$trusted_fingerprint" ] || { echo "eval-gate: trusted signer fingerprint unavailable" >&2; exit 2; }
 
@@ -374,7 +396,9 @@ while IFS= read -r case_file; do
     and $e.probe.command_event.command == $expected_probe
     and (($e.probe.command_event.aggregated_output
       | gsub("\r"; "") | split("\n") | map(select(length > 0)) | last | fromjson) == $e.probe.result)
-    and ($e.probe.payload | keys | sort == ["controller_file","nonce","source_file","target_file","user_home"])
+    and ($e.probe.payload | keys | sort == ["controller_file","nonce","source_file","target_file","user_home","whoami_file"])
+    and ($e.probe.executables | keys | sort == ["powershell","whoami"])
+    and (all($e.probe.executables[]; (.path | type == "string" and length > 0) and (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))))
     and ($e.probe.result | keys | sort == ["controller_readable","identity","nonce","source_workspace_readable","target_file_readable","target_writeable","user_home_readable"])
     and $e.probe.payload.nonce == $e.probe.result.nonce
     and ($e.probe.result.nonce | type == "string" and length > 0)
@@ -396,8 +420,8 @@ while IFS= read -r case_file; do
     --arg name "$name" --arg version "$version" --arg scenario "$scenario" \
     --arg case_sha "$(sha "$case_file")" --arg skill_sha "$skill_sha" --arg runtime_sha "$runtime_sha" \
     --arg runner_sha "$runner_sha" --arg schema_sha "$schema_sha" --arg rubric_sha "$(sha "$tmp/rubric.json")" --arg signer_fingerprint "$trusted_fingerprint" \
-    --arg attester_sha "$attester_sha" --arg isolation_helper_sha "$isolation_helper_sha" --arg isolation_recovery_sha "$isolation_recovery_sha" --arg isolation_probe_sha "$isolation_probe_sha" --arg agent_publishers_sha "$agent_publishers_sha" --arg publisher_sha "$publisher_sha" \
-    --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" \
+    --arg attester_sha "$attester_sha" --arg isolation_helper_sha "$isolation_helper_sha" --arg isolation_recovery_sha "$isolation_recovery_sha" --arg isolation_probe_sha "$isolation_probe_sha" --arg executable_guard_sha "$executable_guard_sha" --arg agent_publishers_sha "$agent_publishers_sha" --arg publisher_sha "$publisher_sha" \
+    --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$codex_approved_builds" \
     --argjson input_count "$input_count" '
       .schema_version == 3 and .case == $name and .case_version == $version
       and .spec_version == "2.0.0-rc.3" and .scenario_ref == $scenario
@@ -418,6 +442,7 @@ while IFS= read -r case_file; do
       and .authority.isolation_helper_sha256 == $isolation_helper_sha
       and .authority.isolation_recovery_sha256 == $isolation_recovery_sha
       and .authority.isolation_probe_sha256 == $isolation_probe_sha
+      and .authority.executable_guard_sha256 == $executable_guard_sha
       and .authority.agent_publishers_sha256 == $agent_publishers_sha
       and .authority.publisher_sha256 == $publisher_sha
       and .isolation.kind == "windows-native-elevated-acl"
@@ -432,6 +457,7 @@ while IFS= read -r case_file; do
       and .subject.authenticode.subject == $codex_publisher_subject
       and (.subject.authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
       and (.subject.cli_version | type == "string" and length > 0)
+      and (.subject as $agent | any($approved_builds[]; .cli_version == $agent.cli_version and (.sha256 | ascii_downcase) == $agent.executable_sha256))
       and (.subject.model | type == "string" and length > 0)
       and (.subject.session_ids | type == "array" and length == $input_count and (unique|length) == $input_count and all(.[]; type == "string" and length > 0))
       and .reviewer.name == "codex"
@@ -441,6 +467,7 @@ while IFS= read -r case_file; do
       and .reviewer.authenticode.subject == $codex_publisher_subject
       and (.reviewer.authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
       and (.reviewer.cli_version | type == "string" and length > 0)
+      and (.reviewer as $agent | any($approved_builds[]; .cli_version == $agent.cli_version and (.sha256 | ascii_downcase) == $agent.executable_sha256))
       and (.reviewer.model | type == "string" and length > 0)
       and (.reviewer.session_id | type == "string" and length > 0)
       and .reviewer.tools_disabled == true

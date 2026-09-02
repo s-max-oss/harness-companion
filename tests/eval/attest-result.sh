@@ -17,9 +17,11 @@ SCHEMA="$SCRIPT_DIR/reviewer-output.schema.json"
 ACL_HELPER="$SCRIPT_DIR/windows-isolation-acl.ps1"
 ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
+EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
 AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
 PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
 WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+WINDOWS_WHOAMI="/c/Windows/System32/whoami.exe"
 TRUSTED_WINDOWS_ENV="/c/Program Files/Git/usr/bin/env.exe"
 
 die() { echo "eval-attest: $*" >&2; exit 2; }
@@ -231,6 +233,15 @@ official_agent_identity() {
   printf '%s\n' "$identity"
 }
 
+official_agent_build() {
+  local agent="$1" version="$2" digest="${3,,}"
+  jq -e --arg agent "$agent" --arg version "$version" --arg digest "$digest" '
+    [.agents[$agent].approved_builds[]?
+      | select(.cli_version == $version and (.sha256 | ascii_downcase) == $digest)]
+    | length == 1
+  ' "$AGENT_PUBLISHERS" >/dev/null
+}
+
 official_agent_path() {
   local agent="$1" executable="$2" user_home="$3" executable_host home_host install_subpath prefix relative executable_names
   executable_host="$(host_path "$executable")" || return 1
@@ -246,14 +257,23 @@ official_agent_path() {
 }
 
 expected_probe_command() {
-  local evidence="$1" payload payload_b64 probe_b64
+  local evidence="$1" payload payload_b64 probe_b64 powershell_path powershell_sha whoami_path whoami_sha
   payload="$(jq -cS '.probe.payload' "$evidence")" || return 1
   [ "$payload" != null ] || return 1
+  powershell_path="$(jq -r '.probe.executables.powershell.path // empty' "$evidence")" || return 1
+  powershell_sha="$(jq -r '.probe.executables.powershell.sha256 // empty' "$evidence")" || return 1
+  whoami_path="$(jq -r '.probe.executables.whoami.path // empty' "$evidence")" || return 1
+  whoami_sha="$(jq -r '.probe.executables.whoami.sha256 // empty' "$evidence")" || return 1
+  [ "$(host_path "$powershell_path")" = "$(host_path "$WINDOWS_POWERSHELL")" ] || return 1
+  [ "$(host_path "$whoami_path")" = "$(host_path "$WINDOWS_WHOAMI")" ] || return 1
+  [ "$powershell_sha" = "$(sha "$WINDOWS_POWERSHELL")" ] || return 1
+  [ "$whoami_sha" = "$(sha "$WINDOWS_WHOAMI")" ] || return 1
+  [ "$(jq -r '.whoami_file // empty' <<< "$payload")" = "$whoami_path" ] || return 1
   payload_b64="$(printf '%s' "$payload" | base64 | tr -d '\r\n')" || return 1
   probe_b64="$(iconv -f UTF-8 -t UTF-16LE < "$ISOLATION_PROBE" | base64 | tr -d '\r\n')" || return 1
   [ -n "$probe_b64" ] || return 1
-  printf 'cmd.exe /d /c "set HARNESS_EVAL_PROBE_PAYLOAD=%s&&powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand %s"\n' \
-    "$payload_b64" "$probe_b64"
+  printf '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'"'%s'"'"'; & '"'"'%s'"'"' -NoProfile -ExecutionPolicy Bypass -EncodedCommand '"'"'%s'"'"'\n' \
+    "$payload_b64" "$powershell_path" "$probe_b64"
 }
 
 runtime_file_manifest() {
@@ -306,7 +326,7 @@ for arg in "$@"; do
 done
 
 for cmd in jq sha256sum python ssh-keygen mktemp cp find tr grep iconv base64; do need "$cmd"; done
-for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$AGENT_PUBLISHERS" "$PUBLISHER" "$ALLOWED_SIGNERS"; do
+for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$PUBLISHER" "$ALLOWED_SIGNERS"; do
   [ -f "$path" ] && [ ! -L "$path" ] || die "authority missing or unsafe: $path"
 done
 [ -n "$SIGNING_KEY" ] && [ -f "$SIGNING_KEY" ] && [ ! -L "$SIGNING_KEY" ] || die "a regular non-symlink signing key is required"
@@ -456,7 +476,9 @@ jq -e --arg expected_probe "$expected_probe" '
   and $e.probe.command_event.command == $expected_probe
   and (($e.probe.command_event.aggregated_output
     | gsub("\r"; "") | split("\n") | map(select(length > 0)) | last | fromjson) == $e.probe.result)
-  and ($e.probe.payload | keys | sort == ["controller_file","nonce","source_file","target_file","user_home"])
+  and ($e.probe.payload | keys | sort == ["controller_file","nonce","source_file","target_file","user_home","whoami_file"])
+  and ($e.probe.executables | keys | sort == ["powershell","whoami"])
+  and (all($e.probe.executables[]; (.path | type == "string" and length > 0) and (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))))
   and ($e.probe.result | keys | sort == ["controller_readable","identity","nonce","source_workspace_readable","target_file_readable","target_writeable","user_home_readable"])
   and $e.probe.payload.nonce == $e.probe.result.nonce
   and ($e.probe.result.nonce | type == "string" and length > 0)
@@ -496,6 +518,8 @@ if [ "$production_trust" = true ]; then
     [ "$agent_version" = "$snapshot_version" ] || die "$role executable version mismatch"
     jq -en --arg version "$snapshot_version" --arg pattern "$version_pattern" '$version | test($pattern)' >/dev/null \
       || die "$role executable version identity is invalid"
+    official_agent_build "$agent_name" "$snapshot_version" "$agent_sha" \
+      || die "$role executable is not an approved $agent_name build"
     jq -e --arg role "$role" --argjson actual "$actual_identity" '.[$role].authenticode == $actual' "$snapshot_candidate" >/dev/null \
       || die "$role Authenticode identity mismatch"
   done
@@ -515,8 +539,8 @@ jq -e \
   --arg name "$case_name" --arg version "$case_version" --arg scenario "$scenario" \
   --arg case_sha "$(sha "$case_file")" --arg skill_sha "$(sha "$ROOT/SKILL.md")" --arg runtime_sha "$(sha "$tmp/runtime.manifest")" \
   --arg runner_sha "$(sha "$RUNNER")" --arg schema_sha "$(sha "$SCHEMA")" --arg rubric_sha "$(sha "$tmp/rubric.json")" \
-  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg publisher_sha "$(sha "$PUBLISHER")" \
-  --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" \
+  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg executable_guard_sha "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg publisher_sha "$(sha "$PUBLISHER")" \
+  --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$(jq -c '.agents.codex.approved_builds' "$AGENT_PUBLISHERS")" \
   --argjson input_count "$input_count" '
     .schema_version == 3 and .case == $name and .case_version == $version
     and .spec_version == "2.0.0-rc.3" and .scenario_ref == $scenario
@@ -530,6 +554,7 @@ jq -e \
     and .authority.attester_sha256 == $attester_sha and .authority.isolation_helper_sha256 == $isolation_sha
     and .authority.isolation_recovery_sha256 == $recovery_sha
     and .authority.isolation_probe_sha256 == $probe_sha
+    and .authority.executable_guard_sha256 == $executable_guard_sha
     and .authority.agent_publishers_sha256 == $agent_publishers_sha
     and .authority.publisher_sha256 == $publisher_sha
     and .isolation.kind == "windows-native-elevated-acl"
@@ -544,6 +569,7 @@ jq -e \
     and .subject.authenticode.subject == $codex_publisher_subject
     and (.subject.authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
     and (.subject.cli_version | type == "string" and length > 0) and (.subject.model | type == "string" and length > 0)
+    and (.subject as $agent | any($approved_builds[]; .cli_version == $agent.cli_version and (.sha256 | ascii_downcase) == $agent.executable_sha256))
     and (.subject.session_ids | type == "array" and length == $input_count and (unique|length) == $input_count and all(.[]; type == "string" and length > 0))
     and .reviewer.name == "codex" and .reviewer.tools_disabled == true
     and (.reviewer.executable_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
@@ -551,6 +577,7 @@ jq -e \
     and .reviewer.authenticode.subject == $codex_publisher_subject
     and (.reviewer.authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
     and (.reviewer.cli_version | type == "string" and length > 0) and (.reviewer.model | type == "string" and length > 0)
+    and (.reviewer as $agent | any($approved_builds[]; .cli_version == $agent.cli_version and (.sha256 | ascii_downcase) == $agent.executable_sha256))
     and (.reviewer.session_id | type == "string" and length > 0)
     and (.reviewer.session_id as $rid | (.subject.session_ids | index($rid)) == null)
     and (.artifact_hashes | keys | sort == ["evaluator_events","isolation","objective_checks","project_brief","reviewer_events","reviewer_output","subject_events","transcript","tree","turn_trees"])

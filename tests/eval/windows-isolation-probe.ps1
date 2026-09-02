@@ -51,7 +51,7 @@ try {
 
 [ordered]@{
     nonce = $payload.nonce
-    identity = (& whoami.exe).Trim()
+    identity = (& ([string]$payload.whoami_file)).Trim()
     target_file_readable = Test-FileRead $payload.target_file
     target_writeable = $targetWrite
     source_workspace_readable = Test-FileRead $payload.source_file

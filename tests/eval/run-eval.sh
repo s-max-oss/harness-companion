@@ -13,8 +13,10 @@ ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
 ATTESTER="$SCRIPT_DIR/attest-result.sh"
 ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
+EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
 AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
 WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+WINDOWS_WHOAMI="/c/Windows/System32/whoami.exe"
 TRUSTED_WINDOWS_TIMEOUT="/c/Program Files/Git/usr/bin/timeout.exe"
 TRUSTED_WINDOWS_ENV="/c/Program Files/Git/usr/bin/env.exe"
 
@@ -53,6 +55,15 @@ official_agent_identity() {
   printf '%s\n' "$identity"
 }
 
+official_agent_build() {
+  local agent="$1" version="$2" digest="${3,,}"
+  jq -e --arg agent "$agent" --arg version "$version" --arg digest "$digest" '
+    [.agents[$agent].approved_builds[]?
+      | select(.cli_version == $version and (.sha256 | ascii_downcase) == $digest)]
+    | length == 1
+  ' "$AGENT_PUBLISHERS" >/dev/null
+}
+
 official_agent_path() {
   local agent="$1" executable="$2" user_home="$3" executable_host home_host install_subpath prefix relative executable_names
   executable_host="$(host_path "$executable")" || return 1
@@ -85,6 +96,43 @@ canonical_executable() {
   printf '%s/%s\n' "$d" "$(basename "$p")"
 }
 
+snapshot_executable() {
+  python - "$1" "$2" <<'PY'
+import hashlib, os, stat, sys
+
+source, destination = map(os.path.abspath, sys.argv[1:])
+before = os.lstat(source)
+if not stat.S_ISREG(before.st_mode):
+    raise SystemExit("unsafe executable source: " + source)
+flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(source, flags)
+opened = os.fstat(fd)
+if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+    os.close(fd)
+    raise SystemExit("executable source changed while opening: " + source)
+out = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o500)
+try:
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        view = memoryview(chunk)
+        while view:
+            written = os.write(out, view)
+            view = view[written:]
+    os.fsync(out)
+    after_fd = os.fstat(fd)
+finally:
+    os.close(out)
+    os.close(fd)
+after_path = os.lstat(source)
+identity = lambda st: (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+if identity(before) != identity(after_fd) or identity(before) != identity(after_path):
+    raise SystemExit("executable source changed while snapshotting: " + source)
+os.chmod(destination, 0o500)
+PY
+}
+
 host_path() {
   local path="$1"
   if command -v cygpath >/dev/null 2>&1; then path="$(cygpath -aw "$path")" || return 1; fi
@@ -92,6 +140,61 @@ host_path() {
 import os, sys
 print(os.path.normcase(os.path.realpath(sys.argv[1])).replace(os.sep, "/"))
 PY
+}
+
+verify_guarded_executables() {
+  [ "$executable_guard_active" = true ] || return 0
+  kill -0 "$executable_guard_pid" 2>/dev/null || return 1
+  [ -f "$subject_launch_executable" ] && [ ! -L "$subject_launch_executable" ] \
+    && [ "$(sha "$subject_launch_executable")" = "$subject_executable_sha" ] || return 1
+  [ -f "$reviewer_launch_executable" ] && [ ! -L "$reviewer_launch_executable" ] \
+    && [ "$(sha "$reviewer_launch_executable")" = "$reviewer_executable_sha" ] || return 1
+}
+
+start_executable_guard() {
+  local manifest="$controller/executable-guard.manifest.json"
+  local ready="$controller/executable-guard.ready.json"
+  local stderr="$controller/executable-guard.stderr"
+  local i subject_win reviewer_win
+  subject_win="$(cygpath -w "$subject_launch_executable")" || return 1
+  reviewer_win="$(cygpath -w "$reviewer_launch_executable")" || return 1
+  jq -n --arg subject "$subject_win" --arg reviewer "$reviewer_win" \
+    '{schema_version:1,paths:([$subject,$reviewer] | unique)}' > "$manifest" || return 1
+  executable_guard_stop="$controller/executable-guard.stop"
+  rm -f -- "$ready" "$executable_guard_stop"
+  windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$EXECUTABLE_GUARD" \
+    -ManifestFile "$(cygpath -w "$manifest")" -ReadyFile "$(cygpath -w "$ready")" \
+    -StopFile "$(cygpath -w "$executable_guard_stop")" > /dev/null 2> "$stderr" &
+  executable_guard_pid=$!
+  executable_guard_active=true
+  for i in $(seq 1 100); do
+    if [ -f "$ready" ]; then
+      jq -e --argjson expected "$(jq -c '.paths | length' "$manifest")" \
+        '.schema_version == 1 and .handle_count == $expected and (.paths | length) == $expected' "$ready" >/dev/null \
+        || return 1
+      verify_guarded_executables
+      return
+    fi
+    kill -0 "$executable_guard_pid" 2>/dev/null || return 1
+    sleep 0.1
+  done
+  return 1
+}
+
+stop_executable_guard() {
+  local i
+  [ "$executable_guard_active" = true ] || return 0
+  : > "$executable_guard_stop"
+  for i in $(seq 1 100); do
+    kill -0 "$executable_guard_pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$executable_guard_pid" 2>/dev/null; then
+    kill "$executable_guard_pid" 2>/dev/null || true
+  fi
+  wait "$executable_guard_pid" 2>/dev/null || true
+  executable_guard_active=false
+  return 0
 }
 
 tree_manifest() {
@@ -198,10 +301,13 @@ if [ "$SYNTHETIC" = 0 ] && [ "$output_host" = "$default_results_host" ]; then
 fi
 
 for cmd in jq sha256sum find cp mktemp git python tar "$AGENT" "$REVIEWER"; do need "$cmd"; done
-for path in "$PUBLISHER" "$ATTESTER" "$ACL_RECOVERY" "$AGENT_PUBLISHERS"; do
+for path in "$PUBLISHER" "$ATTESTER" "$ACL_RECOVERY" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS"; do
   [ -f "$path" ] && [ ! -L "$path" ] || die "eval authority missing or unsafe: $path"
 done
-jq -e '.schema_version == 1 and (.agents.codex.publisher_thumbprints | length > 0)' "$AGENT_PUBLISHERS" >/dev/null \
+jq -e '.schema_version == 1 and (.agents.codex.publisher_thumbprints | length > 0)
+  and (.agents.codex.approved_builds | type == "array" and length > 0
+    and all(.[]; (.cli_version | type == "string" and length > 0)
+      and (.sha256 | type == "string" and test("^[0-9a-fA-F]{64}$"))))' "$AGENT_PUBLISHERS" >/dev/null \
   || die "Agent publisher trust policy is invalid"
 real_user_home=""
 real_user_home_win=""
@@ -217,6 +323,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   case "$("$TRUSTED_WINDOWS_ENV" --version 2>/dev/null | head -1)" in 'env (GNU coreutils) '*) ;; *) die "trusted env identity is invalid" ;; esac
   [ -f "$ACL_HELPER" ] && [ ! -L "$ACL_HELPER" ] || die "Windows isolation helper missing or unsafe"
   [ -f "$ISOLATION_PROBE" ] && [ ! -L "$ISOLATION_PROBE" ] || die "Windows isolation probe missing or unsafe"
+  [ -f "$EXECUTABLE_GUARD" ] && [ ! -L "$EXECUTABLE_GUARD" ] || die "Windows executable guard missing or unsafe"
   real_user_home_win="$(windows_powershell -NoProfile -Command '[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)' | tr -d '\r')"
   [ -n "$real_user_home_win" ] || die "could not resolve the token-backed Windows user profile"
   real_user_home="$(cygpath -u "$real_user_home_win")"
@@ -263,6 +370,9 @@ else
   tmp="$(mktemp -d)" || die "mktemp failed"
 fi
 controller="$tmp/controller"
+executable_guard_active=false
+executable_guard_pid=""
+executable_guard_stop=""
 isolation_active=false
 acl_state="$ROOT/.harness/eval-acl-state.json"
 acl_lock="$ROOT/.harness/eval-acl.lock"
@@ -270,6 +380,7 @@ acl_lock_owner="$acl_lock/owner.pid"
 acl_lock_owned=false
 restore_failed=false
 cleanup() {
+  stop_executable_guard || true
   if [ "$isolation_active" = true ]; then
     if windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
       -WorkspaceRoot "$(cd "$ROOT/.." && pwd -P)" -ControllerRoot "$controller" \
@@ -301,7 +412,8 @@ agent_lock_owned=true
 target="$tmp/project"
 skill_root="$tmp/skill-authority"
 review_root="$tmp/reviewer"
-mkdir -p "$target" "$skill_root/core/lib" "$review_root" "$controller" "$OUTPUT_DIR"
+exec_root="$tmp/agent-bin"
+mkdir -p "$target" "$skill_root/core/lib" "$review_root" "$controller" "$exec_root" "$OUTPUT_DIR"
 
 if [ "$fixture_mode" = git_archive ]; then
   fixture_repo="$controller/fixture-repo"
@@ -350,26 +462,37 @@ fi
 
 subject_executable="$(canonical_executable "$AGENT")" || die "cannot resolve subject executable"
 reviewer_executable="$(canonical_executable "$REVIEWER")" || die "cannot resolve reviewer executable"
-subject_version="$("$subject_executable" --version 2>&1 | head -1)"
-reviewer_version="$("$reviewer_executable" --version 2>&1 | head -1)"
-subject_executable_sha="$(sha "$subject_executable")"
-reviewer_executable_sha="$(sha "$reviewer_executable")"
+subject_launch_executable="$subject_executable"
+reviewer_launch_executable="$reviewer_executable"
 subject_authenticode='null'
 reviewer_authenticode='null'
-subject_launch=("$subject_executable")
-reviewer_launch=("$reviewer_executable")
+subject_launch=("$subject_launch_executable")
+reviewer_launch=("$reviewer_launch_executable")
 if [ "$SYNTHETIC" = 0 ]; then
   official_agent_path "$AGENT" "$subject_executable" "$real_user_home" || die "subject executable is outside the trusted $AGENT install location"
   official_agent_path "$REVIEWER" "$reviewer_executable" "$real_user_home" || die "reviewer executable is outside the trusted $REVIEWER install location"
-  subject_authenticode="$(official_agent_identity "$AGENT" "$subject_executable")" || die "subject executable is not an authentic signed $AGENT binary"
-  reviewer_authenticode="$(official_agent_identity "$REVIEWER" "$reviewer_executable")" || die "reviewer executable is not an authentic signed $REVIEWER binary"
+  subject_launch_executable="$exec_root/subject-codex.exe"
+  reviewer_launch_executable="$exec_root/reviewer-codex.exe"
+  snapshot_executable "$subject_executable" "$subject_launch_executable" || die "could not safely snapshot subject executable"
+  snapshot_executable "$reviewer_executable" "$reviewer_launch_executable" || die "could not safely snapshot reviewer executable"
+  subject_executable_sha="$(sha "$subject_launch_executable")"
+  reviewer_executable_sha="$(sha "$reviewer_launch_executable")"
+  subject_authenticode="$(official_agent_identity "$AGENT" "$subject_launch_executable")" || die "subject executable snapshot is not an authentic signed $AGENT binary"
+  reviewer_authenticode="$(official_agent_identity "$REVIEWER" "$reviewer_launch_executable")" || die "reviewer executable snapshot is not an authentic signed $REVIEWER binary"
+  subject_version="$("$subject_launch_executable" --version 2>&1 | head -1)"
+  reviewer_version="$("$reviewer_launch_executable" --version 2>&1 | head -1)"
   subject_version_pattern="$(jq -r --arg agent "$AGENT" '.agents[$agent].version_pattern // empty' "$AGENT_PUBLISHERS")"
   reviewer_version_pattern="$(jq -r --arg agent "$REVIEWER" '.agents[$agent].version_pattern // empty' "$AGENT_PUBLISHERS")"
   jq -en --arg version "$subject_version" --arg pattern "$subject_version_pattern" '$version | test($pattern)' >/dev/null \
     || die "subject executable version identity is invalid"
   jq -en --arg version "$reviewer_version" --arg pattern "$reviewer_version_pattern" '$version | test($pattern)' >/dev/null \
     || die "reviewer executable version identity is invalid"
-  sandbox_doctor="$("$subject_executable" doctor --json 2>/dev/null)" || die "could not inspect Codex Windows sandbox readiness"
+  official_agent_build "$AGENT" "$subject_version" "$subject_executable_sha" || die "subject executable is not an approved $AGENT build"
+  official_agent_build "$REVIEWER" "$reviewer_version" "$reviewer_executable_sha" || die "reviewer executable is not an approved $REVIEWER build"
+  start_executable_guard || die "could not lock the validated Agent executable snapshots"
+  verify_guarded_executables || die "validated Agent executable guard failed before doctor"
+  sandbox_doctor="$("$subject_launch_executable" doctor --json 2>/dev/null)" || die "could not inspect Codex Windows sandbox readiness"
+  verify_guarded_executables || die "validated Agent executable guard failed after doctor"
   jq -e '
     .checks["sandbox.helpers"].status == "ok"
     and .checks["sandbox.helpers"].details["sandbox backend"] == "elevated"
@@ -381,6 +504,16 @@ if [ "$SYNTHETIC" = 0 ]; then
   [ -n "$system_root_win" ] && [ -n "$program_files_win" ] || die "could not resolve system tool roots"
   system_root_posix="$(cygpath -u "$system_root_win")"
   program_files_posix="$(cygpath -u "$program_files_win")"
+  system_powershell="$system_root_posix/System32/WindowsPowerShell/v1.0/powershell.exe"
+  system_whoami="$system_root_posix/System32/whoami.exe"
+  [ "$(host_path "$system_powershell")" = "$(host_path "$WINDOWS_POWERSHELL")" ] || die "machine PowerShell path does not match the trusted absolute path"
+  [ "$(host_path "$system_whoami")" = "$(host_path "$WINDOWS_WHOAMI")" ] || die "machine whoami path does not match the trusted absolute path"
+  [ -f "$system_powershell" ] && [ ! -L "$system_powershell" ] || die "trusted PowerShell is missing or unsafe"
+  [ -f "$system_whoami" ] && [ ! -L "$system_whoami" ] || die "trusted whoami is missing or unsafe"
+  system_powershell_sha="$(sha "$system_powershell")"
+  system_whoami_sha="$(sha "$system_whoami")"
+  system_powershell_win="$(cygpath -w "$system_powershell")"
+  system_whoami_win="$(cygpath -w "$system_whoami")"
   sandbox_path="$system_root_posix/System32/WindowsPowerShell/v1.0:$system_root_posix/System32:$system_root_posix:$program_files_posix/Git/bin:$program_files_posix/Git/usr/bin"
   for tool_dir in "$system_root_posix/System32/WindowsPowerShell/v1.0" "$system_root_posix/System32" "$program_files_posix/Git/bin" "$program_files_posix/Git/usr/bin"; do
     [ -d "$tool_dir" ] && [ ! -L "$tool_dir" ] || die "system tool directory missing or unsafe: $tool_dir"
@@ -389,8 +522,13 @@ if [ "$SYNTHETIC" = 0 ]; then
   case ":${sandbox_path,,}:" in
     *":${user_home_posix,,}:"*|*":${user_home_posix,,}/"*) die "sandbox tool path must not include the user home" ;;
   esac
-  subject_launch=("$TRUSTED_WINDOWS_ENV" "PATH=$sandbox_path" "$subject_executable")
-  if [ "$REVIEWER" = codex ]; then reviewer_launch=("$TRUSTED_WINDOWS_ENV" "PATH=$sandbox_path" "$reviewer_executable"); fi
+  subject_launch=("$TRUSTED_WINDOWS_ENV" "PATH=$sandbox_path" "$subject_launch_executable")
+  if [ "$REVIEWER" = codex ]; then reviewer_launch=("$TRUSTED_WINDOWS_ENV" "PATH=$sandbox_path" "$reviewer_launch_executable"); fi
+else
+  subject_version="$("$subject_launch_executable" --version 2>&1 | head -1)"
+  reviewer_version="$("$reviewer_launch_executable" --version 2>&1 | head -1)"
+  subject_executable_sha="$(sha "$subject_launch_executable")"
+  reviewer_executable_sha="$(sha "$reviewer_launch_executable")"
 fi
 
 transcript="$controller/transcript.jsonl"
@@ -448,6 +586,7 @@ $history
 $input
 </newest_user_message>
 EOF
+  verify_guarded_executables || die "validated Agent executable guard failed before subject turn $subject_turn"
   if [ "$AGENT" = codex ]; then
     (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
       "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
@@ -460,13 +599,14 @@ EOF
     session="$(jq -rs '[.[] | select(.type == "thread.started") | .thread_id] | first // ""' "$raw" 2>/dev/null || true)"
   else
     (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
-      "$subject_executable" --print --safe-mode --no-session-persistence --verbose --output-format stream-json \
+      "$subject_launch_executable" --print --safe-mode --no-session-persistence --verbose --output-format stream-json \
       --permission-mode acceptEdits --strict-mcp-config --model "$MODEL" \
       --system-prompt-file "$prompt" 'Respond to the newest user message now.') \
       > "$raw" 2> "$err" || rc=$?
     output="$(claude_text "$raw" 2>/dev/null || true)"
     session="$(jq -rs '[.[] | select(.type == "result") | .session_id] | last // ""' "$raw" 2>/dev/null || true)"
   fi
+  verify_guarded_executables || die "validated Agent executable guard failed after subject turn $subject_turn"
   cat "$raw" >> "$subject_events"
   subject_sessions="$(jq -c --arg s "$session" '. + [$s]' <<< "$subject_sessions")"
   [ "$rc" -eq 0 ] && [ -n "$output" ] && [ -n "$session" ] || return 1
@@ -523,13 +663,15 @@ if [ "$SYNTHETIC" = 0 ]; then
     --arg source_file "$(cygpath -w "$ROOT/SKILL.md")" \
     --arg controller_file "$(cygpath -w "$controller/runtime.manifest")" \
     --arg user_home "$real_user_home_win" \
-    '{nonce:$nonce,target_file:$target_file,source_file:$source_file,controller_file:$controller_file,user_home:$user_home}')"
+    --arg whoami_file "$system_whoami_win" \
+    '{nonce:$nonce,target_file:$target_file,source_file:$source_file,controller_file:$controller_file,user_home:$user_home,whoami_file:$whoami_file}')"
   probe_payload_b64="$(printf '%s' "$probe_payload" | base64 | tr -d '\r\n')"
   probe_encoded="$(iconv -f UTF-8 -t UTF-16LE < "$ISOLATION_PROBE" | base64 | tr -d '\r\n')"
   [ -n "$probe_encoded" ] || die "could not encode effective isolation probe"
-  probe_command="cmd.exe /d /c \"set HARNESS_EVAL_PROBE_PAYLOAD=$probe_payload_b64&&powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $probe_encoded\""
+  probe_command="\$env:HARNESS_EVAL_PROBE_PAYLOAD='$probe_payload_b64'; & '$system_powershell_win' -NoProfile -ExecutionPolicy Bypass -EncodedCommand '$probe_encoded'"
   printf 'Run exactly this one command with the shell tool, with no edits, prefixes, suffixes, pipelines, or additional commands. Do not use any other tool.\n%s\n' "$probe_command" > "$probe_prompt"
   probe_rc=0
+  verify_guarded_executables || die "validated Agent executable guard failed before isolation probe"
   (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
     "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
     -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' \
@@ -537,6 +679,7 @@ if [ "$SYNTHETIC" = 0 ]; then
     --disable apps --disable plugins --disable skill_search --disable multi_agent \
     --skip-git-repo-check --ignore-user-config --ignore-rules --model "$MODEL" --json - \
     < "$probe_prompt") > "$probe_raw" 2> "$probe_err" || probe_rc=$?
+  verify_guarded_executables || die "validated Agent executable guard failed after isolation probe"
   [ "$probe_rc" -eq 0 ] || die "effective isolation probe Agent failed (exit $probe_rc)"
   [ "$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$probe_raw")" -eq 1 ] \
     || die "effective isolation probe did not execute exactly one command"
@@ -558,9 +701,11 @@ if [ "$SYNTHETIC" = 0 ]; then
   [ "$(sha "$probe_target")" = "$probe_target_sha" ] || die "effective isolation probe target changed during execution"
   rm -f -- "$probe_target"
   [ ! -e "$probe_target" ] && [ ! -L "$probe_target" ] || die "effective isolation probe target cleanup failed"
-  jq --argjson command_event "$probe_event" --argjson result "$probe_result" --argjson payload "$probe_payload" --arg path "$sandbox_path" '
+  jq --argjson command_event "$probe_event" --argjson result "$probe_result" --argjson payload "$probe_payload" --arg path "$sandbox_path" \
+    --arg powershell_path "$system_powershell_win" --arg powershell_sha256 "$system_powershell_sha" \
+    --arg whoami_path "$system_whoami_win" --arg whoami_sha256 "$system_whoami_sha" '
     .schema_version = 2
-    | .probe = {command_event:$command_event,result:$result,payload:$payload,sanitized_path:($path | split(":"))}
+    | .probe = {command_event:$command_event,result:$result,payload:$payload,sanitized_path:($path | split(":")),executables:{powershell:{path:$powershell_path,sha256:$powershell_sha256},whoami:{path:$whoami_path,sha256:$whoami_sha256}}}
   ' "$isolation_evidence" > "$controller/isolation.with-probe.json"
   mv "$controller/isolation.with-probe.json" "$isolation_evidence"
 else
@@ -649,6 +794,7 @@ review_raw="$controller/reviewer.raw.jsonl"
 review_err="$controller/reviewer.stderr"
 review_rc=0
 if [ "$REVIEWER" = codex ]; then
+  verify_guarded_executables || die "validated Agent executable guard failed before reviewer"
   (cd "$review_root" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
     "${reviewer_launch[@]}" exec --ephemeral --cd "$review_root" --sandbox read-only --skip-git-repo-check \
     -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' \
@@ -668,13 +814,14 @@ else
     cat "$review_prompt"
   } > "$reviewer_claude_prompt"
   (cd "$review_root" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
-    "$reviewer_executable" --print --safe-mode --no-session-persistence --verbose --output-format stream-json \
+    "$reviewer_launch_executable" --print --safe-mode --no-session-persistence --verbose --output-format stream-json \
     --restricted --tools '' --strict-mcp-config --model "$REVIEWER_MODEL" --json-schema "$(cat "$SCHEMA")" \
     < "$reviewer_claude_prompt") \
     > "$review_raw" 2> "$review_err" || review_rc=$?
   jq -cs '[.[] | select(.type == "result") | (.structured_output // (.result | fromjson?) // empty)] | last // {}' "$review_raw" > "$reviewer_output" 2>/dev/null || review_rc=2
   reviewer_session="$(jq -rs '[.[] | select(.type == "result") | .session_id] | last // ""' "$review_raw" 2>/dev/null || true)"
 fi
+verify_guarded_executables || die "validated Agent executable guard failed after reviewer"
 cat "$review_raw" > "$reviewer_events"
 
 expected_checks="$(jq -c '.reviewer_rubric.checks' "$CASE")"
@@ -702,6 +849,8 @@ release_eligible=false
 # All untrusted Agent processes have exited. Restore the host ACL before the
 # controller publishes the unsigned candidate. Signing is a separate command
 # and no private-key path has existed in this process or any Agent environment.
+verify_guarded_executables || die "validated Agent executable guard failed at Agent-process closure"
+stop_executable_guard || die "could not release the validated Agent executable guard"
 if [ "$isolation_active" = true ]; then
   windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
     -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
@@ -745,14 +894,14 @@ jq -n \
   --arg reviewer_verdict "$reviewer_verdict" --arg notes "$review_notes" \
   --arg case_sha256 "$case_sha" --arg skill_sha256 "$skill_sha" --arg runtime_manifest_sha256 "$runtime_manifest_sha" \
   --arg runner_sha256 "$runner_sha" --arg reviewer_schema_sha256 "$schema_sha" --arg canonical_rubric_sha256 "$rubric_sha" \
-  --arg attester_sha256 "$(sha "$ATTESTER")" --arg isolation_helper_sha256 "$(sha "$ACL_HELPER")" --arg isolation_recovery_sha256 "$(sha "$ACL_RECOVERY")" --arg isolation_probe_sha256 "$(sha "$ISOLATION_PROBE")" --arg agent_publishers_sha256 "$(sha "$AGENT_PUBLISHERS")" --arg publisher_sha256 "$(sha "$PUBLISHER")" \
+  --arg attester_sha256 "$(sha "$ATTESTER")" --arg isolation_helper_sha256 "$(sha "$ACL_HELPER")" --arg isolation_recovery_sha256 "$(sha "$ACL_RECOVERY")" --arg isolation_probe_sha256 "$(sha "$ISOLATION_PROBE")" --arg executable_guard_sha256 "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha256 "$(sha "$AGENT_PUBLISHERS")" --arg publisher_sha256 "$(sha "$PUBLISHER")" \
   --arg subject_name "$AGENT" --arg subject_executable "$subject_executable" --arg subject_executable_sha256 "$subject_executable_sha" --arg subject_cli_version "$subject_version" --arg subject_model "$MODEL" \
   --arg reviewer_name "$REVIEWER" --arg reviewer_executable "$reviewer_executable" --arg reviewer_executable_sha256 "$reviewer_executable_sha" --arg reviewer_cli_version "$reviewer_version" --arg reviewer_model "$REVIEWER_MODEL" --arg reviewer_session_id "$reviewer_session" \
   --argjson subject_authenticode "$subject_authenticode" --argjson reviewer_authenticode "$reviewer_authenticode" \
   --argjson subject_session_ids "$subject_sessions" --argjson passed "$passed" --argjson synthetic "$([ "$SYNTHETIC" = 1 ] && echo true || echo false)" \
   --argjson release_eligible "$release_eligible" --argjson rubric_details "$rubric_details" --argjson artifact_hashes "$artifact_hashes" \
   --slurpfile objective_checks "$objective_checks" \
-  '{schema_version:3,case:$case,case_version:$case_version,spec_version:"2.0.0-rc.3",scenario_ref:$scenario_ref,timestamp:$timestamp,passed:$passed,synthetic:$synthetic,release_eligible:$release_eligible,rubric_score:$rubric_score,rubric_details:$rubric_details,objective_checks:$objective_checks,reviewer_verdict:$reviewer_verdict,notes:$notes,authority:{case_sha256:$case_sha256,skill_sha256:$skill_sha256,runtime_manifest_sha256:$runtime_manifest_sha256,runner_sha256:$runner_sha256,reviewer_schema_sha256:$reviewer_schema_sha256,canonical_rubric_sha256:$canonical_rubric_sha256,attester_sha256:$attester_sha256,isolation_helper_sha256:$isolation_helper_sha256,isolation_recovery_sha256:$isolation_recovery_sha256,isolation_probe_sha256:$isolation_probe_sha256,agent_publishers_sha256:$agent_publishers_sha256,publisher_sha256:$publisher_sha256},subject:{name:$subject_name,executable:$subject_executable,executable_sha256:$subject_executable_sha256,authenticode:$subject_authenticode,cli_version:$subject_cli_version,model:$subject_model,session_ids:$subject_session_ids},reviewer:{name:$reviewer_name,executable:$reviewer_executable,executable_sha256:$reviewer_executable_sha256,authenticode:$reviewer_authenticode,cli_version:$reviewer_cli_version,model:$reviewer_model,session_id:$reviewer_session_id,tools_disabled:true},isolation:{kind:(if $synthetic then "synthetic-fake-cli" else "windows-native-elevated-acl" end),source_workspace_denied:($synthetic|not),user_home_denied:($synthetic|not),controller_denied:($synthetic|not)},artifact_hashes:$artifact_hashes,attestation:{required:($synthetic|not),status:(if $synthetic then "not-applicable" else "pending" end),identity:null,namespace:null,signer_fingerprint:null}}' \
+  '{schema_version:3,case:$case,case_version:$case_version,spec_version:"2.0.0-rc.3",scenario_ref:$scenario_ref,timestamp:$timestamp,passed:$passed,synthetic:$synthetic,release_eligible:$release_eligible,rubric_score:$rubric_score,rubric_details:$rubric_details,objective_checks:$objective_checks,reviewer_verdict:$reviewer_verdict,notes:$notes,authority:{case_sha256:$case_sha256,skill_sha256:$skill_sha256,runtime_manifest_sha256:$runtime_manifest_sha256,runner_sha256:$runner_sha256,reviewer_schema_sha256:$reviewer_schema_sha256,canonical_rubric_sha256:$canonical_rubric_sha256,attester_sha256:$attester_sha256,isolation_helper_sha256:$isolation_helper_sha256,isolation_recovery_sha256:$isolation_recovery_sha256,isolation_probe_sha256:$isolation_probe_sha256,executable_guard_sha256:$executable_guard_sha256,agent_publishers_sha256:$agent_publishers_sha256,publisher_sha256:$publisher_sha256},subject:{name:$subject_name,executable:$subject_executable,executable_sha256:$subject_executable_sha256,authenticode:$subject_authenticode,cli_version:$subject_cli_version,model:$subject_model,session_ids:$subject_session_ids},reviewer:{name:$reviewer_name,executable:$reviewer_executable,executable_sha256:$reviewer_executable_sha256,authenticode:$reviewer_authenticode,cli_version:$reviewer_cli_version,model:$reviewer_model,session_id:$reviewer_session_id,tools_disabled:true},isolation:{kind:(if $synthetic then "synthetic-fake-cli" else "windows-native-elevated-acl" end),source_workspace_denied:($synthetic|not),user_home_denied:($synthetic|not),controller_denied:($synthetic|not)},artifact_hashes:$artifact_hashes,attestation:{required:($synthetic|not),status:(if $synthetic then "not-applicable" else "pending" end),identity:null,namespace:null,signer_fingerprint:null}}' \
   > "$stage/$base.json"
 
 publish_args=()

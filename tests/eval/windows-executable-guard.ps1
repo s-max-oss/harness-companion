@@ -1,11 +1,33 @@
 param(
     [Parameter(Mandatory = $true)][string]$ManifestFile,
     [Parameter(Mandatory = $true)][string]$ReadyFile,
-    [Parameter(Mandatory = $true)][string]$StopFile
+    [Parameter(Mandatory = $true)][string]$StopFile,
+    [Parameter(Mandatory = $true)][string]$StateFile,
+    [Parameter(Mandatory = $true)][string]$RunRoot,
+    [Parameter(Mandatory = $true)][string]$AgentLock,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$Nonce
 )
 
 $ErrorActionPreference = 'Stop'
 $handles = [System.Collections.Generic.List[System.IO.FileStream]]::new()
+
+function Write-Utf8CreateNew {
+    param([string]$Path, [string]$Content)
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Content + "`n")
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
 
 try {
     $manifest = Get-Content -LiteralPath $ManifestFile -Raw | ConvertFrom-Json
@@ -24,12 +46,24 @@ try {
         $handles.Add($handle)
     }
 
-    $ready = [ordered]@{
+    $process = [System.Diagnostics.Process]::GetCurrentProcess()
+    $startTime = $process.StartTime.ToUniversalTime().ToString('o')
+    $state = [ordered]@{
         schema_version = 1
+        guard_pid = $PID
+        guard_start_time_utc = $startTime
+        nonce = $Nonce
+        guard_script = [System.IO.Path]::GetFullPath($PSCommandPath)
+        state_file = [System.IO.Path]::GetFullPath($StateFile)
+        stop_file = [System.IO.Path]::GetFullPath($StopFile)
+        run_root = [System.IO.Path]::GetFullPath($RunRoot)
+        agent_lock = [System.IO.Path]::GetFullPath($AgentLock)
         paths = @($manifest.paths)
         handle_count = $handles.Count
-    } | ConvertTo-Json -Compress
-    [System.IO.File]::WriteAllText($ReadyFile, $ready + "`n", [System.Text.UTF8Encoding]::new($false))
+    }
+    $ready = $state | ConvertTo-Json -Compress
+    Write-Utf8CreateNew -Path $StateFile -Content $ready
+    Write-Utf8CreateNew -Path $ReadyFile -Content $ready
     [Console]::Out.WriteLine($ready)
     [Console]::Out.Flush()
 

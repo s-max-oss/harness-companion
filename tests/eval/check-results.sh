@@ -13,6 +13,7 @@ ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
 EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
 ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
+AGENT_BUILD_VERIFIER="$SCRIPT_DIR/verify-agent-build.sh"
 PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
 WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 WINDOWS_WHOAMI="/c/Windows/System32/whoami.exe"
@@ -28,7 +29,7 @@ for cmd in jq sha256sum find python ssh-keygen iconv base64 tr; do command -v "$
 [ -d "$CASES_DIR" ] && [ ! -L "$CASES_DIR" ] || { echo "eval-gate: cases directory missing or unsafe" >&2; exit 2; }
 [ -d "$RESULTS_DIR" ] && [ ! -L "$RESULTS_DIR" ] || { echo "eval-gate: results directory missing or unsafe" >&2; exit 1; }
 [ -f "$ALLOWED_SIGNERS" ] && [ ! -L "$ALLOWED_SIGNERS" ] || { echo "eval-gate: trusted signer anchor missing or unsafe" >&2; exit 2; }
-for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$PUBLISHER"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
+for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
 
 sha() { sha256sum "$1" | awk '{print $1}'; }
 host_path() {
@@ -75,17 +76,21 @@ PY
 }
 
 expected_probe_command() {
-  local evidence="$1" payload payload_b64 probe_b64 powershell_path powershell_sha whoami_path whoami_sha
+  local evidence="$1" payload payload_b64 probe_b64 powershell_path powershell_sha whoami_path whoami_sha trusted_powershell_path trusted_powershell_sha trusted_whoami_path trusted_whoami_sha
   payload="$(jq -cS '.probe.payload' "$evidence")" || return 1
   [ "$payload" != null ] || return 1
   powershell_path="$(jq -r '.probe.executables.powershell.path // empty' "$evidence")" || return 1
   powershell_sha="$(jq -r '.probe.executables.powershell.sha256 // empty' "$evidence")" || return 1
   whoami_path="$(jq -r '.probe.executables.whoami.path // empty' "$evidence")" || return 1
   whoami_sha="$(jq -r '.probe.executables.whoami.sha256 // empty' "$evidence")" || return 1
-  [ "$(host_path "$powershell_path")" = "$(host_path "$WINDOWS_POWERSHELL")" ] || return 1
-  [ "$(host_path "$whoami_path")" = "$(host_path "$WINDOWS_WHOAMI")" ] || return 1
-  [ "$powershell_sha" = "$(sha "$WINDOWS_POWERSHELL")" ] || return 1
-  [ "$whoami_sha" = "$(sha "$WINDOWS_WHOAMI")" ] || return 1
+  trusted_powershell_path="$(jq -r '.windows_system_tools.powershell.path // empty' "$AGENT_PUBLISHERS")" || return 1
+  trusted_powershell_sha="$(jq -r '.windows_system_tools.powershell.sha256 // empty | ascii_downcase' "$AGENT_PUBLISHERS")" || return 1
+  trusted_whoami_path="$(jq -r '.windows_system_tools.whoami.path // empty' "$AGENT_PUBLISHERS")" || return 1
+  trusted_whoami_sha="$(jq -r '.windows_system_tools.whoami.sha256 // empty | ascii_downcase' "$AGENT_PUBLISHERS")" || return 1
+  [ "$powershell_path" = "$trusted_powershell_path" ] || return 1
+  [ "${powershell_sha,,}" = "$trusted_powershell_sha" ] || return 1
+  [ "$whoami_path" = "$trusted_whoami_path" ] || return 1
+  [ "${whoami_sha,,}" = "$trusted_whoami_sha" ] || return 1
   [ "$(jq -r '.whoami_file // empty' <<< "$payload")" = "$whoami_path" ] || return 1
   payload_b64="$(printf '%s' "$payload" | base64 | tr -d '\r\n')" || return 1
   probe_b64="$(iconv -f UTF-8 -t UTF-16LE < "$ISOLATION_PROBE" | base64 | tr -d '\r\n')" || return 1
@@ -287,6 +292,7 @@ isolation_probe_sha="$(sha "$ISOLATION_PROBE")"
 executable_guard_sha="$(sha "$EXECUTABLE_GUARD")"
 isolation_recovery_sha="$(sha "$ACL_RECOVERY")"
 agent_publishers_sha="$(sha "$AGENT_PUBLISHERS")"
+agent_build_verifier_sha="$(sha "$AGENT_BUILD_VERIFIER")"
 publisher_sha="$(sha "$PUBLISHER")"
 allowed_signers_sha="$(sha "$ALLOWED_SIGNERS")"
 codex_publisher_subject="$(jq -r '.agents.codex.publisher_subject // empty' "$AGENT_PUBLISHERS")"
@@ -420,7 +426,7 @@ while IFS= read -r case_file; do
     --arg name "$name" --arg version "$version" --arg scenario "$scenario" \
     --arg case_sha "$(sha "$case_file")" --arg skill_sha "$skill_sha" --arg runtime_sha "$runtime_sha" \
     --arg runner_sha "$runner_sha" --arg schema_sha "$schema_sha" --arg rubric_sha "$(sha "$tmp/rubric.json")" --arg signer_fingerprint "$trusted_fingerprint" \
-    --arg attester_sha "$attester_sha" --arg isolation_helper_sha "$isolation_helper_sha" --arg isolation_recovery_sha "$isolation_recovery_sha" --arg isolation_probe_sha "$isolation_probe_sha" --arg executable_guard_sha "$executable_guard_sha" --arg agent_publishers_sha "$agent_publishers_sha" --arg publisher_sha "$publisher_sha" \
+    --arg attester_sha "$attester_sha" --arg isolation_helper_sha "$isolation_helper_sha" --arg isolation_recovery_sha "$isolation_recovery_sha" --arg isolation_probe_sha "$isolation_probe_sha" --arg executable_guard_sha "$executable_guard_sha" --arg agent_publishers_sha "$agent_publishers_sha" --arg agent_build_verifier_sha "$agent_build_verifier_sha" --arg publisher_sha "$publisher_sha" \
     --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$codex_approved_builds" \
     --argjson input_count "$input_count" '
       .schema_version == 3 and .case == $name and .case_version == $version
@@ -444,6 +450,7 @@ while IFS= read -r case_file; do
       and .authority.isolation_probe_sha256 == $isolation_probe_sha
       and .authority.executable_guard_sha256 == $executable_guard_sha
       and .authority.agent_publishers_sha256 == $agent_publishers_sha
+      and .authority.agent_build_verifier_sha256 == $agent_build_verifier_sha
       and .authority.publisher_sha256 == $publisher_sha
       and .isolation.kind == "windows-native-elevated-acl"
       and .isolation.source_workspace_denied == true and .isolation.user_home_denied == true and .isolation.controller_denied == true
@@ -502,7 +509,9 @@ runtime_file_manifest "$ROOT" "$tmp/runtime.after.manifest" || { echo "eval-gate
   && [ "$isolation_helper_sha" = "$(sha "$ACL_HELPER")" ] \
   && [ "$isolation_recovery_sha" = "$(sha "$ACL_RECOVERY")" ] \
   && [ "$isolation_probe_sha" = "$(sha "$ISOLATION_PROBE")" ] \
+  && [ "$executable_guard_sha" = "$(sha "$EXECUTABLE_GUARD")" ] \
   && [ "$agent_publishers_sha" = "$(sha "$AGENT_PUBLISHERS")" ] \
+  && [ "$agent_build_verifier_sha" = "$(sha "$AGENT_BUILD_VERIFIER")" ] \
   && [ "$publisher_sha" = "$(sha "$PUBLISHER")" ] \
   && [ "$allowed_signers_sha" = "$(sha "$ALLOWED_SIGNERS")" ] \
   || { echo "eval-gate: current authority changed during validation" >&2; exit 1; }

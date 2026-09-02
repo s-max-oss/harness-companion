@@ -108,9 +108,18 @@ check "real eval records an effective Offline-sandbox access probe" bash -c 'gre
 check "all real eval output directories share one ACL transition lock" grep -Fq 'acl_lock="$ROOT/.harness/eval-acl.lock"' "$EVAL/run-eval.sh"
 check "crashed eval ACL state has an explicit liveness-checked recovery command" bash -c 'grep -Fq "kill -0" "$1" && grep -Fq "ACL restoration complete" "$1"' _ "$EVAL/recover-windows-isolation.sh"
 check "real eval binds the token-resolved user profile instead of caller USERPROFILE" bash -c 'grep -Fq "GetFolderPath([Environment+SpecialFolder]::UserProfile)" "$1" && ! grep -Fq "\${USERPROFILE:-\$HOME}" "$1"' _ "$EVAL/run-eval.sh"
-check "real Agent identity is pinned by certificate, install path, and approved build digest" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin" and (.agents.codex.approved_builds | length > 0 and all(.[]; (.cli_version | length > 0) and (.sha256 | test("^[0-9a-f]{64}$"))))' "$EVAL/trust/agent-publishers.json"
+check "real Agent identity and Windows system tools are versioned trust anchors" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin" and (.agents.codex.approved_builds | length > 0 and all(.[]; (.cli_version | length > 0) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_system_tools | keys | sort == ["powershell","whoami"]) and (all(.windows_system_tools[]; (.path | startswith("C:\\Windows\\System32\\")) and (.sha256 | test("^[0-9a-f]{64}$"))))' "$EVAL/trust/agent-publishers.json"
+approved_version="$(jq -r '.agents.codex.approved_builds[0].cli_version' "$EVAL/trust/agent-publishers.json")"
+approved_digest="$(jq -r '.agents.codex.approved_builds[0].sha256' "$EVAL/trust/agent-publishers.json")"
+check "shared production build verifier accepts the exact approved tuple" bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex "$approved_version" "$approved_digest"
+if bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex "$approved_version" "${approved_digest%?}0" >/dev/null 2>&1; then
+  bad "shared production build verifier rejects a non-approved digest"
+else
+  ok "shared production build verifier rejects a non-approved digest"
+fi
 check "real eval launches only handle-locked executable snapshots" bash -c 'grep -Fq "snapshot_executable \"\$subject_executable\" \"\$subject_launch_executable\"" "$1" && grep -Fq "start_executable_guard" "$1" && grep -Fq "verify_guarded_executables" "$1" && grep -Fq "FileShare]::Read" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/windows-executable-guard.ps1"
 check "probe invokes only hash-bound absolute system executables" bash -c 'grep -Fq "WINDOWS_POWERSHELL=\"/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe\"" "$1" && grep -Fq "WINDOWS_WHOAMI=\"/c/Windows/System32/whoami.exe\"" "$1" && grep -Fq "probe.executables" "$2" && ! grep -Fq "cmd.exe /d /c" "$1" && ! grep -Fq "& whoami.exe" "$3"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh" "$EVAL/windows-isolation-probe.ps1"
+check "release gate reconstructs Windows evidence from versioned policy without host binaries" bash -c '! grep -Fq "sha \"\$WINDOWS_POWERSHELL\"" "$1" && ! grep -Fq "sha \"\$WINDOWS_WHOAMI\"" "$1" && grep -Fq "windows_system_tools.powershell" "$1"' _ "$EVAL/check-results.sh"
 check "Windows canonical path comparisons are case-normalized" bash -c 'grep -Fq "output_host=\"\$(host_path" "$1" && grep -Fq "allowed_signers_host=\"\$(host_path" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh"
 check "release gate performs a concluding set-wide evidence pass" grep -Fq 'evidence source set changed during concluding verification' "$EVAL/check-results.sh"
 check "release gate holds the publication lock and rechecks directory membership" bash -c 'grep -Fq "directory_manifest \"\$RESULTS_DIR\" \"\$tmp/results.before.manifest\"" "$1" && grep -Fq "result membership or content changed during validation" "$1"' _ "$EVAL/check-results.sh"
@@ -122,9 +131,22 @@ if command -v powershell.exe >/dev/null 2>&1; then
   check "Windows ACL helper round-trips DACL and retains failed recovery state" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-isolation-acl.ps1" -Helper "$EVAL/windows-isolation-acl.ps1"
   mkdir -p "$TMP/executable-guard-test"
   check "Windows executable guard permits launch but blocks overwrite and replacement" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-executable-guard.ps1" -Guard "$(cygpath -w "$EVAL/windows-executable-guard.ps1")" -TempRoot "$(cygpath -w "$TMP/executable-guard-test")" -LaunchSource 'C:\Windows\System32\whoami.exe'
+  check "crashed eval recovery stops the guard and restores DACLs, locks, state, and run tree" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-eval-recovery.ps1" -Helper "$(cygpath -w "$EVAL/windows-isolation-acl.ps1")" -Guard "$(cygpath -w "$EVAL/windows-executable-guard.ps1")" -Recovery "$(cygpath -w "$EVAL/recover-windows-isolation.sh")" -RepoRoot "$(cygpath -w "$ROOT")" -Bash 'C:\Program Files\Git\bin\bash.exe'
+  mkdir -p "$TMP/shadow-bin"
+  printf '#!/bin/bash\nprintf shadow > "%s"\nexit 99\n' "$TMP/shadow-hit" > "$TMP/shadow-bin/powershell.exe"
+  cp "$TMP/shadow-bin/powershell.exe" "$TMP/shadow-bin/whoami.exe"
+  chmod +x "$TMP/shadow-bin/powershell.exe" "$TMP/shadow-bin/whoami.exe"
+  if PATH="$TMP/shadow-bin:$PATH" /c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "& 'C:\Windows\System32\whoami.exe'" > "$TMP/absolute-tools.out" 2>/dev/null \
+    && [ -s "$TMP/absolute-tools.out" ] && [ ! -e "$TMP/shadow-hit" ]; then
+    ok "absolute system-tool probe ignores local PATH shadows"
+  else
+    bad "absolute system-tool probe ignores local PATH shadows"
+  fi
 else
   ok "Windows ACL helper integration is Windows-only"
   ok "Windows executable guard integration is Windows-only"
+  ok "Windows crash recovery integration is Windows-only"
+  ok "absolute system-tool shadow integration is Windows-only"
 fi
 check "reviewer schema is non-empty and parses" jq -e '.properties.checks.minItems == 1' "$EVAL/reviewer-output.schema.json"
 if grep -q -- '--eval' "$ROOT/scripts/harness-init.sh"; then bad "executor contains no eval/pseudo-dialog mode"; else ok "executor contains no eval/pseudo-dialog mode"; fi

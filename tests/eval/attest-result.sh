@@ -19,6 +19,7 @@ ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
 EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
 AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
+AGENT_BUILD_VERIFIER="$SCRIPT_DIR/verify-agent-build.sh"
 PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
 WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 WINDOWS_WHOAMI="/c/Windows/System32/whoami.exe"
@@ -234,12 +235,7 @@ official_agent_identity() {
 }
 
 official_agent_build() {
-  local agent="$1" version="$2" digest="${3,,}"
-  jq -e --arg agent "$agent" --arg version "$version" --arg digest "$digest" '
-    [.agents[$agent].approved_builds[]?
-      | select(.cli_version == $version and (.sha256 | ascii_downcase) == $digest)]
-    | length == 1
-  ' "$AGENT_PUBLISHERS" >/dev/null
+  bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$1" "$2" "$3"
 }
 
 official_agent_path() {
@@ -257,17 +253,21 @@ official_agent_path() {
 }
 
 expected_probe_command() {
-  local evidence="$1" payload payload_b64 probe_b64 powershell_path powershell_sha whoami_path whoami_sha
+  local evidence="$1" payload payload_b64 probe_b64 powershell_path powershell_sha whoami_path whoami_sha trusted_powershell_path trusted_powershell_sha trusted_whoami_path trusted_whoami_sha
   payload="$(jq -cS '.probe.payload' "$evidence")" || return 1
   [ "$payload" != null ] || return 1
   powershell_path="$(jq -r '.probe.executables.powershell.path // empty' "$evidence")" || return 1
   powershell_sha="$(jq -r '.probe.executables.powershell.sha256 // empty' "$evidence")" || return 1
   whoami_path="$(jq -r '.probe.executables.whoami.path // empty' "$evidence")" || return 1
   whoami_sha="$(jq -r '.probe.executables.whoami.sha256 // empty' "$evidence")" || return 1
-  [ "$(host_path "$powershell_path")" = "$(host_path "$WINDOWS_POWERSHELL")" ] || return 1
-  [ "$(host_path "$whoami_path")" = "$(host_path "$WINDOWS_WHOAMI")" ] || return 1
-  [ "$powershell_sha" = "$(sha "$WINDOWS_POWERSHELL")" ] || return 1
-  [ "$whoami_sha" = "$(sha "$WINDOWS_WHOAMI")" ] || return 1
+  trusted_powershell_path="$(jq -r '.windows_system_tools.powershell.path // empty' "$AGENT_PUBLISHERS")" || return 1
+  trusted_powershell_sha="$(jq -r '.windows_system_tools.powershell.sha256 // empty | ascii_downcase' "$AGENT_PUBLISHERS")" || return 1
+  trusted_whoami_path="$(jq -r '.windows_system_tools.whoami.path // empty' "$AGENT_PUBLISHERS")" || return 1
+  trusted_whoami_sha="$(jq -r '.windows_system_tools.whoami.sha256 // empty | ascii_downcase' "$AGENT_PUBLISHERS")" || return 1
+  [ "$powershell_path" = "$trusted_powershell_path" ] || return 1
+  [ "${powershell_sha,,}" = "$trusted_powershell_sha" ] || return 1
+  [ "$whoami_path" = "$trusted_whoami_path" ] || return 1
+  [ "${whoami_sha,,}" = "$trusted_whoami_sha" ] || return 1
   [ "$(jq -r '.whoami_file // empty' <<< "$payload")" = "$whoami_path" ] || return 1
   payload_b64="$(printf '%s' "$payload" | base64 | tr -d '\r\n')" || return 1
   probe_b64="$(iconv -f UTF-8 -t UTF-16LE < "$ISOLATION_PROBE" | base64 | tr -d '\r\n')" || return 1
@@ -326,7 +326,7 @@ for arg in "$@"; do
 done
 
 for cmd in jq sha256sum python ssh-keygen mktemp cp find tr grep iconv base64; do need "$cmd"; done
-for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$PUBLISHER" "$ALLOWED_SIGNERS"; do
+for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER" "$ALLOWED_SIGNERS"; do
   [ -f "$path" ] && [ ! -L "$path" ] || die "authority missing or unsafe: $path"
 done
 [ -n "$SIGNING_KEY" ] && [ -f "$SIGNING_KEY" ] && [ ! -L "$SIGNING_KEY" ] || die "a regular non-symlink signing key is required"
@@ -436,6 +436,16 @@ jq -e 'type == "object"' "$snapshot_base.project-brief.json" >/dev/null || die "
 expected_probe="$(expected_probe_command "$snapshot_base.isolation.json")" \
   || die "could not reconstruct the effective isolation probe command"
 if [ "$production_trust" = true ]; then
+  trusted_powershell_path="$(jq -r '.windows_system_tools.powershell.path' "$AGENT_PUBLISHERS")"
+  trusted_whoami_path="$(jq -r '.windows_system_tools.whoami.path' "$AGENT_PUBLISHERS")"
+  trusted_powershell_posix="$(cygpath -u "$trusted_powershell_path")"
+  trusted_whoami_posix="$(cygpath -u "$trusted_whoami_path")"
+  [ -f "$trusted_powershell_posix" ] && [ ! -L "$trusted_powershell_posix" ] \
+    && [ "$(sha "$trusted_powershell_posix")" = "$(jq -r '.windows_system_tools.powershell.sha256' "$AGENT_PUBLISHERS")" ] \
+    || die "live Windows PowerShell does not match the versioned trust policy"
+  [ -f "$trusted_whoami_posix" ] && [ ! -L "$trusted_whoami_posix" ] \
+    && [ "$(sha "$trusted_whoami_posix")" = "$(jq -r '.windows_system_tools.whoami.sha256' "$AGENT_PUBLISHERS")" ] \
+    || die "live Windows whoami does not match the versioned trust policy"
   evidence_user_home="$(jq -r '.denied_roots[1] // empty' "$snapshot_base.isolation.json")"
   [ -n "$evidence_user_home" ] \
     && [ "$(host_path "$evidence_user_home")" = "$(host_path "$real_user_home")" ] \
@@ -539,7 +549,7 @@ jq -e \
   --arg name "$case_name" --arg version "$case_version" --arg scenario "$scenario" \
   --arg case_sha "$(sha "$case_file")" --arg skill_sha "$(sha "$ROOT/SKILL.md")" --arg runtime_sha "$(sha "$tmp/runtime.manifest")" \
   --arg runner_sha "$(sha "$RUNNER")" --arg schema_sha "$(sha "$SCHEMA")" --arg rubric_sha "$(sha "$tmp/rubric.json")" \
-  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg executable_guard_sha "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg publisher_sha "$(sha "$PUBLISHER")" \
+  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg executable_guard_sha "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha "$(sha "$PUBLISHER")" \
   --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$(jq -c '.agents.codex.approved_builds' "$AGENT_PUBLISHERS")" \
   --argjson input_count "$input_count" '
     .schema_version == 3 and .case == $name and .case_version == $version
@@ -556,6 +566,7 @@ jq -e \
     and .authority.isolation_probe_sha256 == $probe_sha
     and .authority.executable_guard_sha256 == $executable_guard_sha
     and .authority.agent_publishers_sha256 == $agent_publishers_sha
+    and .authority.agent_build_verifier_sha256 == $agent_build_verifier_sha
     and .authority.publisher_sha256 == $publisher_sha
     and .isolation.kind == "windows-native-elevated-acl"
     and .isolation.source_workspace_denied == true and .isolation.user_home_denied == true and .isolation.controller_denied == true

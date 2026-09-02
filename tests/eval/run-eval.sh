@@ -92,6 +92,10 @@ resolve_gnu_timeout() {
 canonical_executable() {
   local p d
   p="$(command -v "$1")" || return 1
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) case "${p,,}" in *.exe) ;; *) [ -f "$p.exe" ] && p="$p.exe" ;; esac ;;
+  esac
+  [ -f "$p" ] && [ ! -L "$p" ] || return 1
   d="$(cd "$(dirname "$p")" && pwd -P)" || return 1
   printf '%s/%s\n' "$d" "$(basename "$p")"
 }

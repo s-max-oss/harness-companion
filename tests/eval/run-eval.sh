@@ -1152,11 +1152,22 @@ if [ "$SYNTHETIC" = 0 ]; then
     < "$probe_prompt") > "$probe_raw" 2> "$probe_err" || probe_rc=$?
   verify_guarded_executables || die "validated Agent executable guard failed after isolation probe"
   [ "$probe_rc" -eq 0 ] || die "effective isolation probe Agent failed (exit $probe_rc)"
+  jq -e -s '
+    length > 0
+    and all(.[];
+      if type != "object" then false
+      elif (.type? | type) != "string" then false
+      elif (.type | startswith("item.")) then
+        (.item? | type) == "object" and (.item.type? | type) == "string"
+      else true
+      end
+    )
+  ' "$probe_raw" >/dev/null 2>&1 \
+    || die "effective isolation probe event stream was invalid"
   probe_command_count="$(jq -s '
     [.[] | select(
-      .type? == "item.completed"
-      and (.item? | type) == "object"
-      and .item.type? == "command_execution"
+      .type == "item.completed"
+      and .item.type == "command_execution"
     )] | length
   ' "$probe_raw" 2>/dev/null)" \
     || die "effective isolation probe event stream was invalid"
@@ -1182,11 +1193,21 @@ if [ "$SYNTHETIC" = 0 ]; then
     ' "$probe_raw" 2>/dev/null || printf '{"summary_unavailable":true}')"
     die "effective isolation probe did not execute exactly one command (count=$probe_command_count events=$probe_event_summary)"
   fi
-  probe_event="$(jq -cs '[.[] | select(.type == "item.completed" and .item.type == "command_execution")][0].item' "$probe_raw")"
-  jq -e --arg command "$probe_command" '.command == $command and .status == "completed" and .exit_code == 0' <<< "$probe_event" >/dev/null \
+  probe_event="$(jq -cs '[.[] | select(.type == "item.completed" and .item.type == "command_execution")][0].item' "$probe_raw" 2>/dev/null)" \
+    || die "effective isolation probe command event was invalid"
+  jq -e '
+    type == "object"
+    and (.command? | type) == "string"
+    and (.status? | type) == "string"
+    and (.exit_code? | type) == "number"
+    and (.aggregated_output? | type) == "string"
+  ' <<< "$probe_event" >/dev/null 2>&1 \
+    || die "effective isolation probe command event was invalid"
+  jq -e --arg command "$probe_command" '.command == $command and .status == "completed" and .exit_code == 0' <<< "$probe_event" >/dev/null 2>&1 \
     || die "effective isolation probe command did not match the controller command"
-  probe_output="$(jq -r '.aggregated_output' <<< "$probe_event" | tr -d '\r')"
-  probe_result="$(jq -Rcs 'split("\n") | map(select(length > 0)) | last | fromjson' <<< "$probe_output")" \
+  probe_output="$(jq -r '.aggregated_output' <<< "$probe_event" 2>/dev/null | tr -d '\r')" \
+    || die "effective isolation probe command output was invalid"
+  probe_result="$(jq -Rcs 'split("\n") | map(select(length > 0)) | last | fromjson' <<< "$probe_output" 2>/dev/null)" \
     || die "effective isolation probe returned invalid JSON"
   jq -e --arg nonce "$probe_nonce" '
     .nonce == $nonce
@@ -1196,7 +1217,7 @@ if [ "$SYNTHETIC" = 0 ]; then
     and .source_workspace_readable == false
     and .controller_readable == false
     and .user_home_readable == false
-  ' <<< "$probe_result" >/dev/null || die "effective isolation probe did not prove the required access boundary"
+  ' <<< "$probe_result" >/dev/null 2>&1 || die "effective isolation probe did not prove the required access boundary"
   [ "$(sha "$probe_target")" = "$probe_target_sha" ] || die "effective isolation probe target changed during execution"
   rm -f -- "$probe_target"
   [ ! -e "$probe_target" ] && [ ! -L "$probe_target" ] || die "effective isolation probe target cleanup failed"

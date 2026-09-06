@@ -43,6 +43,8 @@ windows_process_status() {
     if ($null -eq $p) { "absent"; exit 0 }
     $cim = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $p.Id) -ErrorAction SilentlyContinue
     if ($null -eq $cim) { "unknown"; exit 0 }
+    if ([string]::IsNullOrWhiteSpace([string]$cim.Name) -or
+        [string]::IsNullOrWhiteSpace([string]$cim.CommandLine)) { "unknown"; exit 0 }
     $start = $p.StartTime.ToUniversalTime().ToString("o")
     if ($start -ceq $env:HARNESS_EVAL_OWNER_START -and
         ([string]$cim.Name).Equals($env:HARNESS_EVAL_OWNER_NAME, [StringComparison]::OrdinalIgnoreCase) -and

@@ -1152,7 +1152,14 @@ if [ "$SYNTHETIC" = 0 ]; then
     < "$probe_prompt") > "$probe_raw" 2> "$probe_err" || probe_rc=$?
   verify_guarded_executables || die "validated Agent executable guard failed after isolation probe"
   [ "$probe_rc" -eq 0 ] || die "effective isolation probe Agent failed (exit $probe_rc)"
-  probe_command_count="$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$probe_raw")"
+  probe_command_count="$(jq -s '
+    [.[] | select(
+      .type? == "item.completed"
+      and (.item? | type) == "object"
+      and .item.type? == "command_execution"
+    )] | length
+  ' "$probe_raw" 2>/dev/null)" \
+    || die "effective isolation probe event stream was invalid"
   if [ "$probe_command_count" -ne 1 ]; then
     probe_event_summary="$(jq -cs '
       def safe_string($value):

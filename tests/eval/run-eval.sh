@@ -921,12 +921,16 @@ if [ "$SYNTHETIC" = 0 ]; then
   contract_test_hold guard_active
   contract_test_prepare_post_agent_stage
   verify_guarded_executables || die "validated Agent executable guard failed before doctor"
+  # `codex doctor` returns nonzero when any unrelated diagnostic fails (for
+  # example TERM=dumb in a redirected runner).  Its JSON remains authoritative
+  # for this gate; validate the exact sandbox fields below instead of treating
+  # the aggregate exit status as sandbox failure.
   if [ "$CONTRACT_TEST" = 1 ]; then
     case "${HARNESS_EVAL_TEST_HOLD_STAGE:-}" in isolation_entering_before_state|isolation_entering|isolation_entering_after_state|isolation_active)
     sandbox_doctor='{"checks":{"sandbox.helpers":{"status":"ok","details":{"sandbox backend":"elevated","sandbox provisioning":"complete"}}}}'
-    ;; *) sandbox_doctor="$("$subject_launch_executable" doctor --json 2>/dev/null)" || die "could not inspect Codex Windows sandbox readiness" ;; esac
+    ;; *) sandbox_doctor="$("$subject_launch_executable" doctor --json 2>/dev/null || :)" ;; esac
   else
-    sandbox_doctor="$("$subject_launch_executable" doctor --json 2>/dev/null)" || die "could not inspect Codex Windows sandbox readiness"
+    sandbox_doctor="$("$subject_launch_executable" doctor --json 2>/dev/null || :)"
   fi
   verify_guarded_executables || die "validated Agent executable guard failed after doctor"
   jq -e '

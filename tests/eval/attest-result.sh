@@ -17,6 +17,7 @@ SCHEMA="$SCRIPT_DIR/reviewer-output.schema.json"
 ACL_HELPER="$SCRIPT_DIR/windows-isolation-acl.ps1"
 ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
+PROBE_COMMAND_VALIDATOR="$SCRIPT_DIR/validate-probe-command.py"
 EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
 AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
 AGENT_BUILD_VERIFIER="$SCRIPT_DIR/verify-agent-build.sh"
@@ -326,7 +327,7 @@ for arg in "$@"; do
 done
 
 for cmd in jq sha256sum python ssh-keygen mktemp cp find tr grep iconv base64; do need "$cmd"; done
-for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER" "$ALLOWED_SIGNERS"; do
+for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER" "$ALLOWED_SIGNERS"; do
   [ -f "$path" ] && [ ! -L "$path" ] || die "authority missing or unsafe: $path"
 done
 [ -n "$SIGNING_KEY" ] && [ -f "$SIGNING_KEY" ] && [ ! -L "$SIGNING_KEY" ] || die "a regular non-symlink signing key is required"
@@ -435,6 +436,12 @@ done
 jq -e 'type == "object"' "$snapshot_base.project-brief.json" >/dev/null || die "captured PROJECT_BRIEF.json is invalid"
 expected_probe="$(expected_probe_command "$snapshot_base.isolation.json")" \
   || die "could not reconstruct the effective isolation probe command"
+recorded_probe_b64="$(jq -r '.probe.command_event.command | @base64' "$snapshot_base.isolation.json")" \
+  || die "effective isolation probe command event is invalid"
+expected_probe_b64="$(printf '%s' "$expected_probe" | base64 | tr -d '\r\n')"
+codex_powershell_path="$(jq -r '.probe.executables.codex_powershell.path // empty' "$snapshot_base.isolation.json")"
+python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_b64" "$expected_probe_b64" "$codex_powershell_path" >/dev/null 2>&1 \
+  || die "effective isolation probe command did not match the exact controller argv"
 if [ "$production_trust" = true ]; then
   trusted_powershell_path="$(jq -r '.windows_system_tools.powershell.path' "$AGENT_PUBLISHERS")"
   trusted_whoami_path="$(jq -r '.windows_system_tools.whoami.path' "$AGENT_PUBLISHERS")"
@@ -450,8 +457,22 @@ if [ "$production_trust" = true ]; then
   [ -n "$evidence_user_home" ] \
     && [ "$(host_path "$evidence_user_home")" = "$(host_path "$real_user_home")" ] \
     || die "isolation evidence is not bound to the token-resolved user profile"
+  codex_powershell_suffix="$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")"
+  expected_codex_powershell="$real_user_home_win\\$codex_powershell_suffix"
+  [ "$(host_path "$codex_powershell_path")" = "$(host_path "$expected_codex_powershell")" ] \
+    || die "Codex PowerShell wrapper path does not match the versioned trust policy"
+  codex_powershell_posix="$(cygpath -u "$codex_powershell_path")"
+  evidence_codex_powershell_sha="$(jq -r '.probe.executables.codex_powershell.sha256 // empty | ascii_downcase' "$snapshot_base.isolation.json")"
+  [ -f "$codex_powershell_posix" ] && [ ! -L "$codex_powershell_posix" ] \
+    && [ "$(sha "$codex_powershell_posix")" = "$evidence_codex_powershell_sha" ] \
+    && jq -e --arg sha "$evidence_codex_powershell_sha" '.windows_runtime_tools.codex_powershell.approved_sha256 | map(ascii_downcase) | index($sha) != null' "$AGENT_PUBLISHERS" >/dev/null \
+    || die "live Codex PowerShell wrapper does not match the versioned trust policy"
 fi
-jq -e --arg expected_probe "$expected_probe" '
+jq -e \
+  --arg wrapper_suffix "$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")" \
+  --arg wrapper_subject "$(jq -r '.windows_runtime_tools.codex_powershell.publisher_subject // empty' "$AGENT_PUBLISHERS")" \
+  --argjson wrapper_thumbprints "$(jq -c '.windows_runtime_tools.codex_powershell.publisher_thumbprints // []' "$AGENT_PUBLISHERS")" \
+  --argjson wrapper_hashes "$(jq -c '.windows_runtime_tools.codex_powershell.approved_sha256 // [] | map(ascii_downcase)' "$AGENT_PUBLISHERS")" '
   def norm: gsub("\\\\"; "/") | ascii_downcase | sub("/+$"; "");
   . as $e
   | ([$e.denied_roots[] | norm]) as $roots
@@ -483,15 +504,19 @@ jq -e --arg expected_probe "$expected_probe" '
   and $e.probe.command_event.type == "command_execution"
   and $e.probe.command_event.status == "completed"
   and $e.probe.command_event.exit_code == 0
-  and $e.probe.command_event.command == $expected_probe
   and (($e.probe.command_event.aggregated_output
     | if contains("\u0000") then error("invalid NUL") else . end
     | gsub("\r\n"; "\n")
     | if contains("\r") then error("invalid carriage return") else . end
     | split("\n") | map(select(length > 0)) | last | fromjson) == $e.probe.result)
   and ($e.probe.payload | keys | sort == ["controller_file","nonce","source_file","target_file","user_home","whoami_file"])
-  and ($e.probe.executables | keys | sort == ["powershell","whoami"])
+  and ($e.probe.executables | keys | sort == ["codex_powershell","powershell","whoami"])
   and (all($e.probe.executables[]; (.path | type == "string" and length > 0) and (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))))
+  and (($e.probe.executables.codex_powershell.path | norm) == (($user_home + "/" + $wrapper_suffix) | norm))
+  and (($e.probe.executables.codex_powershell.sha256 | ascii_downcase) as $sha | ($wrapper_hashes | index($sha)) != null)
+  and $e.probe.executables.codex_powershell.authenticode.status == "Valid"
+  and $e.probe.executables.codex_powershell.authenticode.subject == $wrapper_subject
+  and ($e.probe.executables.codex_powershell.authenticode.thumbprint as $thumbprint | ($wrapper_thumbprints | index($thumbprint)) != null)
   and ($e.probe.result | keys | sort == ["controller_readable","identity","nonce","source_workspace_readable","target_file_readable","target_writeable","user_home_readable"])
   and $e.probe.payload.nonce == $e.probe.result.nonce
   and ($e.probe.result.nonce | type == "string" and length > 0)
@@ -552,7 +577,7 @@ jq -e \
   --arg name "$case_name" --arg version "$case_version" --arg scenario "$scenario" \
   --arg case_sha "$(sha "$case_file")" --arg skill_sha "$(sha "$ROOT/SKILL.md")" --arg runtime_sha "$(sha "$tmp/runtime.manifest")" \
   --arg runner_sha "$(sha "$RUNNER")" --arg schema_sha "$(sha "$SCHEMA")" --arg rubric_sha "$(sha "$tmp/rubric.json")" \
-  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg executable_guard_sha "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha "$(sha "$PUBLISHER")" \
+  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg probe_command_validator_sha "$(sha "$PROBE_COMMAND_VALIDATOR")" --arg executable_guard_sha "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha "$(sha "$PUBLISHER")" \
   --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$(jq -c '.agents.codex.approved_builds' "$AGENT_PUBLISHERS")" \
   --argjson input_count "$input_count" '
     .schema_version == 3 and .case == $name and .case_version == $version
@@ -567,6 +592,7 @@ jq -e \
     and .authority.attester_sha256 == $attester_sha and .authority.isolation_helper_sha256 == $isolation_sha
     and .authority.isolation_recovery_sha256 == $recovery_sha
     and .authority.isolation_probe_sha256 == $probe_sha
+    and .authority.probe_command_validator_sha256 == $probe_command_validator_sha
     and .authority.executable_guard_sha256 == $executable_guard_sha
     and .authority.agent_publishers_sha256 == $agent_publishers_sha
     and .authority.agent_build_verifier_sha256 == $agent_build_verifier_sha

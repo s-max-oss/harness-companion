@@ -13,6 +13,7 @@ ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
 ATTESTER="$SCRIPT_DIR/attest-result.sh"
 ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
+PROBE_COMMAND_VALIDATOR="$SCRIPT_DIR/validate-probe-command.py"
 EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
 AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
 AGENT_BUILD_VERIFIER="$SCRIPT_DIR/verify-agent-build.sh"
@@ -292,6 +293,27 @@ official_agent_identity() {
   local agent="$1" executable="$2" executable_win identity policy expected_subject expected_thumbprints
   [ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
   policy="$(jq -ce --arg agent "$agent" '.agents[$agent]' "$AGENT_PUBLISHERS")" || return 1
+  expected_subject="$(jq -r '.publisher_subject' <<< "$policy")" || return 1
+  expected_thumbprints="$(jq -c '.publisher_thumbprints' <<< "$policy")" || return 1
+  executable_win="$(cygpath -w "$executable")" || return 1
+  identity="$(HARNESS_EVAL_AUTH_PATH="$executable_win" windows_powershell -NoProfile -Command '
+    $sig = Get-AuthenticodeSignature -LiteralPath $env:HARNESS_EVAL_AUTH_PATH
+    $subject = if ($null -ne $sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { "" }
+    $thumbprint = if ($null -ne $sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { "" }
+    [ordered]@{status=[string]$sig.Status;subject=$subject;thumbprint=$thumbprint} | ConvertTo-Json -Compress
+  ' | tr -d '\r')" || return 1
+  jq -e --arg expected_subject "$expected_subject" --argjson expected_thumbprints "$expected_thumbprints" '
+    .status == "Valid"
+    and .subject == $expected_subject
+    and (.thumbprint as $thumbprint | ($expected_thumbprints | index($thumbprint)) != null)
+  ' <<< "$identity" >/dev/null || return 1
+  printf '%s\n' "$identity"
+}
+
+official_runtime_tool_identity() {
+  local tool="$1" executable="$2" executable_win identity policy expected_subject expected_thumbprints
+  [ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
+  policy="$(jq -ce --arg tool "$tool" '.windows_runtime_tools[$tool]' "$AGENT_PUBLISHERS")" || return 1
   expected_subject="$(jq -r '.publisher_subject' <<< "$policy")" || return 1
   expected_thumbprints="$(jq -c '.publisher_thumbprints' <<< "$policy")" || return 1
   executable_win="$(cygpath -w "$executable")" || return 1
@@ -625,7 +647,7 @@ if [ "$SYNTHETIC" = 0 ] && [ "$output_host" = "$default_results_host" ]; then
 fi
 
 for cmd in jq sha256sum find cp mktemp git python tar "$AGENT" "$REVIEWER"; do need "$cmd"; done
-for path in "$PUBLISHER" "$ATTESTER" "$ACL_RECOVERY" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER"; do
+for path in "$PUBLISHER" "$ATTESTER" "$ACL_RECOVERY" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER"; do
   [ -f "$path" ] && [ ! -L "$path" ] || die "eval authority missing or unsafe: $path"
 done
 jq -e '.schema_version == 1 and (.agents.codex.publisher_thumbprints | length > 0)
@@ -966,6 +988,17 @@ if [ "$SYNTHETIC" = 0 ]; then
   system_whoami_sha="$(sha "$system_whoami")"
   [ "$system_powershell_sha" = "$trusted_powershell_sha" ] || die "machine PowerShell hash does not match the versioned trust policy"
   [ "$system_whoami_sha" = "$trusted_whoami_sha" ] || die "machine whoami hash does not match the versioned trust policy"
+  codex_powershell_suffix="$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")"
+  codex_powershell_approved="$(jq -c '.windows_runtime_tools.codex_powershell.approved_sha256 // [] | map(ascii_downcase)' "$AGENT_PUBLISHERS")"
+  [ -n "$codex_powershell_suffix" ] && [ "$codex_powershell_approved" != '[]' ] || die "Codex PowerShell trust policy is incomplete"
+  codex_powershell_win="$real_user_home_win\\$codex_powershell_suffix"
+  codex_powershell="$(cygpath -u "$codex_powershell_win")"
+  [ -f "$codex_powershell" ] && [ -x "$codex_powershell" ] && [ ! -L "$codex_powershell" ] || die "trusted Codex PowerShell wrapper is missing or unsafe"
+  codex_powershell_sha="$(sha "$codex_powershell")"
+  jq -e --arg sha "$codex_powershell_sha" 'index($sha) != null' <<< "$codex_powershell_approved" >/dev/null \
+    || die "Codex PowerShell wrapper hash does not match the versioned trust policy"
+  codex_powershell_authenticode="$(official_runtime_tool_identity codex_powershell "$codex_powershell")" \
+    || die "Codex PowerShell wrapper is not an authentic approved runtime tool"
   sandbox_path="$system_root_posix/System32/WindowsPowerShell/v1.0:$system_root_posix/System32:$system_root_posix:$program_files_posix/Git/bin:$program_files_posix/Git/usr/bin"
   for tool_dir in "$system_root_posix/System32/WindowsPowerShell/v1.0" "$system_root_posix/System32" "$program_files_posix/Git/bin" "$program_files_posix/Git/usr/bin"; do
     [ -d "$tool_dir" ] && [ ! -L "$tool_dir" ] || die "system tool directory missing or unsafe: $tool_dir"
@@ -1143,6 +1176,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   printf 'Run exactly this one command with the shell tool, with no edits, prefixes, suffixes, pipelines, or additional commands. Do not use any other tool.\n%s\n' "$probe_command" > "$probe_prompt"
   probe_rc=0
   verify_guarded_executables || die "validated Agent executable guard failed before isolation probe"
+  [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || die "Codex PowerShell wrapper changed before isolation probe"
   (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
     "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
     -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' \
@@ -1151,6 +1185,7 @@ if [ "$SYNTHETIC" = 0 ]; then
     --skip-git-repo-check --ignore-user-config --ignore-rules --model "$MODEL" --json - \
     < "$probe_prompt") > "$probe_raw" 2> "$probe_err" || probe_rc=$?
   verify_guarded_executables || die "validated Agent executable guard failed after isolation probe"
+  [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || die "Codex PowerShell wrapper changed during isolation probe"
   [ "$probe_rc" -eq 0 ] || die "effective isolation probe Agent failed (exit $probe_rc)"
   jq -e -s '
     length > 0
@@ -1203,8 +1238,13 @@ if [ "$SYNTHETIC" = 0 ]; then
     and (.aggregated_output? | type) == "string"
   ' <<< "$probe_event" >/dev/null 2>&1 \
     || die "effective isolation probe command event was invalid"
-  jq -e --arg command "$probe_command" '.command == $command and .status == "completed" and .exit_code == 0' <<< "$probe_event" >/dev/null 2>&1 \
-    || die "effective isolation probe command did not match the controller command"
+  jq -e '.status == "completed" and .exit_code == 0' <<< "$probe_event" >/dev/null 2>&1 \
+    || die "effective isolation probe command did not complete successfully"
+  recorded_probe_command_b64="$(jq -r '.command | @base64' <<< "$probe_event")" \
+    || die "effective isolation probe command event was invalid"
+  expected_probe_command_b64="$(printf '%s' "$probe_command" | base64 | tr -d '\r\n')"
+  python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_command_b64" "$expected_probe_command_b64" "$codex_powershell_win" >/dev/null 2>&1 \
+    || die "effective isolation probe command did not match the exact controller argv"
   probe_result="$(jq -c '
     .aggregated_output
     | if contains("\u0000") then error("invalid NUL") else . end
@@ -1230,9 +1270,11 @@ if [ "$SYNTHETIC" = 0 ]; then
   [ ! -e "$probe_target" ] && [ ! -L "$probe_target" ] || die "effective isolation probe target cleanup failed"
   jq --argjson command_event "$probe_event" --argjson result "$probe_result" --argjson payload "$probe_payload" --arg path "$sandbox_path" \
     --arg powershell_path "$system_powershell_win" --arg powershell_sha256 "$system_powershell_sha" \
-    --arg whoami_path "$system_whoami_win" --arg whoami_sha256 "$system_whoami_sha" '
+    --arg whoami_path "$system_whoami_win" --arg whoami_sha256 "$system_whoami_sha" \
+    --arg codex_powershell_path "$codex_powershell_win" --arg codex_powershell_sha256 "$codex_powershell_sha" \
+    --argjson codex_powershell_authenticode "$codex_powershell_authenticode" '
     .schema_version = 2
-    | .probe = {command_event:$command_event,result:$result,payload:$payload,sanitized_path:($path | split(":")),executables:{powershell:{path:$powershell_path,sha256:$powershell_sha256},whoami:{path:$whoami_path,sha256:$whoami_sha256}}}
+    | .probe = {command_event:$command_event,result:$result,payload:$payload,sanitized_path:($path | split(":")),executables:{powershell:{path:$powershell_path,sha256:$powershell_sha256},whoami:{path:$whoami_path,sha256:$whoami_sha256},codex_powershell:{path:$codex_powershell_path,sha256:$codex_powershell_sha256,authenticode:$codex_powershell_authenticode}}}
   ' "$isolation_evidence" > "$controller/isolation.with-probe.json"
   mv "$controller/isolation.with-probe.json" "$isolation_evidence"
 else
@@ -1431,14 +1473,14 @@ jq -n \
   --arg reviewer_verdict "$reviewer_verdict" --arg notes "$review_notes" \
   --arg case_sha256 "$case_sha" --arg skill_sha256 "$skill_sha" --arg runtime_manifest_sha256 "$runtime_manifest_sha" \
   --arg runner_sha256 "$runner_sha" --arg reviewer_schema_sha256 "$schema_sha" --arg canonical_rubric_sha256 "$rubric_sha" \
-  --arg attester_sha256 "$(sha "$ATTESTER")" --arg isolation_helper_sha256 "$(sha "$ACL_HELPER")" --arg isolation_recovery_sha256 "$(sha "$ACL_RECOVERY")" --arg isolation_probe_sha256 "$(sha "$ISOLATION_PROBE")" --arg executable_guard_sha256 "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha256 "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha256 "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha256 "$(sha "$PUBLISHER")" \
+  --arg attester_sha256 "$(sha "$ATTESTER")" --arg isolation_helper_sha256 "$(sha "$ACL_HELPER")" --arg isolation_recovery_sha256 "$(sha "$ACL_RECOVERY")" --arg isolation_probe_sha256 "$(sha "$ISOLATION_PROBE")" --arg probe_command_validator_sha256 "$(sha "$PROBE_COMMAND_VALIDATOR")" --arg executable_guard_sha256 "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha256 "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha256 "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha256 "$(sha "$PUBLISHER")" \
   --arg subject_name "$AGENT" --arg subject_executable "$subject_executable" --arg subject_executable_sha256 "$subject_executable_sha" --arg subject_cli_version "$subject_version" --arg subject_model "$MODEL" \
   --arg reviewer_name "$REVIEWER" --arg reviewer_executable "$reviewer_executable" --arg reviewer_executable_sha256 "$reviewer_executable_sha" --arg reviewer_cli_version "$reviewer_version" --arg reviewer_model "$REVIEWER_MODEL" --arg reviewer_session_id "$reviewer_session" \
   --argjson subject_authenticode "$subject_authenticode" --argjson reviewer_authenticode "$reviewer_authenticode" \
   --argjson subject_session_ids "$subject_sessions" --argjson passed "$passed" --argjson synthetic "$([ "$SYNTHETIC" = 1 ] && echo true || echo false)" \
   --argjson release_eligible "$release_eligible" --argjson rubric_details "$rubric_details" --argjson artifact_hashes "$artifact_hashes" \
   --slurpfile objective_checks "$objective_checks" \
-  '{schema_version:3,case:$case,case_version:$case_version,spec_version:"2.0.0-rc.3",scenario_ref:$scenario_ref,timestamp:$timestamp,passed:$passed,synthetic:$synthetic,release_eligible:$release_eligible,rubric_score:$rubric_score,rubric_details:$rubric_details,objective_checks:$objective_checks,reviewer_verdict:$reviewer_verdict,notes:$notes,authority:{case_sha256:$case_sha256,skill_sha256:$skill_sha256,runtime_manifest_sha256:$runtime_manifest_sha256,runner_sha256:$runner_sha256,reviewer_schema_sha256:$reviewer_schema_sha256,canonical_rubric_sha256:$canonical_rubric_sha256,attester_sha256:$attester_sha256,isolation_helper_sha256:$isolation_helper_sha256,isolation_recovery_sha256:$isolation_recovery_sha256,isolation_probe_sha256:$isolation_probe_sha256,executable_guard_sha256:$executable_guard_sha256,agent_publishers_sha256:$agent_publishers_sha256,agent_build_verifier_sha256:$agent_build_verifier_sha256,publisher_sha256:$publisher_sha256},subject:{name:$subject_name,executable:$subject_executable,executable_sha256:$subject_executable_sha256,authenticode:$subject_authenticode,cli_version:$subject_cli_version,model:$subject_model,session_ids:$subject_session_ids},reviewer:{name:$reviewer_name,executable:$reviewer_executable,executable_sha256:$reviewer_executable_sha256,authenticode:$reviewer_authenticode,cli_version:$reviewer_cli_version,model:$reviewer_model,session_id:$reviewer_session_id,tools_disabled:true},isolation:{kind:(if $synthetic then "synthetic-fake-cli" else "windows-native-elevated-acl" end),source_workspace_denied:($synthetic|not),user_home_denied:($synthetic|not),controller_denied:($synthetic|not)},artifact_hashes:$artifact_hashes,attestation:{required:($synthetic|not),status:(if $synthetic then "not-applicable" else "pending" end),identity:null,namespace:null,signer_fingerprint:null}}' \
+  '{schema_version:3,case:$case,case_version:$case_version,spec_version:"2.0.0-rc.3",scenario_ref:$scenario_ref,timestamp:$timestamp,passed:$passed,synthetic:$synthetic,release_eligible:$release_eligible,rubric_score:$rubric_score,rubric_details:$rubric_details,objective_checks:$objective_checks,reviewer_verdict:$reviewer_verdict,notes:$notes,authority:{case_sha256:$case_sha256,skill_sha256:$skill_sha256,runtime_manifest_sha256:$runtime_manifest_sha256,runner_sha256:$runner_sha256,reviewer_schema_sha256:$reviewer_schema_sha256,canonical_rubric_sha256:$canonical_rubric_sha256,attester_sha256:$attester_sha256,isolation_helper_sha256:$isolation_helper_sha256,isolation_recovery_sha256:$isolation_recovery_sha256,isolation_probe_sha256:$isolation_probe_sha256,probe_command_validator_sha256:$probe_command_validator_sha256,executable_guard_sha256:$executable_guard_sha256,agent_publishers_sha256:$agent_publishers_sha256,agent_build_verifier_sha256:$agent_build_verifier_sha256,publisher_sha256:$publisher_sha256},subject:{name:$subject_name,executable:$subject_executable,executable_sha256:$subject_executable_sha256,authenticode:$subject_authenticode,cli_version:$subject_cli_version,model:$subject_model,session_ids:$subject_session_ids},reviewer:{name:$reviewer_name,executable:$reviewer_executable,executable_sha256:$reviewer_executable_sha256,authenticode:$reviewer_authenticode,cli_version:$reviewer_cli_version,model:$reviewer_model,session_id:$reviewer_session_id,tools_disabled:true},isolation:{kind:(if $synthetic then "synthetic-fake-cli" else "windows-native-elevated-acl" end),source_workspace_denied:($synthetic|not),user_home_denied:($synthetic|not),controller_denied:($synthetic|not)},artifact_hashes:$artifact_hashes,attestation:{required:($synthetic|not),status:(if $synthetic then "not-applicable" else "pending" end),identity:null,namespace:null,signer_fingerprint:null}}' \
   > "$stage/$base.json"
 
 publish_args=()

@@ -10,6 +10,7 @@ ALLOWED_SIGNERS="$SCRIPT_DIR/trust/release-allowed-signers"
 ATTESTER="$SCRIPT_DIR/attest-result.sh"
 ACL_HELPER="$SCRIPT_DIR/windows-isolation-acl.ps1"
 ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
+PROBE_COMMAND_VALIDATOR="$SCRIPT_DIR/validate-probe-command.py"
 EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
 ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
@@ -29,7 +30,7 @@ for cmd in jq sha256sum find python ssh-keygen iconv base64 tr; do command -v "$
 [ -d "$CASES_DIR" ] && [ ! -L "$CASES_DIR" ] || { echo "eval-gate: cases directory missing or unsafe" >&2; exit 2; }
 [ -d "$RESULTS_DIR" ] && [ ! -L "$RESULTS_DIR" ] || { echo "eval-gate: results directory missing or unsafe" >&2; exit 1; }
 [ -f "$ALLOWED_SIGNERS" ] && [ ! -L "$ALLOWED_SIGNERS" ] || { echo "eval-gate: trusted signer anchor missing or unsafe" >&2; exit 2; }
-for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
+for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
 
 sha() { sha256sum "$1" | awk '{print $1}'; }
 host_path() {
@@ -289,6 +290,7 @@ schema_sha="$(sha "$SCRIPT_DIR/reviewer-output.schema.json")"
 attester_sha="$(sha "$ATTESTER")"
 isolation_helper_sha="$(sha "$ACL_HELPER")"
 isolation_probe_sha="$(sha "$ISOLATION_PROBE")"
+probe_command_validator_sha="$(sha "$PROBE_COMMAND_VALIDATOR")"
 executable_guard_sha="$(sha "$EXECUTABLE_GUARD")"
 isolation_recovery_sha="$(sha "$ACL_RECOVERY")"
 agent_publishers_sha="$(sha "$AGENT_PUBLISHERS")"
@@ -369,7 +371,16 @@ while IFS= read -r case_file; do
   if jq -e 'type == "object"' "$base.project-brief.json" >/dev/null 2>&1; then brief_valid=true; fi
   isolation_valid=false
   expected_probe="$(expected_probe_command "$base.isolation.json" 2>/dev/null || true)"
-  if [ -n "$expected_probe" ] && jq -e --arg expected_probe "$expected_probe" '
+  recorded_probe_b64="$(jq -r '.probe.command_event.command | @base64' "$base.isolation.json" 2>/dev/null || true)"
+  expected_probe_b64="$(printf '%s' "$expected_probe" | base64 | tr -d '\r\n')"
+  codex_powershell_path="$(jq -r '.probe.executables.codex_powershell.path // empty' "$base.isolation.json" 2>/dev/null || true)"
+  if [ -n "$expected_probe" ] \
+    && python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_b64" "$expected_probe_b64" "$codex_powershell_path" >/dev/null 2>&1 \
+    && jq -e \
+      --arg wrapper_suffix "$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")" \
+      --arg wrapper_subject "$(jq -r '.windows_runtime_tools.codex_powershell.publisher_subject // empty' "$AGENT_PUBLISHERS")" \
+      --argjson wrapper_thumbprints "$(jq -c '.windows_runtime_tools.codex_powershell.publisher_thumbprints // []' "$AGENT_PUBLISHERS")" \
+      --argjson wrapper_hashes "$(jq -c '.windows_runtime_tools.codex_powershell.approved_sha256 // [] | map(ascii_downcase)' "$AGENT_PUBLISHERS")" '
     def norm: gsub("\\\\"; "/") | ascii_downcase | sub("/+$"; "");
     . as $e
     | ([$e.denied_roots[] | norm]) as $roots
@@ -399,15 +410,19 @@ while IFS= read -r case_file; do
     and $e.probe.command_event.type == "command_execution"
     and $e.probe.command_event.status == "completed"
     and $e.probe.command_event.exit_code == 0
-    and $e.probe.command_event.command == $expected_probe
     and (($e.probe.command_event.aggregated_output
       | if contains("\u0000") then error("invalid NUL") else . end
       | gsub("\r\n"; "\n")
       | if contains("\r") then error("invalid carriage return") else . end
       | split("\n") | map(select(length > 0)) | last | fromjson) == $e.probe.result)
     and ($e.probe.payload | keys | sort == ["controller_file","nonce","source_file","target_file","user_home","whoami_file"])
-    and ($e.probe.executables | keys | sort == ["powershell","whoami"])
+    and ($e.probe.executables | keys | sort == ["codex_powershell","powershell","whoami"])
     and (all($e.probe.executables[]; (.path | type == "string" and length > 0) and (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))))
+    and (($e.probe.executables.codex_powershell.path | norm) == (($user_home + "/" + $wrapper_suffix) | norm))
+    and (($e.probe.executables.codex_powershell.sha256 | ascii_downcase) as $sha | ($wrapper_hashes | index($sha)) != null)
+    and $e.probe.executables.codex_powershell.authenticode.status == "Valid"
+    and $e.probe.executables.codex_powershell.authenticode.subject == $wrapper_subject
+    and ($e.probe.executables.codex_powershell.authenticode.thumbprint as $thumbprint | ($wrapper_thumbprints | index($thumbprint)) != null)
     and ($e.probe.result | keys | sort == ["controller_readable","identity","nonce","source_workspace_readable","target_file_readable","target_writeable","user_home_readable"])
     and $e.probe.payload.nonce == $e.probe.result.nonce
     and ($e.probe.result.nonce | type == "string" and length > 0)
@@ -429,7 +444,7 @@ while IFS= read -r case_file; do
     --arg name "$name" --arg version "$version" --arg scenario "$scenario" \
     --arg case_sha "$(sha "$case_file")" --arg skill_sha "$skill_sha" --arg runtime_sha "$runtime_sha" \
     --arg runner_sha "$runner_sha" --arg schema_sha "$schema_sha" --arg rubric_sha "$(sha "$tmp/rubric.json")" --arg signer_fingerprint "$trusted_fingerprint" \
-    --arg attester_sha "$attester_sha" --arg isolation_helper_sha "$isolation_helper_sha" --arg isolation_recovery_sha "$isolation_recovery_sha" --arg isolation_probe_sha "$isolation_probe_sha" --arg executable_guard_sha "$executable_guard_sha" --arg agent_publishers_sha "$agent_publishers_sha" --arg agent_build_verifier_sha "$agent_build_verifier_sha" --arg publisher_sha "$publisher_sha" \
+    --arg attester_sha "$attester_sha" --arg isolation_helper_sha "$isolation_helper_sha" --arg isolation_recovery_sha "$isolation_recovery_sha" --arg isolation_probe_sha "$isolation_probe_sha" --arg probe_command_validator_sha "$probe_command_validator_sha" --arg executable_guard_sha "$executable_guard_sha" --arg agent_publishers_sha "$agent_publishers_sha" --arg agent_build_verifier_sha "$agent_build_verifier_sha" --arg publisher_sha "$publisher_sha" \
     --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$codex_approved_builds" \
     --argjson input_count "$input_count" '
       .schema_version == 3 and .case == $name and .case_version == $version
@@ -451,6 +466,7 @@ while IFS= read -r case_file; do
       and .authority.isolation_helper_sha256 == $isolation_helper_sha
       and .authority.isolation_recovery_sha256 == $isolation_recovery_sha
       and .authority.isolation_probe_sha256 == $isolation_probe_sha
+      and .authority.probe_command_validator_sha256 == $probe_command_validator_sha
       and .authority.executable_guard_sha256 == $executable_guard_sha
       and .authority.agent_publishers_sha256 == $agent_publishers_sha
       and .authority.agent_build_verifier_sha256 == $agent_build_verifier_sha
@@ -512,6 +528,7 @@ runtime_file_manifest "$ROOT" "$tmp/runtime.after.manifest" || { echo "eval-gate
   && [ "$isolation_helper_sha" = "$(sha "$ACL_HELPER")" ] \
   && [ "$isolation_recovery_sha" = "$(sha "$ACL_RECOVERY")" ] \
   && [ "$isolation_probe_sha" = "$(sha "$ISOLATION_PROBE")" ] \
+  && [ "$probe_command_validator_sha" = "$(sha "$PROBE_COMMAND_VALIDATOR")" ] \
   && [ "$executable_guard_sha" = "$(sha "$EXECUTABLE_GUARD")" ] \
   && [ "$agent_publishers_sha" = "$(sha "$AGENT_PUBLISHERS")" ] \
   && [ "$agent_build_verifier_sha" = "$(sha "$AGENT_BUILD_VERIFIER")" ] \

@@ -10,6 +10,18 @@
       "sha256": "23240ef9f8b0a9a324110b1c2331de31dc1b0e08f5359cb707e51a939af56cd3"
     }
   },
+  "windows_runtime_tools": {
+    "codex_powershell": {
+      "user_profile_suffix": ".cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell\\pwsh.exe",
+      "publisher_subject": "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US",
+      "publisher_thumbprints": [
+        "AB172913A2960A224809EE8A0C371CD47A079B72"
+      ],
+      "approved_sha256": [
+        "362a356ce7f0940ec74f73a8fc2c990a2cc24a38a11c90bbd8eca947110ad139"
+      ]
+    }
+  },
   "agents": {
     "codex": {
       "publisher_subject": "CN=\"OpenAI OpCo, LLC\", O=\"OpenAI OpCo, LLC\", L=San Francisco, S=California, C=US",

@@ -1154,13 +1154,25 @@ if [ "$SYNTHETIC" = 0 ]; then
   [ "$probe_rc" -eq 0 ] || die "effective isolation probe Agent failed (exit $probe_rc)"
   probe_command_count="$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$probe_raw")"
   if [ "$probe_command_count" -ne 1 ]; then
-    probe_event_summary="$(jq -cs '[.[] | {
-      type,
-      item_type:(.item.type // null),
-      message:(if .type == "error" then ((.message // "")[0:500])
-        elif .item.type == "agent_message" then ((.item.text // "")[0:500])
-        else null end)
-    }]' "$probe_raw" 2>/dev/null || printf '[]')"
+    probe_event_summary="$(jq -cs '
+      def safe_string($value):
+        if ($value | type) == "string" then $value else "" end;
+      {
+        total_events:length,
+        thread_started:(map(select(.type? == "thread.started")) | length),
+        turn_started:(map(select(.type? == "turn.started")) | length),
+        command_started:(map(select(.type? == "item.started" and .item.type? == "command_execution")) | length),
+        command_completed:(map(select(.type? == "item.completed" and .item.type? == "command_execution")) | length),
+        agent_messages:(map(select(.type? == "item.completed" and .item.type? == "agent_message")) | length),
+        errors:(map(select(.type? == "error" or (.type? == "item.completed" and .item.type? == "error"))) | length),
+        turn_completed:(map(select(.type? == "turn.completed")) | length),
+        flags:{
+          network:(any(.[]; safe_string(.message?) | test("network|connect|websocket|reconnect"; "i"))),
+          refusal:(any(.[]; safe_string((.item? // {}).text?) | test("cannot|can.?t|unable|refus"; "i"))),
+          policy:(any(.[]; (safe_string(.message?) + " " + safe_string((.item? // {}).text?)) | test("policy|permission|approval|blocked"; "i")))
+        }
+      }
+    ' "$probe_raw" 2>/dev/null || printf '{"summary_unavailable":true}')"
     die "effective isolation probe did not execute exactly one command (count=$probe_command_count events=$probe_event_summary)"
   fi
   probe_event="$(jq -cs '[.[] | select(.type == "item.completed" and .item.type == "command_execution")][0].item' "$probe_raw")"

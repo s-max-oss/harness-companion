@@ -112,7 +112,8 @@ guard_process_status() {
     if ($null -eq $p) { "absent"; exit 0 }
     $start = $p.StartTime.ToUniversalTime().ToString("o")
     $cim = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $p.Id) -ErrorAction SilentlyContinue
-    $command = if ($null -ne $cim) { [string]$cim.CommandLine } else { "" }
+    if ($null -eq $cim -or [string]::IsNullOrWhiteSpace([string]$cim.CommandLine)) { "unknown"; exit 0 }
+    $command = [string]$cim.CommandLine
     $normalizedCommand = $command.Replace("/", "\")
     $normalizedScript = $env:HARNESS_EVAL_GUARD_SCRIPT.Replace("/", "\")
     $normalizedState = $env:HARNESS_EVAL_GUARD_STATE.Replace("/", "\")
@@ -328,17 +329,16 @@ if [ -e "$GUARD_STATE" ] || [ -L "$GUARD_STATE" ]; then
   [ "$(host_path "$(jq -r '.agent_lock' "$GUARD_STATE")")" = "$(host_path "$CANONICAL_AGENT_LOCK")" ] || die "guard Agent lock does not match journal"
   case "$(host_path "$(dirname "$guard_stop")")/" in "$run_root_host"/*) ;; *) die "guard stop path escapes run root" ;; esac
   guard_status="$(guard_process_status "$guard_pid" "$guard_start" "$journal_nonce" "$guard_script_win" "$guard_state_win")"
-  [ "$guard_status" != mismatch ] || die "recorded guard PID belongs to a different process; refusing to signal it"
+  [ "$guard_status" != unknown ] || die "could not verify whether the recorded executable guard is active"
   if [ "$guard_status" = match ]; then
     [ ! -L "$guard_stop" ] || die "guard stop path is unsafe"
     : > "$guard_stop"
     for _ in $(seq 1 100); do
       guard_status="$(guard_process_status "$guard_pid" "$guard_start" "$journal_nonce" "$guard_script_win" "$guard_state_win")"
-      [ "$guard_status" = absent ] && break
-      [ "$guard_status" != mismatch ] || die "guard identity changed during shutdown"
+      case "$guard_status" in absent|mismatch) break ;; unknown) ;; esac
       sleep 0.1
     done
-    [ "$guard_status" = absent ] || die "verified executable guard did not stop; state retained"
+    case "$guard_status" in absent|mismatch) ;; *) die "verified executable guard did not stop; state retained" ;; esac
   fi
   rm -f -- "$GUARD_STATE" || die "could not retire executable guard state"
 fi

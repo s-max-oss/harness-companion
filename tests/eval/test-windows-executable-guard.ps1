@@ -6,7 +6,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 [System.IO.Directory]::CreateDirectory($TempRoot) | Out-Null
-$executable = Join-Path $TempRoot 'agent.exe'
+$executables = @(
+    (Join-Path $TempRoot 'subject-agent.exe'),
+    (Join-Path $TempRoot 'reviewer-agent.exe'),
+    (Join-Path $TempRoot 'codex-powershell.exe')
+)
+$executable = $executables[0]
 $manifest = Join-Path $TempRoot 'manifest.json'
 $ready = Join-Path $TempRoot 'ready.json'
 $stop = Join-Path $TempRoot 'stop'
@@ -19,12 +24,14 @@ $nonce = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 [System.IO.Directory]::CreateDirectory($agentLock) | Out-Null
 [System.IO.File]::WriteAllText($journal, "{}`n", [System.Text.UTF8Encoding]::new($false))
 
-if ([string]::IsNullOrWhiteSpace($LaunchSource)) {
-    [System.IO.File]::WriteAllBytes($executable, [byte[]](1, 2, 3, 4))
-} else {
-    [System.IO.File]::Copy($LaunchSource, $executable, $false)
+foreach ($guardedExecutable in $executables) {
+    if ([string]::IsNullOrWhiteSpace($LaunchSource)) {
+        [System.IO.File]::WriteAllBytes($guardedExecutable, [byte[]](1, 2, 3, 4))
+    } else {
+        [System.IO.File]::Copy($LaunchSource, $guardedExecutable, $false)
+    }
 }
-$manifestJson = @{schema_version = 1; paths = @($executable)} | ConvertTo-Json -Compress
+$manifestJson = @{schema_version = 1; paths = $executables} | ConvertTo-Json -Compress
 [System.IO.File]::WriteAllText($manifest, $manifestJson + "`n", [System.Text.UTF8Encoding]::new($false))
 
 $quote = { param([string]$Value) '"' + $Value.Replace('"', '\"') + '"' }
@@ -57,7 +64,8 @@ try {
     if ($readyObject.nonce -ne $nonce -or $stateObject.nonce -ne $nonce -or
         $readyObject.guard_pid -ne $stateObject.guard_pid -or
         $readyObject.guard_start_time_utc -ne $stateObject.guard_start_time_utc -or
-        $readyObject.stop_file -ne $stateObject.stop_file) {
+        $readyObject.stop_file -ne $stateObject.stop_file -or
+        $readyObject.handle_count -ne 3 -or @($readyObject.paths).Count -ne 3) {
         throw 'guard ready signal and persisted recovery state differ'
     }
 
@@ -68,39 +76,44 @@ try {
         }
     }
 
-    $overwriteBlocked = $false
-    try {
-        [System.IO.File]::WriteAllBytes($executable, [byte[]](9, 9, 9, 9))
-    } catch [System.IO.IOException] {
-        $overwriteBlocked = $true
-    } catch [System.UnauthorizedAccessException] {
-        $overwriteBlocked = $true
-    }
-    if (-not $overwriteBlocked) {
-        throw 'guard allowed executable overwrite'
-    }
+    for ($index = 0; $index -lt $executables.Count; $index++) {
+        $guardedExecutable = $executables[$index]
+        $overwriteBlocked = $false
+        try {
+            [System.IO.File]::WriteAllBytes($guardedExecutable, [byte[]](9, 9, 9, 9))
+        } catch [System.IO.IOException] {
+            $overwriteBlocked = $true
+        } catch [System.UnauthorizedAccessException] {
+            $overwriteBlocked = $true
+        }
+        if (-not $overwriteBlocked) {
+            throw "guard allowed executable overwrite at index $index"
+        }
 
-    $replacement = Join-Path $TempRoot 'replacement.exe'
-    [System.IO.File]::WriteAllBytes($replacement, [byte[]](8, 8, 8, 8))
-    $replaceBlocked = $false
-    try {
-        Move-Item -LiteralPath $replacement -Destination $executable -Force -ErrorAction Stop
-    } catch [System.IO.IOException] {
-        $replaceBlocked = $true
-    } catch [System.UnauthorizedAccessException] {
-        $replaceBlocked = $true
-    }
-    if (-not $replaceBlocked) {
-        throw 'guard allowed executable replacement'
+        $replacement = Join-Path $TempRoot "replacement-$index.exe"
+        [System.IO.File]::WriteAllBytes($replacement, [byte[]](8, 8, 8, 8))
+        $replaceBlocked = $false
+        try {
+            Move-Item -LiteralPath $replacement -Destination $guardedExecutable -Force -ErrorAction Stop
+        } catch [System.IO.IOException] {
+            $replaceBlocked = $true
+        } catch [System.UnauthorizedAccessException] {
+            $replaceBlocked = $true
+        }
+        if (-not $replaceBlocked) {
+            throw "guard allowed executable replacement at index $index"
+        }
     }
 
     [System.IO.File]::WriteAllText($stop, '')
     if (-not $process.WaitForExit(10000)) {
         throw 'guard did not stop'
     }
-    [System.IO.File]::WriteAllBytes($executable, [byte[]](7, 7, 7, 7))
-    if (([System.IO.File]::ReadAllBytes($executable))[0] -ne 7) {
-        throw 'executable remained locked after guard exit'
+    foreach ($guardedExecutable in $executables) {
+        [System.IO.File]::WriteAllBytes($guardedExecutable, [byte[]](7, 7, 7, 7))
+        if (([System.IO.File]::ReadAllBytes($guardedExecutable))[0] -ne 7) {
+            throw 'executable remained locked after guard exit'
+        }
     }
     [System.IO.File]::Delete($state)
 }

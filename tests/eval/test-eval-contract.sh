@@ -112,8 +112,16 @@ check "real Agent identity and Windows runtime tools are versioned trust anchors
 probe_wrapper='C:\Users\example\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.exe'
 probe_inner='$env:HARNESS_EVAL_PROBE_PAYLOAD='"'"'ZGVidWc='"'"'; Write-Output ok'
 probe_inner_b64="$(printf '%s' "$probe_inner" | base64 | tr -d '\r\n')"
-probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$probe_inner_b64" "$probe_wrapper")"
+probe_display="$(cat <<'EOF'
+"C:\\Users\\example\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell\\pwsh.exe" -NoProfile -Command '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'ZGVidWc='; Write-Output ok"
+EOF
+)"
 probe_display_b64="$(printf '%s' "$probe_display" | base64 | tr -d '\r\n')"
+if [ "$(python "$EVAL/validate-probe-command.py" --canonical "$probe_inner_b64" "$probe_wrapper")" = "$probe_display" ]; then
+  ok "probe command serializer matches the approved Codex 0.152.1 golden display"
+else
+  bad "probe command serializer matches the approved Codex 0.152.1 golden display"
+fi
 check "probe command validator accepts the exact canonical profile-free wrapper argv" python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$probe_inner_b64" "$probe_wrapper"
 if python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$(printf '%s' "$probe_inner extra" | base64 | tr -d '\r\n')" "$probe_wrapper" >/dev/null 2>&1; then
   bad "probe command validator rejects inner-command drift"
@@ -188,6 +196,30 @@ if command -v powershell.exe >/dev/null 2>&1; then
   check "Windows ACL helper round-trips DACL and retains failed recovery state" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-isolation-acl.ps1" -Helper "$EVAL/windows-isolation-acl.ps1"
   mkdir -p "$TMP/executable-guard-test"
   check "Windows executable guard permits launch but blocks overwrite and replacement" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-executable-guard.ps1" -Guard "$(cygpath -w "$EVAL/windows-executable-guard.ps1")" -TempRoot "$(cygpath -w "$TMP/executable-guard-test")" -LaunchSource 'C:\Windows\System32\whoami.exe'
+  live_user_home_win="$(env -u PSModulePath powershell.exe -NoProfile -Command '[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)' | tr -d '\r')"
+  live_wrapper_suffix="$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix' "$EVAL/trust/agent-publishers.json")"
+  live_wrapper_win="$live_user_home_win\\$live_wrapper_suffix"
+  live_wrapper="$(cygpath -u "$live_wrapper_win")"
+  live_wrapper_sha="$(sha256sum "$live_wrapper" | cut -d ' ' -f 1)"
+  live_wrapper_identity="$(jq -cn \
+    --arg status Valid \
+    --arg subject "$(jq -r '.windows_runtime_tools.codex_powershell.publisher_subject' "$EVAL/trust/agent-publishers.json")" \
+    --arg thumbprint "$(jq -r '.windows_runtime_tools.codex_powershell.publisher_thumbprints[0]' "$EVAL/trust/agent-publishers.json")" \
+    '{status:$status,subject:$subject,thumbprint:$thumbprint}')"
+  check "attester behaviorally verifies the live approved PowerShell wrapper" bash "$EVAL/attest-result.sh" --verify-runtime-tool-evidence codex_powershell "$live_wrapper" "$live_wrapper_sha" "$live_wrapper_identity"
+  forged_wrapper_identity="$(jq -c '.subject = "CN=Forged"' <<< "$live_wrapper_identity")"
+  if bash "$EVAL/attest-result.sh" --verify-runtime-tool-evidence codex_powershell "$live_wrapper" "$live_wrapper_sha" "$forged_wrapper_identity" >/dev/null 2>&1; then
+    bad "attester rejects forged PowerShell wrapper Authenticode evidence"
+  else
+    ok "attester rejects forged PowerShell wrapper Authenticode evidence"
+  fi
+  cp "$live_wrapper" "$TMP/drifted-codex-powershell.exe"
+  printf x >> "$TMP/drifted-codex-powershell.exe"
+  if bash "$EVAL/attest-result.sh" --verify-runtime-tool-evidence codex_powershell "$TMP/drifted-codex-powershell.exe" "$live_wrapper_sha" "$live_wrapper_identity" >/dev/null 2>&1; then
+    bad "attester rejects PowerShell wrapper byte drift"
+  else
+    ok "attester rejects PowerShell wrapper byte drift"
+  fi
   check "production runner crash recovery covers lifecycle stages, PID reuse, and partial cleanup" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-eval-recovery.ps1" -Runner "$(cygpath -w "$EVAL/run-eval.sh")" -Recovery "$(cygpath -w "$EVAL/recover-windows-isolation.sh")" -RepoRoot "$(cygpath -w "$ROOT")" -Bash 'C:\Program Files\Git\bin\bash.exe'
   mkdir -p "$TMP/shadow-bin"
   printf '#!/bin/bash\nprintf shadow > "%s"\nexit 99\n' "$TMP/shadow-hit" > "$TMP/shadow-bin/powershell.exe"
@@ -202,6 +234,9 @@ if command -v powershell.exe >/dev/null 2>&1; then
 else
   ok "Windows ACL helper integration is Windows-only"
   ok "Windows executable guard integration is Windows-only"
+  ok "PowerShell wrapper Authenticode integration is Windows-only"
+  ok "PowerShell wrapper forged-identity rejection is Windows-only"
+  ok "PowerShell wrapper byte-drift rejection is Windows-only"
   ok "Windows crash recovery integration is Windows-only"
   ok "absolute system-tool shadow integration is Windows-only"
 fi

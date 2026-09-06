@@ -256,6 +256,22 @@ official_runtime_tool_identity() {
   printf '%s\n' "$identity"
 }
 
+verify_runtime_tool_evidence() {
+  local tool="$1" executable="$2" expected_sha="$3" expected_identity="$4" actual_identity approved_hashes
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+  jq -e 'type == "object" and keys == ["status","subject","thumbprint"]
+    and all(.status,.subject,.thumbprint; type == "string" and length > 0)' <<< "$expected_identity" >/dev/null \
+    || return 1
+  actual_identity="$(official_runtime_tool_identity "$tool" "$executable")" || return 1
+  approved_hashes="$(jq -c --arg tool "$tool" '.windows_runtime_tools[$tool].approved_sha256 // [] | map(ascii_downcase)' "$AGENT_PUBLISHERS")" \
+    || return 1
+  [ "$(sha "$executable")" = "$expected_sha" ] \
+    && jq -e --arg sha "$expected_sha" 'index($sha) != null' <<< "$approved_hashes" >/dev/null \
+    && jq -en --argjson expected "$expected_identity" --argjson actual "$actual_identity" '$actual == $expected' >/dev/null \
+    || return 1
+  printf '%s\n' "$actual_identity"
+}
+
 official_agent_build() {
   bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$1" "$2" "$3"
 }
@@ -332,6 +348,15 @@ with open(output, "w", encoding="utf-8", newline="\n") as fh:
     for rec in records: fh.write(json.dumps(rec, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n")
 PY
 }
+
+if [ "${1:-}" = "--verify-runtime-tool-evidence" ]; then
+  [ "$#" -eq 5 ] || die "usage: attest-result.sh --verify-runtime-tool-evidence <tool> <executable> <sha256> <identity-json>"
+  need jq
+  need cygpath
+  verify_runtime_tool_evidence "$2" "$3" "$4" "$5" \
+    || die "runtime tool evidence verification failed"
+  exit 0
+fi
 
 CANDIDATE="${1:-}"
 [ -n "$CANDIDATE" ] || die "usage: attest-result.sh <candidate.json> --signing-key=<path> [--candidates-dir=<dir>] [--results-dir=<dir>] [--allowed-signers=<file>]"
@@ -490,13 +515,10 @@ if [ "$production_trust" = true ]; then
   snapshot_inputs "$codex_powershell_manifest" "$codex_powershell_posix" "$codex_powershell_snapshot" \
     || die "Codex PowerShell wrapper could not be snapshotted safely"
   executable_snapshot_manifests+=("$codex_powershell_manifest")
-  actual_codex_powershell_identity="$(official_runtime_tool_identity codex_powershell "$codex_powershell_snapshot")" \
-    || die "live Codex PowerShell wrapper is not an authentic approved runtime tool"
-  [ "$(sha "$codex_powershell_snapshot")" = "$evidence_codex_powershell_sha" ] \
-    && jq -e --arg sha "$evidence_codex_powershell_sha" '.windows_runtime_tools.codex_powershell.approved_sha256 | map(ascii_downcase) | index($sha) != null' "$AGENT_PUBLISHERS" >/dev/null \
-    || die "live Codex PowerShell wrapper does not match the versioned trust policy"
-  jq -e --argjson actual "$actual_codex_powershell_identity" '.probe.executables.codex_powershell.authenticode == $actual' "$snapshot_base.isolation.json" >/dev/null \
-    || die "Codex PowerShell wrapper Authenticode identity mismatch"
+  evidence_codex_powershell_identity="$(jq -c '.probe.executables.codex_powershell.authenticode' "$snapshot_base.isolation.json")"
+  verify_runtime_tool_evidence codex_powershell "$codex_powershell_snapshot" \
+    "$evidence_codex_powershell_sha" "$evidence_codex_powershell_identity" >/dev/null \
+    || die "live Codex PowerShell wrapper does not match its approved hash and Authenticode evidence"
 fi
 jq -e \
   --arg wrapper_suffix "$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")" \

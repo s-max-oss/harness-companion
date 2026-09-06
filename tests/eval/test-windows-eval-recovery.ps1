@@ -54,6 +54,7 @@ function Invoke-ProductionCrash {
         [Parameter(Mandatory = $true)][string]$Stage,
         [switch]$SimulatePidReuse,
         [switch]$StopGuardBeforeRecovery,
+        [switch]$SimulateGuardPidReuse,
         [switch]$TestRecoveryFinalWindow
     )
     Assert-Idle
@@ -158,6 +159,12 @@ function Invoke-ProductionCrash {
             [IO.File]::WriteAllText($owner, ($ownerRecord | ConvertTo-Json -Compress -Depth 8) + "`n", [Text.UTF8Encoding]::new($false))
         }
         if ($StopGuardBeforeRecovery) { Stop-OrphanGuard }
+        if ($SimulateGuardPidReuse) {
+            if (-not (Test-Path -LiteralPath $guardState -PathType Leaf)) { throw 'guard PID-reuse test has no guard metadata' }
+            $guardRecord = Get-Content -LiteralPath $guardState -Raw | ConvertFrom-Json
+            $guardRecord.guard_pid = $PID
+            [IO.File]::WriteAllText($guardState, ($guardRecord | ConvertTo-Json -Compress -Depth 8) + "`n", [Text.UTF8Encoding]::new($false))
+        }
 
         if ($TestRecoveryFinalWindow) {
             $oldRecoveryExit = $env:HARNESS_EVAL_RECOVERY_TEST_EXIT_STAGE
@@ -217,7 +224,7 @@ try {
             'run_root_created' { Invoke-ProductionCrash -Stage $stage }
             'acl_owner_staged' { Invoke-ProductionCrash -Stage $stage }
             'agent_lock_acquired' { Invoke-ProductionCrash -Stage $stage -SimulatePidReuse }
-            'guard_active' { Invoke-ProductionCrash -Stage $stage -StopGuardBeforeRecovery }
+            'guard_active' { Invoke-ProductionCrash -Stage $stage -StopGuardBeforeRecovery -SimulateGuardPidReuse }
             'isolation_entering_before_state' { Invoke-ProductionCrash -Stage $stage }
             'isolation_entering' { Invoke-ProductionCrash -Stage $stage }
             'isolation_entering_after_state' { Invoke-ProductionCrash -Stage $stage }

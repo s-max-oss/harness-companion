@@ -440,7 +440,10 @@ while IFS= read -r case_file; do
       and all(.[]; type == "string" and length > 0 and ((ascii_downcase | contains("/users/")) | not)))
   ' "$base.isolation.json" >/dev/null 2>&1; then isolation_valid=true; fi
 
-  if [ "$bound" = true ] && [ "$signature_valid" = true ] && [ "$brief_valid" = true ] && [ "$isolation_valid" = true ] && jq -e \
+  bundle_valid=false
+  if bash "$AGENT_BUILD_VERIFIER" --verify-bundle-evidence "$AGENT_PUBLISHERS" "$latest" >/dev/null 2>&1; then bundle_valid=true; fi
+
+  if [ "$bound" = true ] && [ "$signature_valid" = true ] && [ "$brief_valid" = true ] && [ "$isolation_valid" = true ] && [ "$bundle_valid" = true ] && jq -e \
     --arg name "$name" --arg version "$version" --arg scenario "$scenario" \
     --arg case_sha "$(sha "$case_file")" --arg skill_sha "$skill_sha" --arg runtime_sha "$runtime_sha" \
     --arg runner_sha "$runner_sha" --arg schema_sha "$schema_sha" --arg rubric_sha "$(sha "$tmp/rubric.json")" --arg signer_fingerprint "$trusted_fingerprint" \
@@ -498,19 +501,6 @@ while IFS= read -r case_file; do
       and (.reviewer.session_id | type == "string" and length > 0)
       and .reviewer.tools_disabled == true
       and (.reviewer.session_id as $rid | (.subject.session_ids | index($rid)) == null)
-      and (. as $candidate
-        | [$approved_builds[] | select(.cli_version == $candidate.subject.cli_version)] as $builds
-        | ($builds | length) == 1
-        and (($candidate.agent_runtime.components | keys | sort) == ($builds[0].components | keys | sort))
-        and all($builds[0].components | to_entries[];
-          . as $component
-          | ($candidate.agent_runtime.components[$component.key] | keys | sort) == ["authenticode","sha256","source"]
-          and ($candidate.agent_runtime.components[$component.key].source | type == "string" and endswith("/" + $component.key))
-          and (($candidate.agent_runtime.components[$component.key].sha256 | ascii_downcase) == ($component.value.sha256 | ascii_downcase))
-          and $candidate.agent_runtime.components[$component.key].authenticode.status == "Valid"
-          and $candidate.agent_runtime.components[$component.key].authenticode.subject == $codex_publisher_subject
-          and ($candidate.agent_runtime.components[$component.key].authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
-        ))
       and (.artifact_hashes | keys | sort == ["evaluator_events","isolation","objective_checks","project_brief","reviewer_events","reviewer_output","subject_events","transcript","tree","turn_trees"])
     ' "$latest" >/dev/null 2>&1; then
     confirmed=$((confirmed + 1))

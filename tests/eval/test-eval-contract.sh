@@ -232,23 +232,26 @@ if command -v powershell.exe >/dev/null 2>&1; then
   live_codex="$(command -v codex)"
   live_codex_dir="$(cd "$(dirname "$live_codex")" && pwd -P)"
   live_codex_version="$("$live_codex" --version | head -1)"
-  live_component_name='codex-code-mode-host.exe'
-  live_component="$live_codex_dir/$live_component_name"
-  live_component_sha="$(sha256sum "$live_component" | cut -d ' ' -f 1)"
   live_component_identity="$(jq -cn \
     --arg status Valid \
     --arg subject "$(jq -r '.agents.codex.publisher_subject' "$EVAL/trust/agent-publishers.json")" \
     --arg thumbprint "$(jq -r '.agents.codex.publisher_thumbprints[0]' "$EVAL/trust/agent-publishers.json")" \
     '{status:$status,subject:$subject,thumbprint:$thumbprint}')"
-  check "attester behaviorally verifies an approved Codex runtime component" bash "$EVAL/attest-result.sh" \
-    --verify-agent-component-evidence codex "$live_codex_version" "$live_component_name" "$live_component" "$live_component_sha" "$live_component_identity"
   forged_component_identity="$(jq -c '.subject = "CN=Forged"' <<< "$live_component_identity")"
-  if bash "$EVAL/attest-result.sh" --verify-agent-component-evidence codex "$live_codex_version" \
-    "$live_component_name" "$live_component" "$live_component_sha" "$forged_component_identity" >/dev/null 2>&1; then
-    bad "attester rejects forged Codex runtime component identity"
-  else
-    ok "attester rejects forged Codex runtime component identity"
-  fi
+  while IFS= read -r live_component_name; do
+    live_component="$live_codex_dir/$live_component_name"
+    live_component_sha="$(sha256sum "$live_component" | cut -d ' ' -f 1)"
+    check "attester behaviorally verifies approved component $live_component_name" bash "$EVAL/attest-result.sh" \
+      --verify-agent-component-evidence codex "$live_codex_version" "$live_component_name" "$live_component" "$live_component_sha" "$live_component_identity"
+    if bash "$EVAL/attest-result.sh" --verify-agent-component-evidence codex "$live_codex_version" \
+      "$live_component_name" "$live_component" "$live_component_sha" "$forged_component_identity" >/dev/null 2>&1; then
+      bad "attester rejects forged identity for component $live_component_name"
+    else
+      ok "attester rejects forged identity for component $live_component_name"
+    fi
+  done < <(jq -r --arg version "$live_codex_version" \
+    '.agents.codex.approved_builds[] | select(.cli_version == $version) | .components | keys[]' \
+    "$EVAL/trust/agent-publishers.json" | tr -d '\r')
   check "production runner crash recovery covers lifecycle stages, PID reuse, and partial cleanup" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-eval-recovery.ps1" -Runner "$(cygpath -w "$EVAL/run-eval.sh")" -Recovery "$(cygpath -w "$EVAL/recover-windows-isolation.sh")" -RepoRoot "$(cygpath -w "$ROOT")" -Bash 'C:\Program Files\Git\bin\bash.exe'
   mkdir -p "$TMP/shadow-bin"
   printf '#!/bin/bash\nprintf shadow > "%s"\nexit 99\n' "$TMP/shadow-hit" > "$TMP/shadow-bin/powershell.exe"
@@ -552,9 +555,11 @@ jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher
   | .release_eligible=false
   | .reviewer_verdict="REVIEWED"
   | .subject.executable_sha256=$approved_sha
+  | .subject.executable="/approved-codex-runtime/codex.exe"
   | .subject.cli_version=$approved_version
   | .subject.authenticode={status:"Valid",subject:$publisher_subject,thumbprint:$publisher_thumbprint}
   | .reviewer.executable_sha256=$approved_sha
+  | .reviewer.executable="/approved-codex-runtime/codex.exe"
   | .reviewer.cli_version=$approved_version
   | .reviewer.authenticode={status:"Valid",subject:$publisher_subject,thumbprint:$publisher_thumbprint}
   | .agent_runtime.components=($approved_components | with_entries(
@@ -565,6 +570,19 @@ jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher
   | .attestation={required:true,status:"pending",identity:null,namespace:null,signer_fingerprint:null}
 ' "$attest_candidate" > "$TMP/attest-candidate.tmp"
 mv "$TMP/attest-candidate.tmp" "$attest_candidate"
+check "shared bundle verifier accepts complete same-directory evidence" bash "$EVAL/verify-agent-build.sh" \
+  --verify-bundle-evidence "$EVAL/trust/agent-publishers.json" "$attest_candidate"
+bundle_component="$(jq -r '.agent_runtime.components | keys[0]' "$attest_candidate")"
+jq --arg component "$bundle_component" 'del(.agent_runtime.components[$component])' "$attest_candidate" > "$TMP/bundle-missing.json"
+if bash "$EVAL/verify-agent-build.sh" --verify-bundle-evidence "$EVAL/trust/agent-publishers.json" "$TMP/bundle-missing.json" >/dev/null 2>&1; then bad "bundle verifier rejects missing component evidence"; else ok "bundle verifier rejects missing component evidence"; fi
+jq '.agent_runtime.components["codex-extra.exe"]=(.agent_runtime.components[.agent_runtime.components|keys[0]])' "$attest_candidate" > "$TMP/bundle-extra.json"
+if bash "$EVAL/verify-agent-build.sh" --verify-bundle-evidence "$EVAL/trust/agent-publishers.json" "$TMP/bundle-extra.json" >/dev/null 2>&1; then bad "bundle verifier rejects extra component evidence"; else ok "bundle verifier rejects extra component evidence"; fi
+jq --arg component "$bundle_component" '.agent_runtime.components[$component]={source:"/approved-codex-runtime/bad.exe",sha256:"bad",authenticode:{}}' "$attest_candidate" > "$TMP/bundle-malformed.json"
+if bash "$EVAL/verify-agent-build.sh" --verify-bundle-evidence "$EVAL/trust/agent-publishers.json" "$TMP/bundle-malformed.json" >/dev/null 2>&1; then bad "bundle verifier rejects malformed component evidence"; else ok "bundle verifier rejects malformed component evidence"; fi
+jq --arg component "$bundle_component" '.agent_runtime.components[$component].source=("/different-runtime/" + $component)' "$attest_candidate" > "$TMP/bundle-component-path.json"
+if bash "$EVAL/verify-agent-build.sh" --verify-bundle-evidence "$EVAL/trust/agent-publishers.json" "$TMP/bundle-component-path.json" >/dev/null 2>&1; then bad "bundle verifier rejects cross-directory component evidence"; else ok "bundle verifier rejects cross-directory component evidence"; fi
+jq '.reviewer.executable="/different-runtime/codex.exe"' "$attest_candidate" > "$TMP/bundle-reviewer-path.json"
+if bash "$EVAL/verify-agent-build.sh" --verify-bundle-evidence "$EVAL/trust/agent-publishers.json" "$TMP/bundle-reviewer-path.json" >/dev/null 2>&1; then bad "bundle verifier rejects cross-directory Reviewer evidence"; else ok "bundle verifier rejects cross-directory Reviewer evidence"; fi
 printf 'harness-eval-release %s\n' "$(ssh-keygen -y -f "$TMP/test-signing-key")" > "$TMP/test-release-signers"
 mkdir -p "$TMP/wrong-build-candidates" "$TMP/wrong-build-results"
 for f in "$attest_base".*; do cp "$f" "$TMP/wrong-build-candidates/"; done

@@ -670,6 +670,9 @@ if [ "$production_trust" = true ]; then
   done < <(jq -r '.[]' <<< "$approved_component_names" | tr -d '\r')
 fi
 
+bash "$AGENT_BUILD_VERIFIER" --verify-bundle-evidence "$AGENT_PUBLISHERS" "$snapshot_candidate" \
+  || die "candidate Agent runtime bundle evidence is incomplete or internally inconsistent"
+
 signer_public="$(ssh-keygen -y -f "$SIGNING_KEY" | tr -d '\r')" || die "could not read signing key"
 signer_fingerprint="$(printf '%s\n' "$signer_public" | ssh-keygen -lf - -E sha256 | awk '{print $2}' | tr -d '\r')"
 authorized_fingerprints="$(awk '$1 == "harness-eval-release" {print $2, $3}' "$ALLOWED_SIGNERS" \
@@ -727,19 +730,6 @@ jq -e \
     and (.reviewer as $agent | any($approved_builds[]; .cli_version == $agent.cli_version and (.sha256 | ascii_downcase) == $agent.executable_sha256))
     and (.reviewer.session_id | type == "string" and length > 0)
     and (.reviewer.session_id as $rid | (.subject.session_ids | index($rid)) == null)
-    and (. as $candidate
-      | [$approved_builds[] | select(.cli_version == $candidate.subject.cli_version)] as $builds
-      | ($builds | length) == 1
-      and (($candidate.agent_runtime.components | keys | sort) == ($builds[0].components | keys | sort))
-      and all($builds[0].components | to_entries[];
-        . as $component
-        | ($candidate.agent_runtime.components[$component.key] | keys | sort) == ["authenticode","sha256","source"]
-        and ($candidate.agent_runtime.components[$component.key].source | type == "string" and endswith("/" + $component.key))
-        and (($candidate.agent_runtime.components[$component.key].sha256 | ascii_downcase) == ($component.value.sha256 | ascii_downcase))
-        and $candidate.agent_runtime.components[$component.key].authenticode.status == "Valid"
-        and $candidate.agent_runtime.components[$component.key].authenticode.subject == $codex_publisher_subject
-        and ($candidate.agent_runtime.components[$component.key].authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
-      ))
     and (.artifact_hashes | keys | sort == ["evaluator_events","isolation","objective_checks","project_brief","reviewer_events","reviewer_output","subject_events","transcript","tree","turn_trees"])
   ' "$snapshot_candidate" >/dev/null || die "candidate is stale, failed, synthetic, unisolated, or structurally invalid"
 

@@ -35,6 +35,193 @@ windows_powershell() {
   "$TRUSTED_WINDOWS_ENV" -u PSModulePath "$WINDOWS_POWERSHELL" "$@"
 }
 
+windows_process_status() {
+  HARNESS_EVAL_OWNER_PID="$1" HARNESS_EVAL_OWNER_START="$2" HARNESS_EVAL_OWNER_NAME="$3" \
+  HARNESS_EVAL_OWNER_COMMAND="$4" windows_powershell -NoProfile -Command '
+    $p = Get-Process -Id ([int]$env:HARNESS_EVAL_OWNER_PID) -ErrorAction SilentlyContinue
+    if ($null -eq $p) { "absent"; exit 0 }
+    $cim = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $p.Id) -ErrorAction SilentlyContinue
+    if ($null -eq $cim) { "mismatch"; exit 0 }
+    $start = $p.StartTime.ToUniversalTime().ToString("o")
+    if ($start -ceq $env:HARNESS_EVAL_OWNER_START -and
+        ([string]$cim.Name).Equals($env:HARNESS_EVAL_OWNER_NAME, [StringComparison]::OrdinalIgnoreCase) -and
+        ([string]$cim.CommandLine) -ceq $env:HARNESS_EVAL_OWNER_COMMAND) { "match" } else { "mismatch" }
+  ' 2>/dev/null | tr -d '\r\n'
+}
+
+windows_controller_identity() {
+  local msys_pid="$$" windows_pid
+  windows_pid="$(ps -W | while read -r pid _ _ winpid _; do
+    if [ "$pid" = "$msys_pid" ]; then printf '%s\n' "$winpid"; break; fi
+  done)"
+  case "$windows_pid" in ''|*[!0-9]*) return 1 ;; esac
+  HARNESS_EVAL_CONTROLLER_PID="$windows_pid" windows_powershell -NoProfile -Command '
+    $process = Get-Process -Id ([int]$env:HARNESS_EVAL_CONTROLLER_PID) -ErrorAction Stop
+    $cim = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $process.Id) -ErrorAction Stop
+    [ordered]@{
+      pid = [int]$process.Id
+      start_time_utc = $process.StartTime.ToUniversalTime().ToString("o")
+      name = [string]$cim.Name
+      command_line = [string]$cim.CommandLine
+    } | ConvertTo-Json -Compress
+  ' 2>/dev/null | tr -d '\r\n'
+}
+
+exclusive_publish() {
+  python - "$1" "$2" <<'PY'
+import os, sys
+source, destination = sys.argv[1:]
+with open(source, "rb") as stream:
+    payload = stream.read()
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+fd = os.open(destination, flags, 0o600)
+try:
+    os.write(fd, payload)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+}
+
+create_recovery_journal() {
+  local initial="$ROOT/.harness/.eval-recovery-journal.create.$$.$RANDOM"
+  [ ! -e "$recovery_journal" ] && [ ! -L "$recovery_journal" ] || return 1
+  jq -n --arg nonce "$recovery_nonce" --argjson controller "$controller_identity" \
+    --arg journal "$(cygpath -w "$recovery_journal")" --arg run_root "$(cygpath -w "$tmp")" \
+    --arg work_runs_root "$(cygpath -w "$work_root/runs")" --arg output_dir "$(cygpath -w "$OUTPUT_DIR")" \
+    --arg agent_lock "$(cygpath -w "$agent_lock")" --arg acl_lock "$(cygpath -w "$acl_lock")" \
+    --arg acl_owner "$(cygpath -w "$acl_lock_owner")" --arg acl_state "$(cygpath -w "$acl_state")" \
+    --arg guard_state "$(cygpath -w "$executable_guard_state")" '
+      {schema_version:1,nonce:$nonce,stage:"planned",controller:$controller,
+       paths:{journal:$journal,run_root:$run_root,work_runs_root:$work_runs_root,
+         output_dir:$output_dir,agent_lock:$agent_lock,acl_lock:$acl_lock,
+         acl_owner:$acl_owner,acl_state:$acl_state,guard_state:$guard_state,
+         publication_lock:null,publication_stage:null}}
+    ' > "$initial" || { rm -f -- "$initial"; return 1; }
+  exclusive_publish "$initial" "$recovery_journal" || { rm -f -- "$initial"; return 1; }
+  rm -f -- "$initial" || return 1
+  recovery_journal_active=true
+}
+
+update_recovery_journal() {
+  local next_stage="$1" staged="$ROOT/.harness/.eval-recovery-journal.update.$$.$RANDOM"
+  [ "$recovery_journal_active" = true ] || return 1
+  [ -f "$recovery_journal" ] && [ ! -L "$recovery_journal" ] || return 1
+  jq --arg stage "$next_stage" '.stage = $stage' "$recovery_journal" > "$staged" || { rm -f -- "$staged"; return 1; }
+  python - "$staged" "$recovery_journal" <<'PY' || { rm -f -- "$staged"; return 1; }
+import os, stat, sys, time
+source, destination = sys.argv[1:]
+current = os.lstat(destination)
+if not stat.S_ISREG(current.st_mode):
+    raise SystemExit("recovery journal is not a regular file")
+with open(source, "rb") as stream:
+    payload = stream.read()
+fd = os.open(source, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+for attempt in range(200):
+    try:
+        if not stat.S_ISREG(os.lstat(destination).st_mode):
+            raise SystemExit("recovery journal is not a regular file")
+        os.replace(source, destination)
+        break
+    except PermissionError:
+        if attempt == 199:
+            raise
+        time.sleep(0.01)
+PY
+}
+
+set_recovery_publication_paths() {
+  local staged="$ROOT/.harness/.eval-recovery-journal.update.$$.$RANDOM"
+  [ "$recovery_journal_active" = true ] || return 1
+  jq --arg lock "$(cygpath -w "$publication_lock")" --arg stage_path "$(cygpath -w "$stage")" '
+    .stage = "publication_paths_reserved"
+    | .paths.publication_lock = $lock
+    | .paths.publication_stage = $stage_path
+  ' "$recovery_journal" > "$staged" || { rm -f -- "$staged"; return 1; }
+  python - "$staged" "$recovery_journal" <<'PY' || { rm -f -- "$staged"; return 1; }
+import os, stat, sys, time
+source, destination = sys.argv[1:]
+if not stat.S_ISREG(os.lstat(destination).st_mode):
+    raise SystemExit("recovery journal is not a regular file")
+with open(source, "rb") as stream:
+    payload = stream.read()
+fd = os.open(source, os.O_WRONLY | getattr(os, "O_BINARY", 0))
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+for attempt in range(200):
+    try:
+        if not stat.S_ISREG(os.lstat(destination).st_mode):
+            raise SystemExit("recovery journal is not a regular file")
+        os.replace(source, destination)
+        break
+    except PermissionError:
+        if attempt == 199:
+            raise
+        time.sleep(0.01)
+PY
+}
+
+write_acl_lock_owner() {
+  local staged="$acl_lock/.owner.json.$$.$RANDOM"
+  jq -n --arg nonce "$recovery_nonce" --arg journal "$(cygpath -w "$recovery_journal")" \
+    --argjson process "$controller_identity" \
+    '{schema_version:1,run_nonce:$nonce,journal:$journal,process:$process}' > "$staged" || return 1
+  mv "$staged" "$acl_lock_owner" || return 1
+}
+
+contract_test_hold() {
+  [ "${HARNESS_EVAL_CONTRACT_TEST:-0}" = 1 ] || return 0
+  [ "${HARNESS_EVAL_TEST_HOLD_STAGE:-}" = "$1" ] || return 0
+  # Stay inside the controller process: an external sleep can survive a forced
+  # parent crash under MSYS and keep redirected test logs open.
+  while :; do :; done
+}
+
+contract_test_prepare_post_agent_stage() {
+  local requested="${HARNESS_EVAL_TEST_HOLD_STAGE:-}"
+  [ "${HARNESS_EVAL_CONTRACT_TEST:-0}" = 1 ] || return 0
+  case "$requested" in publication_paths_reserved|publication_staged|run_tree_removed) ;; *) return 0 ;; esac
+
+  stop_executable_guard || die "contract setup could not stop executable guard"
+  update_recovery_journal guard_stopped || die "contract setup could not record guard shutdown"
+  rm -f -- "$acl_lock_owner" || die "contract setup could not remove ACL owner"
+  rmdir "$acl_lock" || die "contract setup could not release ACL lock"
+  acl_lock_owned=false
+  update_recovery_journal acl_lock_released || die "contract setup could not record ACL lock release"
+
+  stamp="contract-$recovery_nonce"
+  base="$case_name.$case_version.$stamp"
+  stage="$OUTPUT_DIR/.staging-$base"
+  publication_lock="$OUTPUT_DIR/.eval-write.lock"
+  set_recovery_publication_paths || die "contract setup could not reserve publication paths"
+  contract_test_hold publication_paths_reserved
+
+  mkdir "$publication_lock" || die "contract setup could not acquire publication lock"
+  publication_lock_owned=true
+  mkdir "$stage" || die "contract setup could not create publication stage"
+  stage_owned=true
+  update_recovery_journal publication_staged || die "contract setup could not record publication stage"
+  contract_test_hold publication_staged
+
+  rmdir "$stage" || die "contract setup could not remove publication stage"
+  stage_owned=false
+  rmdir "$publication_lock" || die "contract setup could not release publication lock"
+  publication_lock_owned=false
+  rmdir "$agent_lock" || die "contract setup could not release Agent lock"
+  agent_lock_owned=false
+  update_recovery_journal agent_lock_released || die "contract setup could not record Agent lock release"
+  rm -rf -- "$tmp" || die "contract setup could not remove isolated run tree"
+  update_recovery_journal run_tree_removed || die "contract setup could not record run-tree removal"
+  contract_test_hold run_tree_removed
+  die "contract lifecycle hold unexpectedly returned"
+}
+
 official_agent_identity() {
   local agent="$1" executable="$2" executable_win identity policy expected_subject expected_thumbprints
   [ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
@@ -164,10 +351,13 @@ guard_process_status() {
     $start = $p.StartTime.ToUniversalTime().ToString("o")
     $cim = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $p.Id) -ErrorAction SilentlyContinue
     $command = if ($null -ne $cim) { [string]$cim.CommandLine } else { "" }
+    $normalizedCommand = $command.Replace("/", "\")
+    $normalizedScript = $env:HARNESS_EVAL_GUARD_SCRIPT.Replace("/", "\")
+    $normalizedState = $env:HARNESS_EVAL_GUARD_STATE.Replace("/", "\")
     if ($start -eq $env:HARNESS_EVAL_GUARD_START -and
-        $command.IndexOf($env:HARNESS_EVAL_GUARD_SCRIPT, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-        $command.IndexOf($env:HARNESS_EVAL_GUARD_STATE, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-        $command.Contains($env:HARNESS_EVAL_GUARD_NONCE)) { "match" } else { "mismatch" }
+        $normalizedCommand.IndexOf($normalizedScript, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $normalizedCommand.IndexOf($normalizedState, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $normalizedCommand.Contains($env:HARNESS_EVAL_GUARD_NONCE)) { "match" } else { "mismatch" }
   ' 2>/dev/null | tr -d '\r\n'
 }
 
@@ -175,7 +365,7 @@ start_executable_guard() {
   local manifest="$controller/executable-guard.manifest.json"
   local ready="$controller/executable-guard.ready.json"
   local stderr="$controller/executable-guard.stderr"
-  local subject_win reviewer_win ready_json ready_fd state_json
+  local subject_win reviewer_win ready_json ready_fd ready_file_json state_json
   subject_win="$(cygpath -w "$subject_launch_executable")" || return 1
   reviewer_win="$(cygpath -w "$reviewer_launch_executable")" || return 1
   jq -n --arg subject "$subject_win" --arg reviewer "$reviewer_win" \
@@ -183,32 +373,37 @@ start_executable_guard() {
   executable_guard_stop="$controller/executable-guard.stop"
   executable_guard_state="$ROOT/.harness/eval-guard-state.json"
   [ ! -e "$executable_guard_state" ] && [ ! -L "$executable_guard_state" ] || return 1
-  executable_guard_nonce="$(python -c 'import secrets; print(secrets.token_hex(32))')" || return 1
+  executable_guard_nonce="$recovery_nonce"
+  [[ "$executable_guard_nonce" =~ ^[0-9a-f]{64}$ ]] || return 1
   rm -f -- "$ready" "$executable_guard_stop"
-  exec {ready_fd}< <(windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$EXECUTABLE_GUARD" \
+  exec {ready_fd}< <(windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$EXECUTABLE_GUARD")" \
     -ManifestFile "$(cygpath -w "$manifest")" -ReadyFile "$(cygpath -w "$ready")" \
     -StopFile "$(cygpath -w "$executable_guard_stop")" \
     -StateFile "$(cygpath -w "$executable_guard_state")" -RunRoot "$(cygpath -w "$tmp")" \
-    -AgentLock "$(cygpath -w "$agent_lock")" -Nonce "$executable_guard_nonce" 2> "$stderr")
+    -AgentLock "$(cygpath -w "$agent_lock")" -RecoveryJournal "$(cygpath -w "$recovery_journal")" \
+    -Nonce "$executable_guard_nonce" 2> "$stderr")
   executable_guard_pid=$!
   executable_guard_active=true
   IFS= read -r -t 10 ready_json <&"$ready_fd" || { exec {ready_fd}<&-; return 1; }
   exec {ready_fd}<&-
   executable_guard_windows_pid="$(jq -r '.guard_pid // empty' <<< "$ready_json")"
   executable_guard_start="$(jq -r '.guard_start_time_utc // empty' <<< "$ready_json")"
+  ready_json="$(jq -c . <<< "$ready_json")" || return 1
   jq -e --argjson expected "$(jq -c '.paths | length' "$manifest")" \
     --arg nonce "$executable_guard_nonce" --arg state "$(cygpath -w "$executable_guard_state")" \
     --arg stop "$(cygpath -w "$executable_guard_stop")" --arg run_root "$(cygpath -w "$tmp")" \
-    --arg agent_lock "$(cygpath -w "$agent_lock")" '
+    --arg agent_lock "$(cygpath -w "$agent_lock")" --arg journal "$(cygpath -w "$recovery_journal")" '
       .schema_version == 1 and .handle_count == $expected and (.paths | length) == $expected
       and (.guard_pid | type == "number" and . > 0) and (.guard_start_time_utc | type == "string" and length > 0)
       and .nonce == $nonce and .state_file == $state and .stop_file == $stop
-      and .run_root == $run_root and .agent_lock == $agent_lock
+      and .run_root == $run_root and .agent_lock == $agent_lock and .recovery_journal == $journal
     ' <<< "$ready_json" >/dev/null \
     || return 1
-  [ -f "$ready" ] && [ "$(tr -d '\r\n' < "$ready")" = "$ready_json" ] || return 1
+  [ -f "$ready" ] || return 1
+  ready_file_json="$(jq -c . "$ready")" || return 1
+  [ "$ready_file_json" = "$ready_json" ] || return 1
   [ -f "$executable_guard_state" ] && [ ! -L "$executable_guard_state" ] || return 1
-  state_json="$(tr -d '\r\n' < "$executable_guard_state")" || return 1
+  state_json="$(jq -c . "$executable_guard_state")" || return 1
   [ "$state_json" = "$ready_json" ] || return 1
   verify_guarded_executables
 }
@@ -314,13 +509,14 @@ REVIEWER="${HARNESS_EVAL_REVIEWER:-$AGENT}"
 MODEL="${HARNESS_EVAL_MODEL:-}"
 REVIEWER_MODEL="${HARNESS_EVAL_REVIEWER_MODEL:-}"
 OUTPUT_DIR="$DEFAULT_CANDIDATES"
+OUTPUT_DIR_OVERRIDDEN=false
 for arg in "$@"; do
   case "$arg" in
     --agent=codex|--agent=claude) AGENT="${arg#*=}" ;;
     --reviewer=codex|--reviewer=claude) REVIEWER="${arg#*=}" ;;
     --model=*) MODEL="${arg#*=}" ;;
     --reviewer-model=*) REVIEWER_MODEL="${arg#*=}" ;;
-    --output-dir=*) OUTPUT_DIR="${arg#*=}" ;;
+    --output-dir=*) OUTPUT_DIR="${arg#*=}"; OUTPUT_DIR_OVERRIDDEN=true ;;
     *) die "unknown argument: $arg" ;;
   esac
 done
@@ -329,6 +525,17 @@ done
 
 SYNTHETIC="${HARNESS_EVAL_SYNTHETIC:-0}"
 case "$SYNTHETIC" in 0|1) ;; *) die "HARNESS_EVAL_SYNTHETIC must be 0 or 1" ;; esac
+if [ "$SYNTHETIC" = 0 ]; then
+  if [ "$OUTPUT_DIR_OVERRIDDEN" = true ]; then
+    [ -d "$OUTPUT_DIR" ] || die "real eval output must be the canonical candidates directory"
+    [ "$(host_path "$OUTPUT_DIR")" = "$(host_path "$DEFAULT_CANDIDATES")" ] \
+      || die "real eval output must be the canonical candidates directory"
+  fi
+  OUTPUT_DIR="$DEFAULT_CANDIDATES"
+  if [ -n "${HARNESS_EVAL_WORK_ROOT+x}" ] && [ "$HARNESS_EVAL_WORK_ROOT" != '/c/Users/Public/harness-companion-eval' ]; then
+    die "real eval work root is fixed for recoverability"
+  fi
+fi
 mkdir -p "$OUTPUT_DIR"
 output_abs="$(cd "$OUTPUT_DIR" && pwd -P)"
 output_host="$(host_path "$output_abs")"
@@ -402,15 +609,6 @@ fixture_host="$(host_path "$fixture_abs")"
 script_dir_host="$(host_path "$SCRIPT_DIR")"
 case "$fixture_host/" in "$script_dir_host"/*) ;; *) die "fixture escapes tests/eval" ;; esac
 
-if [ "$SYNTHETIC" = 0 ]; then
-  work_root="${HARNESS_EVAL_WORK_ROOT:-/c/Users/Public/harness-companion-eval}"
-  mkdir -p "$work_root/runs"
-  tmp="$(mktemp -d "$work_root/runs/run.XXXXXX")" || die "isolated mktemp failed"
-  mkdir -p "$ROOT/.harness"
-else
-  tmp="$(mktemp -d)" || die "mktemp failed"
-fi
-controller="$tmp/controller"
 executable_guard_active=false
 executable_guard_pid=""
 executable_guard_stop=""
@@ -421,47 +619,124 @@ executable_guard_start=""
 isolation_active=false
 acl_state="$ROOT/.harness/eval-acl-state.json"
 acl_lock="$ROOT/.harness/eval-acl.lock"
-acl_lock_owner="$acl_lock/owner.pid"
+acl_lock_owner="$acl_lock/owner.json"
 acl_lock_owned=false
+agent_lock="$OUTPUT_DIR/.eval-agent.lock"
+agent_lock_owned=false
+publication_lock=""
+publication_lock_owned=false
+stage=""
+stage_owned=false
+recovery_journal="$ROOT/.harness/eval-recovery-journal.json"
+recovery_journal_active=false
+recovery_nonce=""
+controller_identity='null'
 restore_failed=false
+
+if [ "$SYNTHETIC" = 0 ]; then
+  work_root='/c/Users/Public/harness-companion-eval'
+  mkdir -p "$ROOT/.harness"
+  for stale in "$recovery_journal" "$acl_state" "$executable_guard_state" "$acl_lock" "$agent_lock"; do
+    if [ -e "$stale" ] || [ -L "$stale" ]; then
+      die "stale real-eval state exists; run tests/eval/recover-windows-isolation.sh: $stale"
+    fi
+  done
+  recovery_nonce="$(python -c 'import secrets; print(secrets.token_hex(32))')" || die "could not create recovery nonce"
+  controller_identity="$(windows_controller_identity)" || die "could not capture controller process identity"
+  jq -e '(.pid | type == "number" and . > 0) and (.name | ascii_downcase) == "bash.exe"
+    and all(.start_time_utc,.command_line; type == "string" and length > 0)' <<< "$controller_identity" >/dev/null \
+    || die "controller process identity is invalid"
+  mkdir -p "$work_root/runs"
+  tmp="$work_root/runs/run.$recovery_nonce"
+  controller="$tmp/controller"
+  [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || die "isolated run root already exists"
+  create_recovery_journal || die "could not create lifecycle recovery journal"
+  mkdir "$tmp" || die "could not create isolated run root; lifecycle journal retained"
+  mkdir "$controller" || die "could not create controller root; lifecycle journal retained"
+  update_recovery_journal run_root_created || die "could not update lifecycle recovery journal"
+  contract_test_hold run_root_created
+else
+  tmp="$(mktemp -d)" || die "mktemp failed"
+  controller="$tmp/controller"
+  mkdir -p "$controller"
+fi
 cleanup() {
+  local original_rc=$? cleanup_path guard_was_pending=false
+  trap - EXIT
+  if [ "$SYNTHETIC" = 0 ] && { [ "$executable_guard_active" = true ] || [ -e "$executable_guard_state" ] || [ -L "$executable_guard_state" ]; }; then
+    guard_was_pending=true
+  fi
   if ! stop_executable_guard; then
     restore_failed=true
     echo "eval: executable guard shutdown failed; recovery state retained; run tests/eval/recover-windows-isolation.sh after this process exits" >&2
+  elif [ "$guard_was_pending" = true ] && [ "$recovery_journal_active" = true ]; then
+    update_recovery_journal guard_stopped || restore_failed=true
   fi
-  if [ "$isolation_active" = true ]; then
-    if windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
+  if [ "$SYNTHETIC" = 0 ] && { [ "$isolation_active" = true ] || [ -e "$acl_state" ] || [ -L "$acl_state" ]; }; then
+    if [ -f "$acl_state" ] && [ ! -L "$acl_state" ] && windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
       -WorkspaceRoot "$(cd "$ROOT/.." && pwd -P)" -ControllerRoot "$controller" \
       -UserHome "$real_user_home" -StateFile "$acl_state" >/dev/null 2>&1; then
       isolation_active=false
+      update_recovery_journal isolation_restored || restore_failed=true
     else
       restore_failed=true
       echo "eval: ACL restoration failed; recovery state retained; run tests/eval/recover-windows-isolation.sh after this process exits" >&2
     fi
   fi
-  if [ "$restore_failed" = false ] && [ "${agent_lock_owned:-false}" = true ]; then rmdir "$agent_lock" >/dev/null 2>&1 || true; fi
+  if [ "$restore_failed" = false ] && [ "$stage_owned" = true ]; then
+    cleanup_path="$(host_path "$stage")"
+    case "$cleanup_path" in "$output_host"/.staging-*) rm -rf -- "$stage" || restore_failed=true ;; *) restore_failed=true ;; esac
+    [ ! -e "$stage" ] && [ ! -L "$stage" ] && stage_owned=false
+  fi
+  if [ "$restore_failed" = false ] && [ "$publication_lock_owned" = true ]; then
+    rmdir "$publication_lock" >/dev/null 2>&1 && publication_lock_owned=false || restore_failed=true
+  fi
+  if [ "$restore_failed" = false ] && [ "$agent_lock_owned" = true ]; then
+    rmdir "$agent_lock" >/dev/null 2>&1 && agent_lock_owned=false || restore_failed=true
+    if [ "$SYNTHETIC" = 0 ] && [ "$agent_lock_owned" = false ]; then update_recovery_journal agent_lock_released || restore_failed=true; fi
+  fi
   if [ "$restore_failed" = false ] && [ "$acl_lock_owned" = true ]; then
-    rm -f -- "$acl_lock_owner" >/dev/null 2>&1 || true
-    rmdir "$acl_lock" >/dev/null 2>&1 || true
+    rm -f -- "$acl_lock_owner" >/dev/null 2>&1 || restore_failed=true
+    if [ "$restore_failed" = false ]; then rmdir "$acl_lock" >/dev/null 2>&1 && acl_lock_owned=false || restore_failed=true; fi
+    if [ "$SYNTHETIC" = 0 ] && [ "$acl_lock_owned" = false ]; then update_recovery_journal acl_lock_released || restore_failed=true; fi
   fi
-  if [ "$restore_failed" = false ]; then
-    if [ -n "${tmp:-}" ] && [ -d "$tmp" ]; then rm -rf -- "$tmp"; fi
+  if [ "$restore_failed" = false ] && [ -n "${tmp:-}" ] && [ -d "$tmp" ]; then
+    cleanup_path="$(host_path "$tmp")"
+    if [ "$SYNTHETIC" = 0 ]; then
+      case "$cleanup_path" in "$(host_path "$work_root/runs")"/run.*) rm -rf -- "$tmp" || restore_failed=true ;; *) restore_failed=true ;; esac
+    else
+      rm -rf -- "$tmp" || restore_failed=true
+    fi
   fi
+  if [ "$restore_failed" = false ] && [ "$SYNTHETIC" = 0 ] && [ "$recovery_journal_active" = true ]; then
+    update_recovery_journal run_tree_removed || restore_failed=true
+    if [ "$restore_failed" = false ]; then
+      rm -f -- "$recovery_journal" || restore_failed=true
+      recovery_journal_active=false
+    fi
+  fi
+  if [ "$restore_failed" = true ] && [ "$original_rc" -eq 0 ]; then return 2; fi
+  return "$original_rc"
 }
 trap cleanup EXIT
 if [ "$SYNTHETIC" = 0 ]; then
   if ! mkdir "$acl_lock" 2>/dev/null; then die "another real eval owns the global ACL transition lock: $acl_lock"; fi
   acl_lock_owned=true
-  printf '%s\n' "$$" > "$acl_lock_owner"
+  write_acl_lock_owner || die "could not record ACL lock owner identity"
+  update_recovery_journal acl_lock_acquired || die "could not update lifecycle recovery journal"
+  contract_test_hold acl_lock_acquired
 fi
-agent_lock="$OUTPUT_DIR/.eval-agent.lock"
 if ! mkdir "$agent_lock" 2>/dev/null; then die "another eval Agent run is active or stale: $agent_lock"; fi
 agent_lock_owned=true
+if [ "$SYNTHETIC" = 0 ]; then
+  update_recovery_journal agent_lock_acquired || die "could not update lifecycle recovery journal"
+  contract_test_hold agent_lock_acquired
+fi
 target="$tmp/project"
 skill_root="$tmp/skill-authority"
 review_root="$tmp/reviewer"
 exec_root="$tmp/agent-bin"
-mkdir -p "$target" "$skill_root/core/lib" "$review_root" "$controller" "$exec_root" "$OUTPUT_DIR"
+mkdir -p "$target" "$skill_root/core/lib" "$review_root" "$exec_root" "$OUTPUT_DIR"
 
 if [ "$fixture_mode" = git_archive ]; then
   fixture_repo="$controller/fixture-repo"
@@ -538,8 +813,15 @@ if [ "$SYNTHETIC" = 0 ]; then
   official_agent_build "$AGENT" "$subject_version" "$subject_executable_sha" || die "subject executable is not an approved $AGENT build"
   official_agent_build "$REVIEWER" "$reviewer_version" "$reviewer_executable_sha" || die "reviewer executable is not an approved $REVIEWER build"
   start_executable_guard || die "could not lock the validated Agent executable snapshots"
+  update_recovery_journal guard_active || die "could not update lifecycle recovery journal"
+  contract_test_hold guard_active
+  contract_test_prepare_post_agent_stage
   verify_guarded_executables || die "validated Agent executable guard failed before doctor"
-  sandbox_doctor="$("$subject_launch_executable" doctor --json 2>/dev/null)" || die "could not inspect Codex Windows sandbox readiness"
+  if [ "${HARNESS_EVAL_CONTRACT_TEST:-0}" = 1 ] && [ "${HARNESS_EVAL_TEST_HOLD_STAGE:-}" = isolation_active ]; then
+    sandbox_doctor='{"checks":{"sandbox.helpers":{"status":"ok","details":{"sandbox backend":"elevated","sandbox provisioning":"complete"}}}}'
+  else
+    sandbox_doctor="$("$subject_launch_executable" doctor --json 2>/dev/null)" || die "could not inspect Codex Windows sandbox readiness"
+  fi
   verify_guarded_executables || die "validated Agent executable guard failed after doctor"
   jq -e '
     .checks["sandbox.helpers"].status == "ok"
@@ -547,8 +829,8 @@ if [ "$SYNTHETIC" = 0 ]; then
     and .checks["sandbox.helpers"].details["sandbox provisioning"] == "complete"
   ' <<< "$sandbox_doctor" >/dev/null || die "Codex elevated Windows sandbox is not provisioned and ready"
 
-  system_root_win="$(windows_powershell -NoProfile -Command '[Environment]::GetEnvironmentVariable("SystemRoot", "Machine")' | tr -d '\r')"
-  program_files_win="$(windows_powershell -NoProfile -Command '[Environment]::GetEnvironmentVariable("ProgramFiles", "Machine")' | tr -d '\r')"
+  system_root_win="$(windows_powershell -NoProfile -Command '$env:SystemRoot' | tr -d '\r')"
+  program_files_win="$(windows_powershell -NoProfile -Command '[Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)' | tr -d '\r')"
   [ -n "$system_root_win" ] && [ -n "$program_files_win" ] || die "could not resolve system tool roots"
   system_root_posix="$(cygpath -u "$system_root_win")"
   program_files_posix="$(cygpath -u "$program_files_win")"
@@ -697,18 +979,13 @@ apply_runner_events() {
 isolation_evidence="$controller/isolation.json"
 if [ "$SYNTHETIC" = 0 ]; then
   workspace_root="$(cd "$ROOT/.." && pwd -P)"
-  if [ -e "$acl_state" ] || [ -L "$acl_state" ]; then
-    [ -f "$acl_state" ] && [ ! -L "$acl_state" ] || die "unsafe stale ACL restoration state: $acl_state"
-    windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
-      -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
-      -UserHome "$real_user_home" -StateFile "$acl_state" \
-      || die "could not restore stale eval ACL state"
-  fi
   windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Enter \
     -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
     -UserHome "$real_user_home" -StateFile "$acl_state" -EvidenceFile "$isolation_evidence" \
     || die "could not establish Windows eval isolation"
   isolation_active=true
+  update_recovery_journal isolation_active || die "could not update lifecycle recovery journal"
+  contract_test_hold isolation_active
 
   probe_target="$target/.harness-eval-isolation-sentinel"
   probe_raw="$controller/isolation-probe-events.jsonl"
@@ -909,25 +1186,34 @@ release_eligible=false
 # All untrusted Agent processes have exited. Restore the host ACL before the
 # controller publishes the unsigned candidate. Signing is a separate command
 # and no private-key path has existed in this process or any Agent environment.
-verify_guarded_executables || die "validated Agent executable guard failed at Agent-process closure"
-stop_executable_guard || die "could not release the validated Agent executable guard"
-if [ "$isolation_active" = true ]; then
+  verify_guarded_executables || die "validated Agent executable guard failed at Agent-process closure"
+  stop_executable_guard || die "could not release the validated Agent executable guard"
+  if [ "$SYNTHETIC" = 0 ]; then update_recovery_journal guard_stopped || die "could not update lifecycle recovery journal"; fi
+  if [ "$isolation_active" = true ]; then
   windows_powershell -NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Leave \
     -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
     -UserHome "$real_user_home" -StateFile "$acl_state" \
     || die "could not restore eval isolation ACLs"
   isolation_active=false
+  update_recovery_journal isolation_restored || die "could not update lifecycle recovery journal"
   rm -f -- "$acl_lock_owner"
   rmdir "$acl_lock" || die "could not release the global ACL transition lock"
   acl_lock_owned=false
+  update_recovery_journal acl_lock_released || die "could not update lifecycle recovery journal"
 fi
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
 base="$case_name.$case_version.$stamp"
 stage="$OUTPUT_DIR/.staging-$base"
 publication_lock="$OUTPUT_DIR/.eval-write.lock"
+if [ "$SYNTHETIC" = 0 ]; then
+  set_recovery_publication_paths || die "could not reserve publication paths in lifecycle recovery journal"
+fi
 if ! mkdir "$publication_lock" 2>/dev/null; then die "result publication lock exists: $publication_lock"; fi
+publication_lock_owned=true
 mkdir "$stage"
+stage_owned=true
+if [ "$SYNTHETIC" = 0 ]; then update_recovery_journal publication_staged || die "could not update lifecycle recovery journal"; fi
 
 cp "$transcript" "$stage/$base.transcript.jsonl"
 cp "$controller/post-init-tree.sha256" "$stage/$base.tree.sha256"
@@ -972,9 +1258,12 @@ python "$PUBLISHER" "${publish_args[@]}" || die "candidate companion publication
 python "$PUBLISHER" "$stage/$base.json" "$OUTPUT_DIR/$base.json" || die "candidate result publication failed; lock retained"
 for suffix in transcript.jsonl tree.sha256 subject-events.jsonl reviewer-events.jsonl turn-trees.jsonl evaluator-events.jsonl reviewer-output.json objective-checks.jsonl project-brief.json isolation.json json; do rm -f -- "$stage/$base.$suffix"; done
 rmdir "$stage"
+stage_owned=false
 rmdir "$publication_lock"
+publication_lock_owned=false
 rmdir "$agent_lock"
 agent_lock_owned=false
+if [ "$SYNTHETIC" = 0 ]; then update_recovery_journal agent_lock_released || die "could not update lifecycle recovery journal"; fi
 
 echo "eval: candidate=$OUTPUT_DIR/$base.json"
 echo "eval: case=$case_name version=$case_version passed=$passed synthetic=$([ "$SYNTHETIC" = 1 ] && echo true || echo false) reviewer=$reviewer_verdict score=$rubric_passed/$rubric_total"

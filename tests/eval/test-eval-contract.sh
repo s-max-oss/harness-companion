@@ -106,7 +106,7 @@ check "real eval uses a protected absolute GNU timeout" bash -c 'grep -Fq "TRUST
 check "real eval launches Codex through a trusted absolute env under a system-only PATH" bash -c 'grep -Fq "TRUSTED_WINDOWS_ENV=\"/c/Program Files/Git/usr/bin/env.exe\"" "$1" && grep -Fq "subject_launch=(\"\$TRUSTED_WINDOWS_ENV\" \"PATH=\$sandbox_path\" \"\$subject_launch_executable\")" "$1" && grep -Fq "System32/WindowsPowerShell/v1.0" "$1" && ! grep -q "RuntimeRoot\|CodexBinRoot" "$1"' _ "$EVAL/run-eval.sh"
 check "real eval records an effective Offline-sandbox access probe" bash -c 'grep -Fq "codexsandboxoffline" "$1" && grep -Fq "source_workspace_readable == false" "$1" && grep -Fq "controller_readable == false" "$1" && grep -Fq "user_home_readable == false" "$1"' _ "$EVAL/run-eval.sh"
 check "all real eval output directories share one ACL transition lock" grep -Fq 'acl_lock="$ROOT/.harness/eval-acl.lock"' "$EVAL/run-eval.sh"
-check "crashed eval ACL state has an explicit liveness-checked recovery command" bash -c 'grep -Fq "kill -0" "$1" && grep -Fq "ACL restoration complete" "$1"' _ "$EVAL/recover-windows-isolation.sh"
+check "crashed eval state has identity-bound lifecycle recovery" bash -c 'grep -Fq "eval-recovery-journal.json" "$1" && grep -Fq "windows_process_status" "$1" && grep -Fq "lifecycle recovery complete" "$1"' _ "$EVAL/recover-windows-isolation.sh"
 check "real eval binds the token-resolved user profile instead of caller USERPROFILE" bash -c 'grep -Fq "GetFolderPath([Environment+SpecialFolder]::UserProfile)" "$1" && ! grep -Fq "\${USERPROFILE:-\$HOME}" "$1"' _ "$EVAL/run-eval.sh"
 check "real Agent identity and Windows system tools are versioned trust anchors" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin" and (.agents.codex.approved_builds | length > 0 and all(.[]; (.cli_version | length > 0) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_system_tools | keys | sort == ["powershell","whoami"]) and (all(.windows_system_tools[]; (.path | startswith("C:\\Windows\\System32\\")) and (.sha256 | test("^[0-9a-f]{64}$"))))' "$EVAL/trust/agent-publishers.json"
 approved_version="$(jq -r '.agents.codex.approved_builds[0].cli_version' "$EVAL/trust/agent-publishers.json")"
@@ -131,7 +131,7 @@ if command -v powershell.exe >/dev/null 2>&1; then
   check "Windows ACL helper round-trips DACL and retains failed recovery state" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-isolation-acl.ps1" -Helper "$EVAL/windows-isolation-acl.ps1"
   mkdir -p "$TMP/executable-guard-test"
   check "Windows executable guard permits launch but blocks overwrite and replacement" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-executable-guard.ps1" -Guard "$(cygpath -w "$EVAL/windows-executable-guard.ps1")" -TempRoot "$(cygpath -w "$TMP/executable-guard-test")" -LaunchSource 'C:\Windows\System32\whoami.exe'
-  check "crashed eval recovery stops the guard and restores DACLs, locks, state, and run tree" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-eval-recovery.ps1" -Helper "$(cygpath -w "$EVAL/windows-isolation-acl.ps1")" -Guard "$(cygpath -w "$EVAL/windows-executable-guard.ps1")" -Recovery "$(cygpath -w "$EVAL/recover-windows-isolation.sh")" -RepoRoot "$(cygpath -w "$ROOT")" -Bash 'C:\Program Files\Git\bin\bash.exe'
+  check "production runner crash recovery covers lifecycle stages, PID reuse, and partial cleanup" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-eval-recovery.ps1" -Runner "$(cygpath -w "$EVAL/run-eval.sh")" -Recovery "$(cygpath -w "$EVAL/recover-windows-isolation.sh")" -RepoRoot "$(cygpath -w "$ROOT")" -Bash 'C:\Program Files\Git\bin\bash.exe'
   mkdir -p "$TMP/shadow-bin"
   printf '#!/bin/bash\nprintf shadow > "%s"\nexit 99\n' "$TMP/shadow-hit" > "$TMP/shadow-bin/powershell.exe"
   cp "$TMP/shadow-bin/powershell.exe" "$TMP/shadow-bin/whoami.exe"
@@ -252,7 +252,24 @@ case "$(uname -s)" in
     mkdir -p "$TMP/untrusted-real-candidates"
     if PATH="$TMP/bin:$PATH" bash "$EVAL/run-eval.sh" "$EVAL/cases/vague-goal.json" \
       --agent=codex --reviewer=codex --model=fake --reviewer-model=fake \
-      --output-dir="$TMP/untrusted-real-candidates" > "$TMP/untrusted-real.log" 2>&1; then
+      --output-dir="$TMP/untrusted-real-candidates" > "$TMP/untrusted-real-path.log" 2>&1; then
+      bad "real eval rejects noncanonical output before acquiring resources"
+    elif grep -Fq 'real eval output must be the canonical candidates directory' "$TMP/untrusted-real-path.log"; then
+      ok "real eval rejects noncanonical output before acquiring resources"
+    else
+      bad "real eval rejects noncanonical output before acquiring resources"
+    fi
+    if PATH="$TMP/bin:$PATH" HARNESS_EVAL_WORK_ROOT="$TMP/untrusted-work" \
+      bash "$EVAL/run-eval.sh" "$EVAL/cases/vague-goal.json" \
+      --agent=codex --reviewer=codex --model=fake --reviewer-model=fake > "$TMP/untrusted-work.log" 2>&1; then
+      bad "real eval rejects noncanonical work root before acquiring resources"
+    elif grep -Fq 'real eval work root is fixed for recoverability' "$TMP/untrusted-work.log"; then
+      ok "real eval rejects noncanonical work root before acquiring resources"
+    else
+      bad "real eval rejects noncanonical work root before acquiring resources"
+    fi
+    if PATH="$TMP/bin:$PATH" bash "$EVAL/run-eval.sh" "$EVAL/cases/vague-goal.json" \
+      --agent=codex --reviewer=codex --model=fake --reviewer-model=fake > "$TMP/untrusted-real.log" 2>&1; then
       bad "real eval rejects a PATH-injected fake Codex before Agent launch"
     elif grep -Eq 'subject executable (is outside the trusted codex install location|is not an authentic signed codex binary)' "$TMP/untrusted-real.log"; then
       ok "real eval rejects a PATH-injected fake Codex before Agent launch"

@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory = $true)][string]$StateFile,
     [Parameter(Mandatory = $true)][string]$RunRoot,
     [Parameter(Mandatory = $true)][string]$AgentLock,
+    [Parameter(Mandatory = $true)][string]$RecoveryJournal,
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$Nonce
 )
 
@@ -58,6 +59,7 @@ try {
         stop_file = [System.IO.Path]::GetFullPath($StopFile)
         run_root = [System.IO.Path]::GetFullPath($RunRoot)
         agent_lock = [System.IO.Path]::GetFullPath($AgentLock)
+        recovery_journal = [System.IO.Path]::GetFullPath($RecoveryJournal)
         paths = @($manifest.paths)
         handle_count = $handles.Count
     }

@@ -11,11 +11,13 @@ $manifest = Join-Path $TempRoot 'manifest.json'
 $ready = Join-Path $TempRoot 'ready.json'
 $stop = Join-Path $TempRoot 'stop'
 $state = Join-Path $TempRoot 'guard-state.json'
+$journal = Join-Path $TempRoot 'recovery-journal.json'
 $agentLock = Join-Path $TempRoot 'agent.lock'
 $stdout = Join-Path $TempRoot 'guard.stdout'
 $stderr = Join-Path $TempRoot 'guard.stderr'
 $nonce = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 [System.IO.Directory]::CreateDirectory($agentLock) | Out-Null
+[System.IO.File]::WriteAllText($journal, "{}`n", [System.Text.UTF8Encoding]::new($false))
 
 if ([string]::IsNullOrWhiteSpace($LaunchSource)) {
     [System.IO.File]::WriteAllBytes($executable, [byte[]](1, 2, 3, 4))
@@ -33,6 +35,7 @@ $arguments = '-NoProfile -ExecutionPolicy Bypass -File ' + (& $quote $Guard) +
     ' -StateFile ' + (& $quote $state) +
     ' -RunRoot ' + (& $quote $TempRoot) +
     ' -AgentLock ' + (& $quote $agentLock) +
+    ' -RecoveryJournal ' + (& $quote $journal) +
     ' -Nonce ' + $nonce
 $process = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru `
     -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
@@ -118,8 +121,10 @@ $forgedManifest = Join-Path $forgedRoot 'manifest.json'
 $forgedReady = Join-Path $forgedRoot 'ready.json'
 $forgedStop = Join-Path $forgedRoot 'stop'
 $forgedState = Join-Path $forgedRoot 'state.json'
+$forgedJournal = Join-Path $forgedRoot 'recovery-journal.json'
 $forgedLock = Join-Path $forgedRoot 'agent.lock'
 [System.IO.Directory]::CreateDirectory($forgedLock) | Out-Null
+[System.IO.File]::WriteAllText($forgedJournal, "{}`n", [System.Text.UTF8Encoding]::new($false))
 [System.IO.File]::WriteAllBytes($forgedExecutable, [byte[]](1, 2, 3, 4))
 [System.IO.File]::WriteAllText($forgedManifest, (@{schema_version=1;paths=@($forgedExecutable)} | ConvertTo-Json -Compress) + "`n", [System.Text.UTF8Encoding]::new($false))
 [System.IO.File]::WriteAllText($forgedReady, '{"forged":true}', [System.Text.UTF8Encoding]::new($false))
@@ -127,6 +132,7 @@ $forgedArguments = '-NoProfile -ExecutionPolicy Bypass -File ' + (& $quote $Guar
     ' -ManifestFile ' + (& $quote $forgedManifest) + ' -ReadyFile ' + (& $quote $forgedReady) +
     ' -StopFile ' + (& $quote $forgedStop) + ' -StateFile ' + (& $quote $forgedState) +
     ' -RunRoot ' + (& $quote $forgedRoot) + ' -AgentLock ' + (& $quote $forgedLock) +
+    ' -RecoveryJournal ' + (& $quote $forgedJournal) +
     ' -Nonce ' + $nonce
 $forgedProcess = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru -ArgumentList $forgedArguments
 try {

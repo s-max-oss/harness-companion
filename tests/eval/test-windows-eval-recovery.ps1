@@ -1,114 +1,190 @@
 param(
-    [Parameter(Mandatory = $true)][string]$Helper,
-    [Parameter(Mandatory = $true)][string]$Guard,
+    [Parameter(Mandatory = $true)][string]$Runner,
     [Parameter(Mandatory = $true)][string]$Recovery,
     [Parameter(Mandatory = $true)][string]$RepoRoot,
-    [Parameter(Mandatory = $true)][string]$Bash
+    [Parameter(Mandatory = $true)][string]$Bash,
+    [string[]]$Stages = @(
+        'run_root_created', 'agent_lock_acquired', 'guard_active', 'isolation_active',
+        'publication_paths_reserved', 'publication_staged', 'run_tree_removed'
+    )
 )
 
 $ErrorActionPreference = 'Stop'
 $RepoRoot = [IO.Path]::GetFullPath($RepoRoot)
-$state = Join-Path $RepoRoot '.harness\eval-acl-state.json'
+$Runner = [IO.Path]::GetFullPath($Runner)
+$Recovery = [IO.Path]::GetFullPath($Recovery)
+$expectedRunner = [IO.Path]::GetFullPath((Join-Path $RepoRoot 'tests\eval\run-eval.sh'))
+if (-not $Runner.Equals($expectedRunner, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Runner must be the repository production eval runner'
+}
+$journal = Join-Path $RepoRoot '.harness\eval-recovery-journal.json'
+$aclState = Join-Path $RepoRoot '.harness\eval-acl-state.json'
 $guardState = Join-Path $RepoRoot '.harness\eval-guard-state.json'
 $aclLock = Join-Path $RepoRoot '.harness\eval-acl.lock'
+$owner = Join-Path $aclLock 'owner.json'
 $agentLock = Join-Path $RepoRoot 'tests\eval\candidates\.eval-agent.lock'
-$publicRuns = 'C:\Users\Public\harness-companion-eval\runs'
-$runRoot = Join-Path $publicRuns ('run.recovery-test-' + [Guid]::NewGuid().ToString('N'))
-$aclRoot = Join-Path ([IO.Path]::GetTempPath()) ('harness-recovery-acl-' + [Guid]::NewGuid().ToString('N'))
-$workspace = Join-Path $aclRoot 'workspace'
-$testUserHome = Join-Path $aclRoot 'home'
-$aclController = Join-Path $aclRoot 'controller'
-$controller = Join-Path $runRoot 'controller'
-$executable = Join-Path $runRoot 'agent.exe'
-$manifest = Join-Path $controller 'manifest.json'
-$ready = Join-Path $controller 'ready.json'
-$stop = Join-Path $controller 'stop'
-$stdout = Join-Path $controller 'stdout.log'
-$stderr = Join-Path $controller 'stderr.log'
-$nonce = ([Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')).ToLowerInvariant()
-$guardProcess = $null
-$entered = $false
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) ('harness-production-recovery-' + [Guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($testRoot) | Out-Null
 
-function Get-Dacl([string]$Path) {
-    (Get-Acl -LiteralPath $Path).GetSecurityDescriptorSddlForm(
-        [Security.AccessControl.AccessControlSections]::Access
-    )
+function Assert-Idle {
+    foreach ($path in @($journal, $aclState, $guardState, $aclLock, $agentLock)) {
+        if (Test-Path -LiteralPath $path) { throw "recovery test requires idle state: $path" }
+    }
 }
 
-foreach ($path in @($state, $guardState, $aclLock, $agentLock)) {
-    if (Test-Path -LiteralPath $path) {
-        throw "recovery contract requires an idle eval state: $path"
+function Stop-OrphanGuard {
+    if (-not (Test-Path -LiteralPath $guardState -PathType Leaf)) { return }
+    $state = Get-Content -LiteralPath $guardState -Raw | ConvertFrom-Json
+    if (-not (Test-Path -LiteralPath ([string]$state.stop_file))) {
+        [IO.File]::WriteAllText([string]$state.stop_file, '')
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ((Get-Process -Id ([int]$state.guard_pid) -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 50
+    }
+    if (Get-Process -Id ([int]$state.guard_pid) -ErrorAction SilentlyContinue) {
+        throw 'orphan guard did not stop during partial-cleanup setup'
+    }
+}
+
+function Invoke-ProductionCrash {
+    param(
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [switch]$SimulatePidReuse,
+        [switch]$StopGuardBeforeRecovery
+    )
+    Assert-Idle
+    $stdout = Join-Path $testRoot ($Stage + '.stdout.log')
+    $stderr = Join-Path $testRoot ($Stage + '.stderr.log')
+    $oldContract = $env:HARNESS_EVAL_CONTRACT_TEST
+    $oldStage = $env:HARNESS_EVAL_TEST_HOLD_STAGE
+    $process = $null
+    try {
+        $env:HARNESS_EVAL_CONTRACT_TEST = '1'
+        $env:HARNESS_EVAL_TEST_HOLD_STAGE = $Stage
+        $arguments = @(
+            'tests/eval/run-eval.sh',
+            'tests/eval/cases/vague-goal.json',
+            '--model=gpt-5.4-mini',
+            '--reviewer-model=gpt-5.4-mini'
+        )
+        $process = Start-Process -FilePath $Bash -WindowStyle Hidden -PassThru `
+            -WorkingDirectory $RepoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
+            -ArgumentList $arguments
+        $holdTimeoutSeconds = if ($Stage -eq 'isolation_active') { 240 } else { 60 }
+        $deadline = [DateTime]::UtcNow.AddSeconds($holdTimeoutSeconds)
+        $observed = $false
+        while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            if (Test-Path -LiteralPath $journal -PathType Leaf) {
+                try {
+                    $current = Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json
+                    if ([string]$current.stage -eq $Stage) { $observed = $true; break }
+                } catch {}
+            }
+            Start-Sleep -Milliseconds 25
+        }
+        if (-not $observed) {
+            $details = if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr -Raw } else { '' }
+            throw "production runner did not hold at $Stage (exit=$($process.ExitCode)): $details"
+        }
+
+        $record = Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json
+        if ($record.schema_version -ne 1 -or [string]::IsNullOrWhiteSpace([string]$record.nonce) -or
+            $record.controller.pid -le 0 -or -not ([string]$record.controller.name).Equals('bash.exe', [StringComparison]::OrdinalIgnoreCase) -or
+            [string]::IsNullOrWhiteSpace([string]$record.controller.start_time_utc) -or
+            [string]::IsNullOrWhiteSpace([string]$record.controller.command_line)) {
+            throw "production lifecycle journal is incomplete at $Stage"
+        }
+        $controllerPid = [int]$record.controller.pid
+        Write-Output "recovery-stage: $Stage launcher=$($process.Id) controller=$controllerPid"
+        $runRoot = [string]$record.paths.run_root
+        if ($Stage -ne 'run_tree_removed' -and -not (Test-Path -LiteralPath $runRoot -PathType Container)) {
+            throw "journaled run root is missing at $Stage"
+        }
+        if ($Stage -eq 'run_tree_removed' -and (Test-Path -LiteralPath $runRoot)) {
+            throw 'run-tree-removed stage still has a run root'
+        }
+
+        Stop-Process -Id $controllerPid -Force
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while ((Get-Process -Id $controllerPid -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 25
+        }
+        if (Get-Process -Id $controllerPid -ErrorAction SilentlyContinue) {
+            throw "production controller did not terminate at $Stage"
+        }
+        if (-not $process.WaitForExit(10000)) {
+            throw "Git Bash launcher did not retire after controller termination at $Stage"
+        }
+
+        if ($SimulatePidReuse) {
+            if (-not (Test-Path -LiteralPath $owner -PathType Leaf)) { throw 'PID-reuse test has no owner metadata' }
+            $ownerRecord = Get-Content -LiteralPath $owner -Raw | ConvertFrom-Json
+            $ownerRecord.process.pid = $PID
+            [IO.File]::WriteAllText($owner, ($ownerRecord | ConvertTo-Json -Compress -Depth 8) + "`n", [Text.UTF8Encoding]::new($false))
+        }
+        if ($StopGuardBeforeRecovery) { Stop-OrphanGuard }
+
+        & $Bash $Recovery
+        if ($LASTEXITCODE -ne 0) { throw "production recovery failed at $Stage with exit $LASTEXITCODE" }
+        foreach ($path in @($journal, $aclState, $guardState, $aclLock, $agentLock, $runRoot)) {
+            if (Test-Path -LiteralPath $path) { throw "recovery left stale state after ${Stage}: $path" }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $journal -PathType Leaf) {
+            try {
+                $stale = Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json
+                $stalePid = [int]$stale.controller.pid
+                if (Get-Process -Id $stalePid -ErrorAction SilentlyContinue) {
+                    Stop-Process -Id $stalePid -Force -ErrorAction SilentlyContinue
+                }
+            } catch {}
+        }
+        if ($null -ne $process -and -not $process.HasExited) {
+            try { $process.Kill(); $process.WaitForExit(5000) | Out-Null } catch {}
+        }
+        if ($null -ne $process) { $process.Dispose() }
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
+        $env:HARNESS_EVAL_CONTRACT_TEST = $oldContract
+        $env:HARNESS_EVAL_TEST_HOLD_STAGE = $oldStage
+        if (Test-Path -LiteralPath $journal -PathType Leaf) {
+            try { & $Bash $Recovery 2>$null | Out-Null } catch {}
+        }
     }
 }
 
 try {
-    [IO.Directory]::CreateDirectory($workspace) | Out-Null
-    [IO.Directory]::CreateDirectory($testUserHome) | Out-Null
-    [IO.Directory]::CreateDirectory($aclController) | Out-Null
-    [IO.Directory]::CreateDirectory($controller) | Out-Null
-    [IO.Directory]::CreateDirectory((Split-Path -Parent $state)) | Out-Null
-    [IO.File]::Copy('C:\Windows\System32\whoami.exe', $executable, $false)
-    [IO.File]::WriteAllText($manifest, (@{schema_version=1;paths=@($executable)} | ConvertTo-Json -Compress) + "`n", [Text.UTF8Encoding]::new($false))
-    $before = @{Workspace=Get-Dacl $workspace; UserHome=Get-Dacl $testUserHome; Controller=Get-Dacl $aclController}
-
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Helper -Mode Enter `
-        -WorkspaceRoot $workspace -ControllerRoot $aclController -UserHome $testUserHome -StateFile $state
-    if ($LASTEXITCODE -ne 0) { throw "ACL Enter failed with exit $LASTEXITCODE" }
-    $entered = $true
-
-    [IO.Directory]::CreateDirectory($agentLock) | Out-Null
-    [IO.Directory]::CreateDirectory($aclLock) | Out-Null
-    [IO.File]::WriteAllText((Join-Path $aclLock 'owner.pid'), "2147483647`n", [Text.UTF8Encoding]::new($false))
-    $quote = { param([string]$Value) '"' + $Value.Replace('"', '\"') + '"' }
-    $args = '-NoProfile -ExecutionPolicy Bypass -File ' + (& $quote $Guard) +
-        ' -ManifestFile ' + (& $quote $manifest) + ' -ReadyFile ' + (& $quote $ready) +
-        ' -StopFile ' + (& $quote $stop) + ' -StateFile ' + (& $quote $guardState) +
-        ' -RunRoot ' + (& $quote $runRoot) + ' -AgentLock ' + (& $quote $agentLock) +
-        ' -Nonce ' + $nonce
-    $guardProcess = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput $stdout -RedirectStandardError $stderr -ArgumentList $args
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
-    while (-not (Test-Path -LiteralPath $ready -PathType Leaf) -and -not $guardProcess.HasExited -and [DateTime]::UtcNow -lt $deadline) {
-        Start-Sleep -Milliseconds 50
-    }
-    if (-not (Test-Path -LiteralPath $ready -PathType Leaf) -or $guardProcess.HasExited) {
-        throw 'orphan guard did not become ready'
-    }
-
-    & $Bash $Recovery
-    if ($LASTEXITCODE -ne 0) { throw "recovery command failed with exit $LASTEXITCODE" }
-    if (-not $guardProcess.WaitForExit(5000)) { throw 'recovery left the executable guard running' }
-    $entered = $false
-    if ((Get-Dacl $workspace) -ne $before.Workspace -or (Get-Dacl $testUserHome) -ne $before.UserHome -or
-        (Get-Dacl $aclController) -ne $before.Controller) { throw 'recovery did not restore all recorded DACLs' }
-    foreach ($path in @($state, $guardState, $aclLock, $agentLock, $runRoot)) {
-        if (Test-Path -LiteralPath $path) { throw "recovery left stale state: $path" }
+    foreach ($stage in $Stages) {
+        switch ($stage) {
+            'run_root_created' { Invoke-ProductionCrash -Stage $stage }
+            'agent_lock_acquired' { Invoke-ProductionCrash -Stage $stage -SimulatePidReuse }
+            'guard_active' { Invoke-ProductionCrash -Stage $stage -StopGuardBeforeRecovery }
+            'isolation_active' { Invoke-ProductionCrash -Stage $stage }
+            'publication_paths_reserved' { Invoke-ProductionCrash -Stage $stage }
+            'publication_staged' { Invoke-ProductionCrash -Stage $stage }
+            'run_tree_removed' { Invoke-ProductionCrash -Stage $stage }
+            default { throw "unsupported recovery test stage: $stage" }
+        }
     }
 }
 finally {
-    if ($null -ne $guardProcess -and -not $guardProcess.HasExited) {
-        [IO.File]::WriteAllText($stop, '')
-        if (-not $guardProcess.WaitForExit(2000)) { $guardProcess.Kill() }
-    }
-    if ($null -ne $guardProcess) { $guardProcess.Dispose() }
-    if ($entered -and (Test-Path -LiteralPath $state -PathType Leaf)) {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Helper -Mode Leave `
-            -WorkspaceRoot $workspace -ControllerRoot $aclController -UserHome $testUserHome -StateFile $state 2>$null
-    }
-    foreach ($path in @($agentLock, $aclLock)) {
-        if (Test-Path -LiteralPath $path -PathType Container) {
-            try { [IO.Directory]::Delete($path, $true) } catch {}
+    if (Test-Path -LiteralPath $testRoot -PathType Container) {
+        $removed = $false
+        for ($attempt = 0; $attempt -lt 100 -and -not $removed; $attempt++) {
+            try {
+                [IO.Directory]::Delete($testRoot, $true)
+                $removed = $true
+            }
+            catch [IO.IOException] {
+                [GC]::Collect()
+                [GC]::WaitForPendingFinalizers()
+                Start-Sleep -Milliseconds 50
+            }
         }
-    }
-    foreach ($path in @($guardState, $state)) {
-        if (Test-Path -LiteralPath $path -PathType Leaf) { try { [IO.File]::Delete($path) } catch {} }
-    }
-    if (Test-Path -LiteralPath $runRoot -PathType Container) {
-        try { [IO.Directory]::Delete($runRoot, $true) } catch {}
-    }
-    if (Test-Path -LiteralPath $aclRoot -PathType Container) {
-        try { [IO.Directory]::Delete($aclRoot, $true) } catch {}
+        if (-not $removed) { throw "could not retire recovery test logs: $testRoot" }
     }
 }
 
-Write-Output 'windows eval crash recovery: PASS'
+Write-Output 'windows production runner crash recovery: PASS'

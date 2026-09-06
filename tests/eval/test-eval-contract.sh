@@ -119,6 +119,13 @@ else
 fi
 check "real eval launches only handle-locked executable snapshots" bash -c 'grep -Fq "snapshot_executable \"\$subject_executable\" \"\$subject_launch_executable\"" "$1" && grep -Fq "start_executable_guard" "$1" && grep -Fq "verify_guarded_executables" "$1" && grep -Fq "FileShare]::Read" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/windows-executable-guard.ps1"
 check "probe invokes only hash-bound absolute system executables" bash -c 'grep -Fq "WINDOWS_POWERSHELL=\"/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe\"" "$1" && grep -Fq "WINDOWS_WHOAMI=\"/c/Windows/System32/whoami.exe\"" "$1" && grep -Fq "probe.executables" "$2" && ! grep -Fq "cmd.exe /d /c" "$1" && ! grep -Fq "& whoami.exe" "$3"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh" "$EVAL/windows-isolation-probe.ps1"
+check "all probe evidence parsers preserve embedded carriage returns" bash -c '
+  for f in "$@"; do
+    grep -Fq '\''map(rtrimstr("\r"))'\'' "$f" || exit 1
+    ! grep -Fq '\''gsub("\r"; "")'\'' "$f" || exit 1
+  done
+  ! grep -Fq '\''probe_output='\'' "$1"
+' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh" "$EVAL/check-results.sh"
 check "release gate reconstructs Windows evidence from versioned policy without host binaries" bash -c '! grep -Fq "sha \"\$WINDOWS_POWERSHELL\"" "$1" && ! grep -Fq "sha \"\$WINDOWS_WHOAMI\"" "$1" && grep -Fq "windows_system_tools.powershell" "$1"' _ "$EVAL/check-results.sh"
 check "Windows canonical path comparisons are case-normalized" bash -c 'grep -Fq "output_host=\"\$(host_path" "$1" && grep -Fq "allowed_signers_host=\"\$(host_path" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh"
 check "release gate performs a concluding set-wide evidence pass" grep -Fq 'evidence source set changed during concluding verification' "$EVAL/check-results.sh"

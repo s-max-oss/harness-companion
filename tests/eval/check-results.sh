@@ -401,7 +401,7 @@ while IFS= read -r case_file; do
     and $e.probe.command_event.exit_code == 0
     and $e.probe.command_event.command == $expected_probe
     and (($e.probe.command_event.aggregated_output
-      | gsub("\r"; "") | split("\n") | map(select(length > 0)) | last | fromjson) == $e.probe.result)
+      | split("\n") | map(rtrimstr("\r")) | map(select(length > 0)) | last | fromjson) == $e.probe.result)
     and ($e.probe.payload | keys | sort == ["controller_file","nonce","source_file","target_file","user_home","whoami_file"])
     and ($e.probe.executables | keys | sort == ["powershell","whoami"])
     and (all($e.probe.executables[]; (.path | type == "string" and length > 0) and (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))))

@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Bash,
     [string[]]$Stages = @(
         'journal_update_staged', 'run_root_created', 'acl_owner_staged',
-        'agent_lock_acquired', 'guard_active', 'isolation_entering',
+        'agent_lock_acquired', 'guard_active', 'isolation_entering_before_state', 'isolation_entering',
         'isolation_entering_after_state', 'isolation_active',
         'publication_paths_reserved', 'publication_staged', 'run_tree_removed'
     )
@@ -84,6 +84,7 @@ function Invoke-ProductionCrash {
                     $expectedStage = switch ($Stage) {
                         'journal_update_staged' { 'planned' }
                         'acl_owner_staged' { 'run_root_created' }
+                        'isolation_entering_before_state' { 'isolation_entering' }
                         'isolation_entering_after_state' { 'isolation_entering' }
                         default { $Stage }
                     }
@@ -95,7 +96,18 @@ function Invoke-ProductionCrash {
                         $helperReady = Test-Path -LiteralPath ([string]$current.paths.acl_owner_stage) -PathType Leaf
                     }
                     if ($Stage -like 'isolation_entering*') {
-                        $helperReady = Test-Path -LiteralPath ([string]$current.paths.acl_helper_state) -PathType Leaf
+                        if ($Stage -eq 'isolation_entering_before_state') {
+                            $helperReady = @(
+                                Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+                                    ([string]$_.Name).Equals('powershell.exe', [StringComparison]::OrdinalIgnoreCase) -and
+                                    ([string]$_.CommandLine).Contains('windows-isolation-acl.ps1') -and
+                                    ([string]$_.CommandLine).Contains('TestPauseBeforeState') -and
+                                    ([string]$_.CommandLine).Contains([string]$current.nonce)
+                                }
+                            ).Count -eq 1
+                        } else {
+                            $helperReady = Test-Path -LiteralPath ([string]$current.paths.acl_helper_state) -PathType Leaf
+                        }
                     }
                     if ($Stage -eq 'isolation_entering_after_state') {
                         $helperReady = $helperReady -and (Test-Path -LiteralPath $aclState -PathType Leaf)
@@ -150,7 +162,7 @@ function Invoke-ProductionCrash {
         if ($TestRecoveryFinalWindow) {
             $oldRecoveryExit = $env:HARNESS_EVAL_RECOVERY_TEST_EXIT_STAGE
             try {
-                foreach ($recoveryStage in @('recovery_owner_staged', 'recovery_journal_staged', 'recovery_lock_released')) {
+                foreach ($recoveryStage in @('recovery_owner_staged', 'recovery_journal_staged', 'recovery_lock_released', 'recovery_complete_committed')) {
                     $env:HARNESS_EVAL_RECOVERY_TEST_EXIT_STAGE = $recoveryStage
                     & $Bash $Recovery
                     if ($LASTEXITCODE -ne 99) { throw "recovery final-window seam $recoveryStage returned $LASTEXITCODE instead of 99" }
@@ -165,6 +177,7 @@ function Invoke-ProductionCrash {
         if ($LASTEXITCODE -ne 0) { throw "production recovery failed at $Stage with exit $LASTEXITCODE" }
         $helperPaths = @(
             [string]$record.paths.acl_helper_state,
+            [string]$record.paths.acl_helper_state_stage,
             [string]$record.paths.acl_helper_continue,
             [string]$record.paths.acl_helper_abort,
             [string]$record.paths.acl_helper_recovery
@@ -205,6 +218,7 @@ try {
             'acl_owner_staged' { Invoke-ProductionCrash -Stage $stage }
             'agent_lock_acquired' { Invoke-ProductionCrash -Stage $stage -SimulatePidReuse }
             'guard_active' { Invoke-ProductionCrash -Stage $stage -StopGuardBeforeRecovery }
+            'isolation_entering_before_state' { Invoke-ProductionCrash -Stage $stage }
             'isolation_entering' { Invoke-ProductionCrash -Stage $stage }
             'isolation_entering_after_state' { Invoke-ProductionCrash -Stage $stage }
             'isolation_active' { Invoke-ProductionCrash -Stage $stage }

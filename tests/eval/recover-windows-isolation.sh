@@ -70,6 +70,41 @@ windows_current_identity() {
     } | ConvertTo-Json -Compress
   ' 2>/dev/null | tr -d '\r\n'
 }
+scan_acl_helper_processes() {
+  local result
+  result="$(HARNESS_EVAL_HELPER_SCRIPT="$(cygpath -w "$ACL_HELPER")" \
+    HARNESS_EVAL_HELPER_STATE="$(cygpath -w "$acl_helper_state")" \
+    HARNESS_EVAL_HELPER_JOURNAL="$(cygpath -w "$RECOVERY_JOURNAL")" \
+    HARNESS_EVAL_HELPER_NONCE="$journal_nonce" windows_powershell -NoProfile -Command '
+      $script = $env:HARNESS_EVAL_HELPER_SCRIPT.Replace("/", "\")
+      $state = $env:HARNESS_EVAL_HELPER_STATE.Replace("/", "\")
+      $journal = $env:HARNESS_EVAL_HELPER_JOURNAL.Replace("/", "\")
+      $matches = @()
+      foreach ($cim in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
+        if (-not ([string]$cim.Name).Equals("powershell.exe", [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $command = [string]$cim.CommandLine
+        if ([string]::IsNullOrWhiteSpace($command)) { continue }
+        $normalized = $command.Replace("/", "\")
+        if ($normalized.IndexOf($script, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+            $normalized.IndexOf($state, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+            $normalized.IndexOf($journal, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+            $normalized.IndexOf($env:HARNESS_EVAL_HELPER_NONCE, [StringComparison]::Ordinal) -lt 0) { continue }
+        $process = Get-Process -Id ([int]$cim.ProcessId) -ErrorAction Stop
+        $matches += [ordered]@{
+          pid = [int]$process.Id
+          start_time_utc = $process.StartTime.ToUniversalTime().ToString("o")
+          name = [string]$cim.Name
+          command_line = $command
+        }
+      }
+      ConvertTo-Json -InputObject @($matches) -Compress
+    ' 2>/dev/null | tr -d '\r\n')" || { printf '%s\n' unknown; return; }
+  jq -e 'type == "array" and all(.[];
+    (.pid | type == "number" and . > 0)
+    and all(.start_time_utc,.name,.command_line; type == "string" and length > 0))' <<< "$result" >/dev/null \
+    || { printf '%s\n' unknown; return; }
+  printf '%s\n' "$result"
+}
 guard_process_status() {
   HARNESS_EVAL_GUARD_PID="$1" HARNESS_EVAL_GUARD_START="$2" HARNESS_EVAL_GUARD_NONCE="$3" \
   HARNESS_EVAL_GUARD_SCRIPT="$4" HARNESS_EVAL_GUARD_STATE="$5" windows_powershell -NoProfile -Command '
@@ -165,7 +200,7 @@ jq -e '
   and all(.controller.start_time_utc,.controller.name,.controller.command_line; type == "string" and length > 0)
   and all(.paths.journal,.paths.run_root,.paths.work_runs_root,.paths.output_dir,.paths.agent_lock,
           .paths.acl_lock,.paths.acl_owner,.paths.acl_owner_stage,.paths.acl_state,.paths.guard_state,
-          .paths.journal_stage,.paths.acl_helper_state,.paths.acl_helper_continue,
+          .paths.journal_stage,.paths.acl_helper_state,.paths.acl_helper_state_stage,.paths.acl_helper_continue,
           .paths.acl_helper_abort,.paths.acl_helper_recovery; type == "string" and length > 0)
   and ((.paths.publication_lock == null) or (.paths.publication_lock | type == "string" and length > 0))
   and ((.paths.publication_stage == null) or (.paths.publication_stage | type == "string" and length > 0))
@@ -188,6 +223,7 @@ recorded_acl_state="$(cygpath -u "$(jq -r '.paths.acl_state' "$RECOVERY_JOURNAL"
 recorded_guard_state="$(cygpath -u "$(jq -r '.paths.guard_state' "$RECOVERY_JOURNAL")")"
 journal_stage_path="$(cygpath -u "$(jq -r '.paths.journal_stage' "$RECOVERY_JOURNAL")")"
 acl_helper_state="$(cygpath -u "$(jq -r '.paths.acl_helper_state' "$RECOVERY_JOURNAL")")"
+acl_helper_state_stage="$(cygpath -u "$(jq -r '.paths.acl_helper_state_stage' "$RECOVERY_JOURNAL")")"
 acl_helper_continue="$(cygpath -u "$(jq -r '.paths.acl_helper_continue' "$RECOVERY_JOURNAL")")"
 acl_helper_abort="$(cygpath -u "$(jq -r '.paths.acl_helper_abort' "$RECOVERY_JOURNAL")")"
 acl_helper_recovery="$(cygpath -u "$(jq -r '.paths.acl_helper_recovery' "$RECOVERY_JOURNAL")")"
@@ -205,6 +241,7 @@ publication_stage_win="$(jq -r '.paths.publication_stage // empty' "$RECOVERY_JO
 [ "$(host_path "$recorded_guard_state")" = "$(host_path "$GUARD_STATE")" ] || die "guard state path is not authoritative"
 [ "$(host_path "$journal_stage_path")" = "$(host_path "$ROOT/.harness/.eval-recovery-journal.stage.$journal_nonce")" ] || die "journal stage is not authoritative"
 [ "$(host_path "$acl_helper_state")" = "$(host_path "$ROOT/.harness/.eval-acl-helper.state.$journal_nonce")" ] || die "ACL helper state path is not authoritative"
+[ "$(host_path "$acl_helper_state_stage")" = "$(host_path "$ROOT/.harness/.eval-acl-helper.state-stage.$journal_nonce")" ] || die "ACL helper state stage path is not authoritative"
 [ "$(host_path "$acl_helper_continue")" = "$(host_path "$ROOT/.harness/.eval-acl-helper.continue.$journal_nonce")" ] || die "ACL helper continue path is not authoritative"
 [ "$(host_path "$acl_helper_abort")" = "$(host_path "$ROOT/.harness/.eval-acl-helper.abort.$journal_nonce")" ] || die "ACL helper abort path is not authoritative"
 [ "$(host_path "$acl_helper_recovery")" = "$(host_path "$ROOT/.harness/.eval-acl-helper.recovery.$journal_nonce")" ] || die "ACL helper recovery path is not authoritative"
@@ -213,7 +250,7 @@ case "$run_root_host" in "$(host_path "$WORK_ROOT/runs")"/run.*) ;; *) die "run 
 
 if [ "$journal_stage" = recovery_complete ]; then
   completed_paths=("$GUARD_STATE" "$ACL_STATE" "$ACL_LOCK" "$CANONICAL_AGENT_LOCK" "$run_root" "$journal_stage_path"
-    "$acl_helper_state" "$acl_helper_continue" "$acl_helper_abort" "$acl_helper_recovery")
+    "$acl_helper_state" "$acl_helper_state_stage" "$acl_helper_continue" "$acl_helper_abort" "$acl_helper_recovery")
   [ -z "$publication_stage_win" ] || completed_paths+=("$(cygpath -u "$publication_stage_win")")
   [ -z "$publication_lock_win" ] || completed_paths+=("$(cygpath -u "$publication_lock_win")")
   for path in "${completed_paths[@]}"; do
@@ -306,17 +343,50 @@ if [ -e "$GUARD_STATE" ] || [ -L "$GUARD_STATE" ]; then
   rm -f -- "$GUARD_STATE" || die "could not retire executable guard state"
 fi
 
-if [ -d "$(dirname "$acl_helper_abort")" ] && [ ! -e "$acl_helper_abort" ] && [ ! -L "$acl_helper_abort" ]; then
-  create_marker "$acl_helper_abort" || die "could not block a late ACL Enter helper"
+helper_scan="$(scan_acl_helper_processes)"
+[ "$helper_scan" != unknown ] || die "could not enumerate ACL Enter helper processes"
+helper_count="$(jq 'length' <<< "$helper_scan")"
+[ "$helper_count" -le 1 ] || die "multiple ACL Enter helpers match one recovery journal"
+
+for marker in "$acl_helper_continue" "$acl_helper_abort" "$acl_helper_recovery"; do
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || die "ACL Enter handshake marker is unsafe: $marker"
+  fi
+done
+if [ ! -e "$acl_helper_abort" ]; then
+  create_marker "$acl_helper_abort" || die "could not block the ACL Enter helper"
 fi
+if [ -e "$acl_helper_continue" ] && [ ! -e "$acl_helper_recovery" ]; then
+  create_marker "$acl_helper_recovery" || die "could not release the in-flight ACL Enter helper for recovery"
+fi
+
+if [ "$helper_count" -eq 1 ]; then
+  helper_pid="$(jq -r '.[0].pid' <<< "$helper_scan")"
+  helper_start="$(jq -r '.[0].start_time_utc' <<< "$helper_scan")"
+  helper_name="$(jq -r '.[0].name' <<< "$helper_scan")"
+  helper_command="$(jq -r '.[0].command_line' <<< "$helper_scan")"
+  helper_status="$(windows_process_status "$helper_pid" "$helper_start" "$helper_name" "$helper_command")"
+  [ "$helper_status" != unknown ] || die "could not verify the scanned ACL Enter helper"
+  for _ in $(seq 1 800); do
+    [ "$helper_status" = absent ] && break
+    [ "$helper_status" != mismatch ] || break
+    helper_status="$(windows_process_status "$helper_pid" "$helper_start" "$helper_name" "$helper_command")"
+    if [ "$helper_status" = unknown ]; then sleep 0.025; continue; fi
+    sleep 0.025
+  done
+  [ "$helper_status" != match ] || die "verified ACL Enter helper did not stop; state retained"
+  [ "$helper_status" != unknown ] || die "ACL Enter helper status remained unknown; state retained"
+fi
+
 if [ -e "$acl_helper_state" ] || [ -L "$acl_helper_state" ]; then
   [ -f "$acl_helper_state" ] && [ ! -L "$acl_helper_state" ] || die "ACL Enter helper state is unsafe"
   jq -e --arg nonce "$journal_nonce" --arg journal "$(cygpath -w "$RECOVERY_JOURNAL")" \
-    --arg helper "$(cygpath -w "$ACL_HELPER")" --arg state "$(cygpath -w "$acl_helper_state")" \
+    --arg helper "$(cygpath -w "$ACL_HELPER")" --arg state "$(cygpath -w "$acl_helper_state")" --arg state_stage "$(cygpath -w "$acl_helper_state_stage")" \
     --arg continue_file "$(cygpath -w "$acl_helper_continue")" --arg abort_file "$(cygpath -w "$acl_helper_abort")" \
     --arg recovery_file "$(cygpath -w "$acl_helper_recovery")" '
       .schema_version == 1 and .nonce == $nonce and .recovery_journal == $journal
-      and .helper_script == $helper and .state_file == $state and .continue_file == $continue_file
+      and .helper_script == $helper and .state_file == $state and .state_stage_file == $state_stage
+      and .continue_file == $continue_file
       and .abort_file == $abort_file and .recovery_file == $recovery_file
       and (.process.pid | type == "number" and . > 0)
       and all(.process.start_time_utc,.process.name,.process.command_line; type == "string" and length > 0)
@@ -325,21 +395,10 @@ if [ -e "$acl_helper_state" ] || [ -L "$acl_helper_state" ]; then
   helper_status="$(windows_process_status "$helper_pid" "$(jq -r '.process.start_time_utc' "$acl_helper_state")" \
     "$(jq -r '.process.name' "$acl_helper_state")" "$(jq -r '.process.command_line' "$acl_helper_state")")"
   [ "$helper_status" != unknown ] || die "could not verify whether the ACL Enter helper is active"
-  if [ "$helper_status" = match ]; then
-    if [ -e "$acl_helper_continue" ] && [ ! -L "$acl_helper_continue" ] && [ ! -e "$acl_helper_recovery" ] && [ ! -L "$acl_helper_recovery" ]; then
-      create_marker "$acl_helper_recovery" || die "could not release the in-flight ACL Enter helper for recovery"
-    fi
-    for _ in $(seq 1 800); do
-      helper_status="$(windows_process_status "$helper_pid" "$(jq -r '.process.start_time_utc' "$acl_helper_state")" \
-        "$(jq -r '.process.name' "$acl_helper_state")" "$(jq -r '.process.command_line' "$acl_helper_state")")"
-      [ "$helper_status" = absent ] && break
-      if [ "$helper_status" = unknown ]; then sleep 0.025; continue; fi
-      [ "$helper_status" != mismatch ] || break
-      sleep 0.025
-    done
-    [ "$helper_status" != match ] || die "verified ACL Enter helper did not stop; state retained"
-    [ "$helper_status" != unknown ] || die "ACL Enter helper status remained unknown; state retained"
-  fi
+  [ "$helper_status" != match ] || die "ACL Enter helper remained active after the recovery wait"
+fi
+if [ -e "$acl_helper_state_stage" ] || [ -L "$acl_helper_state_stage" ]; then
+  [ -f "$acl_helper_state_stage" ] && [ ! -L "$acl_helper_state_stage" ] || die "ACL Enter helper state staging path is unsafe"
 fi
 
 if [ -e "$ACL_STATE" ] || [ -L "$ACL_STATE" ]; then
@@ -350,7 +409,7 @@ if [ -e "$ACL_STATE" ] || [ -L "$ACL_STATE" ]; then
     -WorkspaceRoot "$ROOT/.." -ControllerRoot "$run_root/controller" \
     -UserHome "$real_user_home_win" -StateFile "$ACL_STATE" || die "ACL restoration failed; state retained"
 fi
-rm -f -- "$acl_helper_state" "$acl_helper_continue" "$acl_helper_abort" "$acl_helper_recovery" \
+rm -f -- "$acl_helper_state" "$acl_helper_state_stage" "$acl_helper_continue" "$acl_helper_abort" "$acl_helper_recovery" \
   || die "could not retire ACL Enter handshake state"
 
 if [ -e "$CANONICAL_AGENT_LOCK" ] || [ -L "$CANONICAL_AGENT_LOCK" ]; then
@@ -376,5 +435,6 @@ rmdir "$ACL_LOCK" || die "recovery completed but ACL lock could not be released"
 lock_owned=false
 recovery_test_crash recovery_lock_released
 update_journal_stage recovery_complete || die "could not mark lifecycle recovery complete"
+recovery_test_crash recovery_complete_committed
 rm -f -- "$RECOVERY_JOURNAL" || die "could not retire lifecycle recovery journal"
 echo "eval-recover: lifecycle recovery complete"

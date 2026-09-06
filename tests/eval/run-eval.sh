@@ -97,13 +97,15 @@ create_recovery_journal() {
     --arg acl_owner "$(cygpath -w "$acl_lock_owner")" --arg acl_owner_stage "$(cygpath -w "$acl_owner_stage")" \
     --arg acl_state "$(cygpath -w "$acl_state")" --arg guard_state "$(cygpath -w "$executable_guard_state")" \
     --arg journal_stage "$(cygpath -w "$recovery_journal_stage")" \
-    --arg helper_state "$(cygpath -w "$acl_helper_state")" --arg helper_continue "$(cygpath -w "$acl_helper_continue")" \
+    --arg helper_state "$(cygpath -w "$acl_helper_state")" --arg helper_state_stage "$(cygpath -w "$acl_helper_state_stage")" \
+    --arg helper_continue "$(cygpath -w "$acl_helper_continue")" \
     --arg helper_abort "$(cygpath -w "$acl_helper_abort")" --arg helper_recovery "$(cygpath -w "$acl_helper_recovery")" '
       {schema_version:1,nonce:$nonce,stage:"planned",controller:$controller,
        paths:{journal:$journal,run_root:$run_root,work_runs_root:$work_runs_root,
           output_dir:$output_dir,agent_lock:$agent_lock,acl_lock:$acl_lock,
           acl_owner:$acl_owner,acl_owner_stage:$acl_owner_stage,acl_state:$acl_state,guard_state:$guard_state,
-          journal_stage:$journal_stage,acl_helper_state:$helper_state,acl_helper_continue:$helper_continue,
+          journal_stage:$journal_stage,acl_helper_state:$helper_state,acl_helper_state_stage:$helper_state_stage,
+          acl_helper_continue:$helper_continue,
           acl_helper_abort:$helper_abort,acl_helper_recovery:$helper_recovery,
           publication_lock:null,publication_stage:null}}
     ')" || return 1
@@ -215,11 +217,11 @@ PY
 validate_acl_helper_state() {
   [ -f "$acl_helper_state" ] && [ ! -L "$acl_helper_state" ] || return 1
   jq -e --arg nonce "$recovery_nonce" --arg journal "$(cygpath -w "$recovery_journal")" \
-    --arg helper "$(cygpath -w "$ACL_HELPER")" --arg state "$(cygpath -w "$acl_helper_state")" \
+    --arg helper "$(cygpath -w "$ACL_HELPER")" --arg state "$(cygpath -w "$acl_helper_state")" --arg state_stage "$(cygpath -w "$acl_helper_state_stage")" \
     --arg continue_file "$(cygpath -w "$acl_helper_continue")" --arg abort_file "$(cygpath -w "$acl_helper_abort")" \
     --arg recovery_file "$(cygpath -w "$acl_helper_recovery")" '
       .schema_version == 1 and .nonce == $nonce and .recovery_journal == $journal
-      and .helper_script == $helper and .state_file == $state and .continue_file == $continue_file
+      and .helper_script == $helper and .state_file == $state and .state_stage_file == $state_stage and .continue_file == $continue_file
       and .abort_file == $abort_file and .recovery_file == $recovery_file
       and (.process.pid | type == "number" and . > 0)
       and all(.process.start_time_utc,.process.name,.process.command_line; type == "string" and length > 0)
@@ -236,7 +238,7 @@ acl_helper_process_status() {
 }
 
 retire_acl_helper_handshake() {
-  rm -f -- "$acl_helper_state" "$acl_helper_continue" "$acl_helper_abort" "$acl_helper_recovery"
+  rm -f -- "$acl_helper_state" "$acl_helper_state_stage" "$acl_helper_continue" "$acl_helper_abort" "$acl_helper_recovery"
 }
 
 contract_test_hold() {
@@ -589,6 +591,16 @@ done
 
 SYNTHETIC="${HARNESS_EVAL_SYNTHETIC:-0}"
 case "$SYNTHETIC" in 0|1) ;; *) die "HARNESS_EVAL_SYNTHETIC must be 0 or 1" ;; esac
+CONTRACT_TEST="${HARNESS_EVAL_CONTRACT_TEST:-0}"
+case "$CONTRACT_TEST" in 0|1) ;; *) die "HARNESS_EVAL_CONTRACT_TEST must be 0 or 1" ;; esac
+if [ "$CONTRACT_TEST" = 1 ]; then
+  case "${HARNESS_EVAL_TEST_HOLD_STAGE:-}" in
+    journal_update_staged|run_root_created|acl_owner_staged|agent_lock_acquired|guard_active|\
+    isolation_entering_before_state|isolation_entering|isolation_entering_after_state|isolation_active|\
+    publication_paths_reserved|publication_staged|run_tree_removed) ;;
+    *) die "unsupported contract-test hold stage" ;;
+  esac
+fi
 if [ "$SYNTHETIC" = 0 ]; then
   if [ "$OUTPUT_DIR_OVERRIDDEN" = true ]; then
     [ -d "$OUTPUT_DIR" ] || die "real eval output must be the canonical candidates directory"
@@ -697,6 +709,7 @@ recovery_journal_stage=""
 recovery_journal_active=false
 recovery_nonce=""
 acl_helper_state=""
+acl_helper_state_stage=""
 acl_helper_continue=""
 acl_helper_abort=""
 acl_helper_recovery=""
@@ -723,6 +736,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   recovery_journal_stage="$ROOT/.harness/.eval-recovery-journal.stage.$recovery_nonce"
   acl_owner_stage="$acl_lock/.owner.stage.$recovery_nonce"
   acl_helper_state="$ROOT/.harness/.eval-acl-helper.state.$recovery_nonce"
+  acl_helper_state_stage="$ROOT/.harness/.eval-acl-helper.state-stage.$recovery_nonce"
   acl_helper_continue="$ROOT/.harness/.eval-acl-helper.continue.$recovery_nonce"
   acl_helper_abort="$ROOT/.harness/.eval-acl-helper.abort.$recovery_nonce"
   acl_helper_recovery="$ROOT/.harness/.eval-acl-helper.recovery.$recovery_nonce"
@@ -907,8 +921,10 @@ if [ "$SYNTHETIC" = 0 ]; then
   contract_test_hold guard_active
   contract_test_prepare_post_agent_stage
   verify_guarded_executables || die "validated Agent executable guard failed before doctor"
-  if [ "${HARNESS_EVAL_CONTRACT_TEST:-0}" = 1 ] && [[ "${HARNESS_EVAL_TEST_HOLD_STAGE:-}" == isolation_* ]]; then
+  if [ "$CONTRACT_TEST" = 1 ]; then
+    case "${HARNESS_EVAL_TEST_HOLD_STAGE:-}" in isolation_entering_before_state|isolation_entering|isolation_entering_after_state|isolation_active)
     sandbox_doctor='{"checks":{"sandbox.helpers":{"status":"ok","details":{"sandbox backend":"elevated","sandbox provisioning":"complete"}}}}'
+    ;; *) sandbox_doctor="$("$subject_launch_executable" doctor --json 2>/dev/null)" || die "could not inspect Codex Windows sandbox readiness" ;; esac
   else
     sandbox_doctor="$("$subject_launch_executable" doctor --json 2>/dev/null)" || die "could not inspect Codex Windows sandbox readiness"
   fi
@@ -1073,14 +1089,18 @@ if [ "$SYNTHETIC" = 0 ]; then
   acl_enter_args=(-NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Enter \
     -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
     -UserHome "$real_user_home" -StateFile "$acl_state" -EvidenceFile "$isolation_evidence" \
-    -ProcessStateFile "$acl_helper_state" -ProcessContinueFile "$acl_helper_continue" \
+    -ProcessStateFile "$acl_helper_state" -ProcessStateStageFile "$acl_helper_state_stage" \
+    -ProcessContinueFile "$acl_helper_continue" \
     -ProcessAbortFile "$acl_helper_abort" -ProcessRecoveryFile "$acl_helper_recovery" \
     -ProcessNonce "$recovery_nonce" -RecoveryJournal "$recovery_journal")
-  if [ "${HARNESS_EVAL_CONTRACT_TEST:-0}" = 1 ] && [ "${HARNESS_EVAL_TEST_HOLD_STAGE:-}" = isolation_entering_after_state ]; then
+  if [ "$CONTRACT_TEST" = 1 ] && [ "${HARNESS_EVAL_TEST_HOLD_STAGE:-}" = isolation_entering_before_state ]; then
+    acl_enter_args+=(-TestPauseBeforeState)
+  elif [ "$CONTRACT_TEST" = 1 ] && [ "${HARNESS_EVAL_TEST_HOLD_STAGE:-}" = isolation_entering_after_state ]; then
     acl_enter_args+=(-TestPauseAfterState)
   fi
   windows_powershell "${acl_enter_args[@]}" >"$controller/acl-enter.stdout" 2>"$controller/acl-enter.stderr" &
   acl_helper_job_pid=$!
+  contract_test_hold isolation_entering_before_state
   for _ in $(seq 1 800); do
     [ -f "$acl_helper_state" ] && break
     kill -0 "$acl_helper_job_pid" 2>/dev/null || break
@@ -1313,6 +1333,7 @@ release_eligible=false
 fi
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
+[ "$CONTRACT_TEST" != 1 ] || die "contract-test mode can never publish an eval candidate"
 base="$case_name.$case_version.$stamp"
 stage="$OUTPUT_DIR/.staging-$base"
 publication_lock="$OUTPUT_DIR/.eval-write.lock"

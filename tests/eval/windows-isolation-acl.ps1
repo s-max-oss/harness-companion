@@ -18,11 +18,13 @@ param(
     [string]$EvidenceFile,
 
     [string]$ProcessStateFile,
+    [string]$ProcessStateStageFile,
     [string]$ProcessContinueFile,
     [string]$ProcessAbortFile,
     [string]$ProcessRecoveryFile,
     [string]$ProcessNonce,
     [string]$RecoveryJournal,
+    [switch]$TestPauseBeforeState,
     [switch]$TestPauseAfterState
 )
 
@@ -390,29 +392,37 @@ if ($Mode -eq "Leave") {
 }
 
 $handshakeValues = @(
-    $ProcessStateFile, $ProcessContinueFile, $ProcessAbortFile,
+    $ProcessStateFile, $ProcessStateStageFile, $ProcessContinueFile, $ProcessAbortFile,
     $ProcessRecoveryFile, $ProcessNonce, $RecoveryJournal
 )
 $hasHandshake = @($handshakeValues | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0
 if ($hasHandshake -and @($handshakeValues | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
     throw 'ACL Enter process handshake must provide every handshake field'
 }
-if ($TestPauseAfterState -and -not $hasHandshake) {
-    throw 'TestPauseAfterState requires the process handshake'
+if (($TestPauseBeforeState -or $TestPauseAfterState) -and -not $hasHandshake) {
+    throw 'ACL Enter test pauses require the process handshake'
 }
 
 if ($hasHandshake) {
     if ($ProcessNonce -notmatch '^[0-9a-f]{64}$') { throw 'invalid ACL Enter process nonce' }
     $handshakeRoot = Split-Path -Parent ([IO.Path]::GetFullPath($RecoveryJournal))
     $ProcessStateFile = Assert-HandshakePath $ProcessStateFile $handshakeRoot 'process state path'
+    $ProcessStateStageFile = Assert-HandshakePath $ProcessStateStageFile $handshakeRoot 'process state stage path'
     $ProcessContinueFile = Assert-HandshakePath $ProcessContinueFile $handshakeRoot 'process continue path'
     $ProcessAbortFile = Assert-HandshakePath $ProcessAbortFile $handshakeRoot 'process abort path'
     $ProcessRecoveryFile = Assert-HandshakePath $ProcessRecoveryFile $handshakeRoot 'process recovery path'
-    foreach ($path in @($ProcessStateFile, $ProcessContinueFile, $ProcessAbortFile, $ProcessRecoveryFile)) {
+    foreach ($path in @($ProcessStateFile, $ProcessStateStageFile, $ProcessContinueFile, $ProcessAbortFile, $ProcessRecoveryFile)) {
         if (Test-Path -LiteralPath $path) { throw "stale ACL Enter handshake path exists: $path" }
     }
     if (-not (Test-Path -LiteralPath $RecoveryJournal -PathType Leaf)) {
         throw "ACL Enter recovery journal is missing: $RecoveryJournal"
+    }
+    if ($TestPauseBeforeState) {
+        while (-not (Test-Path -LiteralPath $ProcessAbortFile -PathType Leaf)) {
+            if (-not (Test-Path -LiteralPath $RecoveryJournal -PathType Leaf)) { exit 3 }
+            Start-Sleep -Milliseconds 25
+        }
+        exit 3
     }
     $self = Get-Process -Id $PID -ErrorAction Stop
     $selfCim = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $PID) -ErrorAction Stop
@@ -422,6 +432,7 @@ if ($hasHandshake) {
         recovery_journal = [IO.Path]::GetFullPath($RecoveryJournal)
         helper_script = [IO.Path]::GetFullPath($PSCommandPath)
         state_file = $ProcessStateFile
+        state_stage_file = $ProcessStateStageFile
         continue_file = $ProcessContinueFile
         abort_file = $ProcessAbortFile
         recovery_file = $ProcessRecoveryFile
@@ -431,13 +442,22 @@ if ($hasHandshake) {
             name = [string]$selfCim.Name
             command_line = [string]$selfCim.CommandLine
         }
-    }) $ProcessStateFile
+    }) $ProcessStateStageFile
+    [IO.File]::Move($ProcessStateStageFile, $ProcessStateFile)
 
     while (-not (Test-Path -LiteralPath $ProcessContinueFile -PathType Leaf)) {
-        if (Test-Path -LiteralPath $ProcessAbortFile -PathType Leaf) { exit 3 }
+        if ((Test-Path -LiteralPath $ProcessAbortFile -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $RecoveryJournal -PathType Leaf)) {
+            Remove-Item -LiteralPath $ProcessStateFile -Force -ErrorAction SilentlyContinue
+            exit 3
+        }
         Start-Sleep -Milliseconds 25
     }
-    if (Test-Path -LiteralPath $ProcessAbortFile -PathType Leaf) { exit 3 }
+    if ((Test-Path -LiteralPath $ProcessAbortFile -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $RecoveryJournal -PathType Leaf)) {
+        Remove-Item -LiteralPath $ProcessStateFile -Force -ErrorAction SilentlyContinue
+        exit 3
+    }
 }
 
 if (Test-Path -LiteralPath $StateFile) {

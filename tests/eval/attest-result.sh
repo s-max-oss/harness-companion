@@ -235,6 +235,27 @@ official_agent_identity() {
   printf '%s\n' "$identity"
 }
 
+official_runtime_tool_identity() {
+  local tool="$1" executable="$2" executable_win identity policy expected_subject expected_thumbprints
+  [ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
+  policy="$(jq -ce --arg tool "$tool" '.windows_runtime_tools[$tool]' "$AGENT_PUBLISHERS")" || return 1
+  expected_subject="$(jq -r '.publisher_subject' <<< "$policy")" || return 1
+  expected_thumbprints="$(jq -c '.publisher_thumbprints' <<< "$policy")" || return 1
+  executable_win="$(cygpath -w "$executable")" || return 1
+  identity="$(HARNESS_EVAL_AUTH_PATH="$executable_win" windows_powershell -NoProfile -Command '
+    $sig = Get-AuthenticodeSignature -LiteralPath $env:HARNESS_EVAL_AUTH_PATH
+    $subject = if ($null -ne $sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { "" }
+    $thumbprint = if ($null -ne $sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { "" }
+    [ordered]@{status=[string]$sig.Status;subject=$subject;thumbprint=$thumbprint} | ConvertTo-Json -Compress
+  ' | tr -d '\r')" || return 1
+  jq -e --arg expected_subject "$expected_subject" --argjson expected_thumbprints "$expected_thumbprints" '
+    .status == "Valid"
+    and .subject == $expected_subject
+    and (.thumbprint as $thumbprint | ($expected_thumbprints | index($thumbprint)) != null)
+  ' <<< "$identity" >/dev/null || return 1
+  printf '%s\n' "$identity"
+}
+
 official_agent_build() {
   bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$1" "$2" "$3"
 }
@@ -442,6 +463,7 @@ expected_probe_b64="$(printf '%s' "$expected_probe" | base64 | tr -d '\r\n')"
 codex_powershell_path="$(jq -r '.probe.executables.codex_powershell.path // empty' "$snapshot_base.isolation.json")"
 python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_b64" "$expected_probe_b64" "$codex_powershell_path" >/dev/null 2>&1 \
   || die "effective isolation probe command did not match the exact controller argv"
+executable_snapshot_manifests=()
 if [ "$production_trust" = true ]; then
   trusted_powershell_path="$(jq -r '.windows_system_tools.powershell.path' "$AGENT_PUBLISHERS")"
   trusted_whoami_path="$(jq -r '.windows_system_tools.whoami.path' "$AGENT_PUBLISHERS")"
@@ -463,10 +485,18 @@ if [ "$production_trust" = true ]; then
     || die "Codex PowerShell wrapper path does not match the versioned trust policy"
   codex_powershell_posix="$(cygpath -u "$codex_powershell_path")"
   evidence_codex_powershell_sha="$(jq -r '.probe.executables.codex_powershell.sha256 // empty | ascii_downcase' "$snapshot_base.isolation.json")"
-  [ -f "$codex_powershell_posix" ] && [ ! -L "$codex_powershell_posix" ] \
-    && [ "$(sha "$codex_powershell_posix")" = "$evidence_codex_powershell_sha" ] \
+  codex_powershell_snapshot="$tmp/codex-powershell.exe"
+  codex_powershell_manifest="$tmp/codex-powershell.manifest.json"
+  snapshot_inputs "$codex_powershell_manifest" "$codex_powershell_posix" "$codex_powershell_snapshot" \
+    || die "Codex PowerShell wrapper could not be snapshotted safely"
+  executable_snapshot_manifests+=("$codex_powershell_manifest")
+  actual_codex_powershell_identity="$(official_runtime_tool_identity codex_powershell "$codex_powershell_snapshot")" \
+    || die "live Codex PowerShell wrapper is not an authentic approved runtime tool"
+  [ "$(sha "$codex_powershell_snapshot")" = "$evidence_codex_powershell_sha" ] \
     && jq -e --arg sha "$evidence_codex_powershell_sha" '.windows_runtime_tools.codex_powershell.approved_sha256 | map(ascii_downcase) | index($sha) != null' "$AGENT_PUBLISHERS" >/dev/null \
     || die "live Codex PowerShell wrapper does not match the versioned trust policy"
+  jq -e --argjson actual "$actual_codex_powershell_identity" '.probe.executables.codex_powershell.authenticode == $actual' "$snapshot_base.isolation.json" >/dev/null \
+    || die "Codex PowerShell wrapper Authenticode identity mismatch"
 fi
 jq -e \
   --arg wrapper_suffix "$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")" \
@@ -534,7 +564,6 @@ jq -e \
     and all(.[]; type == "string" and length > 0 and ((ascii_downcase | contains("/users/")) | not)))
   ' "$snapshot_base.isolation.json" >/dev/null 2>&1 || die "isolation evidence is incomplete"
 
-executable_snapshot_manifests=()
 if [ "$production_trust" = true ]; then
   for role in subject reviewer; do
     agent_name="$(jq -r --arg role "$role" '.[$role].name // empty' "$snapshot_candidate")"

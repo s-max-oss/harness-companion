@@ -425,6 +425,8 @@ verify_guarded_executables() {
     && [ "$(sha "$subject_launch_executable")" = "$subject_executable_sha" ] || return 1
   [ -f "$reviewer_launch_executable" ] && [ ! -L "$reviewer_launch_executable" ] \
     && [ "$(sha "$reviewer_launch_executable")" = "$reviewer_executable_sha" ] || return 1
+  [ -f "$codex_powershell" ] && [ ! -L "$codex_powershell" ] \
+    && [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || return 1
 }
 
 guard_process_status() {
@@ -453,11 +455,12 @@ start_executable_guard() {
   local manifest="$controller/executable-guard.manifest.json"
   local ready="$controller/executable-guard.ready.json"
   local stderr="$controller/executable-guard.stderr"
-  local subject_win reviewer_win ready_json ready_fd ready_file_json state_json
+  local subject_win reviewer_win codex_powershell_guard_win ready_json ready_fd ready_file_json state_json
   subject_win="$(cygpath -w "$subject_launch_executable")" || return 1
   reviewer_win="$(cygpath -w "$reviewer_launch_executable")" || return 1
-  jq -n --arg subject "$subject_win" --arg reviewer "$reviewer_win" \
-    '{schema_version:1,paths:([$subject,$reviewer] | unique)}' > "$manifest" || return 1
+  codex_powershell_guard_win="$(cygpath -w "$codex_powershell")" || return 1
+  jq -n --arg subject "$subject_win" --arg reviewer "$reviewer_win" --arg wrapper "$codex_powershell_guard_win" \
+    '{schema_version:1,paths:([$subject,$reviewer,$wrapper] | unique)}' > "$manifest" || return 1
   executable_guard_stop="$controller/executable-guard.stop"
   executable_guard_state="$ROOT/.harness/eval-guard-state.json"
   [ ! -e "$executable_guard_state" ] && [ ! -L "$executable_guard_state" ] || return 1
@@ -918,6 +921,17 @@ reviewer_authenticode='null'
 subject_launch=("$subject_launch_executable")
 reviewer_launch=("$reviewer_launch_executable")
 if [ "$SYNTHETIC" = 0 ]; then
+  codex_powershell_suffix="$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")"
+  codex_powershell_approved="$(jq -c '.windows_runtime_tools.codex_powershell.approved_sha256 // [] | map(ascii_downcase)' "$AGENT_PUBLISHERS")"
+  [ -n "$codex_powershell_suffix" ] && [ "$codex_powershell_approved" != '[]' ] || die "Codex PowerShell trust policy is incomplete"
+  codex_powershell_win="$real_user_home_win\\$codex_powershell_suffix"
+  codex_powershell="$(cygpath -u "$codex_powershell_win")"
+  [ -f "$codex_powershell" ] && [ -x "$codex_powershell" ] && [ ! -L "$codex_powershell" ] || die "trusted Codex PowerShell wrapper is missing or unsafe"
+  codex_powershell_sha="$(sha "$codex_powershell")"
+  jq -e --arg sha "$codex_powershell_sha" 'index($sha) != null' <<< "$codex_powershell_approved" >/dev/null \
+    || die "Codex PowerShell wrapper hash does not match the versioned trust policy"
+  codex_powershell_authenticode="$(official_runtime_tool_identity codex_powershell "$codex_powershell")" \
+    || die "Codex PowerShell wrapper is not an authentic approved runtime tool"
   official_agent_path "$AGENT" "$subject_executable" "$real_user_home" || die "subject executable is outside the trusted $AGENT install location"
   official_agent_path "$REVIEWER" "$reviewer_executable" "$real_user_home" || die "reviewer executable is outside the trusted $REVIEWER install location"
   subject_launch_executable="$exec_root/subject-codex.exe"
@@ -938,7 +952,13 @@ if [ "$SYNTHETIC" = 0 ]; then
     || die "reviewer executable version identity is invalid"
   official_agent_build "$AGENT" "$subject_version" "$subject_executable_sha" || die "subject executable is not an approved $AGENT build"
   official_agent_build "$REVIEWER" "$reviewer_version" "$reviewer_executable_sha" || die "reviewer executable is not an approved $REVIEWER build"
-  start_executable_guard || die "could not lock the validated Agent executable snapshots"
+  start_executable_guard || die "could not lock the validated Agent executables and PowerShell wrapper"
+  verify_guarded_executables || die "validated executable guard failed immediately after acquisition"
+  codex_powershell_locked_authenticode="$(official_runtime_tool_identity codex_powershell "$codex_powershell")" \
+    || die "locked Codex PowerShell wrapper lost its authentic runtime identity"
+  [ "$codex_powershell_locked_authenticode" = "$codex_powershell_authenticode" ] \
+    || die "Codex PowerShell wrapper identity changed while acquiring its guard"
+  codex_powershell_authenticode="$codex_powershell_locked_authenticode"
   update_recovery_journal guard_active || die "could not update lifecycle recovery journal"
   contract_test_hold guard_active
   contract_test_prepare_post_agent_stage
@@ -988,17 +1008,6 @@ if [ "$SYNTHETIC" = 0 ]; then
   system_whoami_sha="$(sha "$system_whoami")"
   [ "$system_powershell_sha" = "$trusted_powershell_sha" ] || die "machine PowerShell hash does not match the versioned trust policy"
   [ "$system_whoami_sha" = "$trusted_whoami_sha" ] || die "machine whoami hash does not match the versioned trust policy"
-  codex_powershell_suffix="$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")"
-  codex_powershell_approved="$(jq -c '.windows_runtime_tools.codex_powershell.approved_sha256 // [] | map(ascii_downcase)' "$AGENT_PUBLISHERS")"
-  [ -n "$codex_powershell_suffix" ] && [ "$codex_powershell_approved" != '[]' ] || die "Codex PowerShell trust policy is incomplete"
-  codex_powershell_win="$real_user_home_win\\$codex_powershell_suffix"
-  codex_powershell="$(cygpath -u "$codex_powershell_win")"
-  [ -f "$codex_powershell" ] && [ -x "$codex_powershell" ] && [ ! -L "$codex_powershell" ] || die "trusted Codex PowerShell wrapper is missing or unsafe"
-  codex_powershell_sha="$(sha "$codex_powershell")"
-  jq -e --arg sha "$codex_powershell_sha" 'index($sha) != null' <<< "$codex_powershell_approved" >/dev/null \
-    || die "Codex PowerShell wrapper hash does not match the versioned trust policy"
-  codex_powershell_authenticode="$(official_runtime_tool_identity codex_powershell "$codex_powershell")" \
-    || die "Codex PowerShell wrapper is not an authentic approved runtime tool"
   sandbox_path="$system_root_posix/System32/WindowsPowerShell/v1.0:$system_root_posix/System32:$system_root_posix:$program_files_posix/Git/bin:$program_files_posix/Git/usr/bin"
   for tool_dir in "$system_root_posix/System32/WindowsPowerShell/v1.0" "$system_root_posix/System32" "$program_files_posix/Git/bin" "$program_files_posix/Git/usr/bin"; do
     [ -d "$tool_dir" ] && [ ! -L "$tool_dir" ] || die "system tool directory missing or unsafe: $tool_dir"

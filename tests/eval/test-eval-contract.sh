@@ -111,19 +111,33 @@ check "real eval binds the token-resolved user profile instead of caller USERPRO
 check "real Agent identity and Windows runtime tools are versioned trust anchors" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin" and (.agents.codex.approved_builds | length > 0 and all(.[]; (.cli_version | length > 0) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_system_tools | keys | sort == ["powershell","whoami"]) and (all(.windows_system_tools[]; (.path | startswith("C:\\Windows\\System32\\")) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_runtime_tools | keys == ["codex_powershell"]) and (.windows_runtime_tools.codex_powershell.user_profile_suffix | endswith("\\pwsh.exe")) and (.windows_runtime_tools.codex_powershell.publisher_subject | startswith("CN=Microsoft Corporation")) and (.windows_runtime_tools.codex_powershell.publisher_thumbprints | length > 0) and (.windows_runtime_tools.codex_powershell.approved_sha256 | length > 0 and all(.[]; test("^[0-9a-f]{64}$")))' "$EVAL/trust/agent-publishers.json"
 probe_wrapper='C:\Users\example\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.exe'
 probe_inner='$env:HARNESS_EVAL_PROBE_PAYLOAD='"'"'ZGVidWc='"'"'; Write-Output ok'
-probe_display="$(python - "$probe_wrapper" "$probe_inner" <<'PY'
-import shlex, sys
-print(shlex.join([sys.argv[1], "-Command", sys.argv[2]]), end="")
-PY
-)"
-probe_display_b64="$(printf '%s' "$probe_display" | base64 | tr -d '\r\n')"
 probe_inner_b64="$(printf '%s' "$probe_inner" | base64 | tr -d '\r\n')"
-check "probe command validator accepts only the exact decoded wrapper argv" python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$probe_inner_b64" "$probe_wrapper"
+probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$probe_inner_b64" "$probe_wrapper")"
+probe_display_b64="$(printf '%s' "$probe_display" | base64 | tr -d '\r\n')"
+check "probe command validator accepts the exact canonical profile-free wrapper argv" python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$probe_inner_b64" "$probe_wrapper"
 if python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$(printf '%s' "$probe_inner extra" | base64 | tr -d '\r\n')" "$probe_wrapper" >/dev/null 2>&1; then
   bad "probe command validator rejects inner-command drift"
 else
   ok "probe command validator rejects inner-command drift"
 fi
+for mutation in \
+  "${probe_display/ -NoProfile/}" \
+  " ${probe_display}" \
+  "${probe_display} " \
+  "${probe_display/ -NoProfile/  -NoProfile}" \
+  "${probe_display/ -NoProfile/ -NonInteractive -NoProfile}"; do
+  if python "$EVAL/validate-probe-command.py" "$(printf '%s' "$mutation" | base64 | tr -d '\r\n')" "$probe_inner_b64" "$probe_wrapper" >/dev/null 2>&1; then
+    bad "probe command validator rejects noncanonical wrapper argv serialization"
+  else
+    ok "probe command validator rejects noncanonical wrapper argv serialization"
+  fi
+done
+if python "$EVAL/validate-probe-command.py" "$(printf '%s\r' "$probe_display" | base64 | tr -d '\r\n')" "$probe_inner_b64" "$probe_wrapper" >/dev/null 2>&1; then
+  bad "probe command validator rejects forbidden control bytes"
+else
+  ok "probe command validator rejects forbidden control bytes"
+fi
+check "real executable guard includes the trusted Codex PowerShell wrapper" bash -c 'grep -Fq -- "--arg wrapper" "$1" && grep -Fq -- "codex_powershell_guard_win" "$1" && grep -Fq -- "sha \"\$codex_powershell\"" "$1"' _ "$EVAL/run-eval.sh"
 approved_version="$(jq -r '.agents.codex.approved_builds[0].cli_version' "$EVAL/trust/agent-publishers.json")"
 approved_digest="$(jq -r '.agents.codex.approved_builds[0].sha256' "$EVAL/trust/agent-publishers.json")"
 check "shared production build verifier accepts the exact approved tuple" bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex "$approved_version" "$approved_digest"
@@ -430,11 +444,8 @@ test_codex_powershell_win="C:\\home\\$test_codex_powershell_suffix"
 test_codex_powershell_sha="$(jq -r '.windows_runtime_tools.codex_powershell.approved_sha256[0]' "$EVAL/trust/agent-publishers.json")"
 test_codex_powershell_subject="$(jq -r '.windows_runtime_tools.codex_powershell.publisher_subject' "$EVAL/trust/agent-publishers.json")"
 test_codex_powershell_thumbprint="$(jq -r '.windows_runtime_tools.codex_powershell.publisher_thumbprints[0]' "$EVAL/trust/agent-publishers.json")"
-test_probe_display="$(python - "$test_codex_powershell_win" "$test_probe_command" <<'PY'
-import shlex, sys
-print(shlex.join([sys.argv[1], "-Command", sys.argv[2]]), end="")
-PY
-)"
+test_probe_command_b64="$(printf '%s' "$test_probe_command" | base64 | tr -d '\r\n')"
+test_probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_command_b64" "$test_codex_powershell_win")"
 test_probe_result="$(jq -cn '{nonce:"test-nonce",identity:"test-host\\codexsandboxoffline",target_file_readable:true,target_writeable:true,source_workspace_readable:false,controller_readable:false,user_home_readable:false}')"
 jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" '{
   schema_version:2,

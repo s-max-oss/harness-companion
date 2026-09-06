@@ -333,6 +333,10 @@ expected_probe_command() {
     "$payload_b64" "$powershell_path" "$probe_b64"
 }
 
+observed_probe_wrapper() {
+  windows_powershell -NoProfile -Command '$env:SystemRoot + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"' | tr -d '\r'
+}
+
 runtime_file_manifest() {
   python - "$1" "$2" <<'PY'
 import hashlib, json, os, stat, sys
@@ -514,7 +518,11 @@ recorded_probe_b64="$(jq -r '.probe.command_event.command | @base64' "$snapshot_
   || die "effective isolation probe command event is invalid"
 expected_probe_b64="$(printf '%s' "$expected_probe" | base64 | tr -d '\r\n')"
 codex_powershell_path="$(jq -r '.probe.executables.codex_powershell.path // empty' "$snapshot_base.isolation.json")"
-python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_b64" "$expected_probe_b64" "$codex_powershell_path" >/dev/null 2>&1 \
+probe_wrapper_path="$(observed_probe_wrapper)" || die "could not resolve the observed Codex shell wrapper"
+powershell_path="$(jq -r '.probe.executables.powershell.path // empty' "$snapshot_base.isolation.json")"
+[ "$(host_path "$probe_wrapper_path")" = "$(host_path "$powershell_path")" ] \
+  || die "observed Codex shell wrapper does not match the trusted system PowerShell"
+python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_b64" "$expected_probe_b64" "$probe_wrapper_path" >/dev/null 2>&1 \
   || die "effective isolation probe command did not match the exact controller argv"
 executable_snapshot_manifests=()
 if [ "$production_trust" = true ]; then

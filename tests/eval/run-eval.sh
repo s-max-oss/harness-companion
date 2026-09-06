@@ -1031,6 +1031,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   [ -n "$system_root_win" ] && [ -n "$program_files_win" ] || die "could not resolve system tool roots"
   system_root_posix="$(cygpath -u "$system_root_win")"
   program_files_posix="$(cygpath -u "$program_files_win")"
+  codex_shell_wrapper_win="$system_root_win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
   system_powershell_win="$(jq -r '.windows_system_tools.powershell.path // empty' "$AGENT_PUBLISHERS")"
   system_whoami_win="$(jq -r '.windows_system_tools.whoami.path // empty' "$AGENT_PUBLISHERS")"
   trusted_powershell_sha="$(jq -r '.windows_system_tools.powershell.sha256 // empty | ascii_downcase' "$AGENT_PUBLISHERS")"
@@ -1044,6 +1045,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   discovered_powershell="$system_root_posix/System32/WindowsPowerShell/v1.0/powershell.exe"
   discovered_whoami="$system_root_posix/System32/whoami.exe"
   [ "$(host_path "$discovered_powershell")" = "$(host_path "$system_powershell")" ] || die "machine PowerShell path does not match the versioned trust policy"
+  [ "$(host_path "$codex_shell_wrapper_win")" = "$(host_path "$system_powershell")" ] || die "Codex shell wrapper path does not match the versioned trust policy"
   [ "$(host_path "$discovered_whoami")" = "$(host_path "$system_whoami")" ] || die "machine whoami path does not match the versioned trust policy"
   [ "$(host_path "$system_powershell")" = "$(host_path "$WINDOWS_POWERSHELL")" ] || die "machine PowerShell path does not match the trusted absolute path"
   [ "$(host_path "$system_whoami")" = "$(host_path "$WINDOWS_WHOAMI")" ] || die "machine whoami path does not match the trusted absolute path"
@@ -1297,7 +1299,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   recorded_probe_command_b64="$(jq -r '.command | @base64' <<< "$probe_event")" \
     || die "effective isolation probe command event was invalid"
   expected_probe_command_b64="$(printf '%s' "$probe_command" | base64 | tr -d '\r\n')"
-  python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_command_b64" "$expected_probe_command_b64" "$codex_powershell_win" >/dev/null 2>&1 \
+  python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_command_b64" "$expected_probe_command_b64" "$codex_shell_wrapper_win" >/dev/null 2>&1 \
     || die "effective isolation probe command did not match the exact controller argv"
   probe_result="$(jq -c '
     .aggregated_output

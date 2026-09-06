@@ -26,7 +26,7 @@ for arg in "$@"; do
   esac
 done
 
-for cmd in jq sha256sum find python ssh-keygen iconv base64 tr; do command -v "$cmd" >/dev/null 2>&1 || { echo "eval-gate: $cmd is required" >&2; exit 2; }; done
+for cmd in jq sha256sum find python ssh-keygen iconv base64 tr env; do command -v "$cmd" >/dev/null 2>&1 || { echo "eval-gate: $cmd is required" >&2; exit 2; }; done
 [ -d "$CASES_DIR" ] && [ ! -L "$CASES_DIR" ] || { echo "eval-gate: cases directory missing or unsafe" >&2; exit 2; }
 [ -d "$RESULTS_DIR" ] && [ ! -L "$RESULTS_DIR" ] || { echo "eval-gate: results directory missing or unsafe" >&2; exit 1; }
 [ -f "$ALLOWED_SIGNERS" ] && [ ! -L "$ALLOWED_SIGNERS" ] || { echo "eval-gate: trusted signer anchor missing or unsafe" >&2; exit 2; }
@@ -40,6 +40,10 @@ host_path() {
 import os, sys
 print(os.path.normcase(os.path.realpath(sys.argv[1])).replace(os.sep, "/"))
 PY
+}
+windows_powershell() {
+  [ -f "$WINDOWS_POWERSHELL" ] && [ ! -L "$WINDOWS_POWERSHELL" ] || return 127
+  env -u PSModulePath "$WINDOWS_POWERSHELL" "$@"
 }
 runtime_file_manifest() {
   python - "$1" "$2" <<'PY'
@@ -98,6 +102,10 @@ expected_probe_command() {
   [ -n "$probe_b64" ] || return 1
   printf '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'"'%s'"'"'; & '"'"'%s'"'"' -NoProfile -ExecutionPolicy Bypass -EncodedCommand '"'"'%s'"'"'\n' \
     "$payload_b64" "$powershell_path" "$probe_b64"
+}
+
+observed_probe_wrapper() {
+  windows_powershell -NoProfile -Command '$env:SystemRoot + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"' | tr -d '\r'
 }
 
 directory_manifest() {
@@ -374,8 +382,12 @@ while IFS= read -r case_file; do
   recorded_probe_b64="$(jq -r '.probe.command_event.command | @base64' "$base.isolation.json" 2>/dev/null || true)"
   expected_probe_b64="$(printf '%s' "$expected_probe" | base64 | tr -d '\r\n')"
   codex_powershell_path="$(jq -r '.probe.executables.codex_powershell.path // empty' "$base.isolation.json" 2>/dev/null || true)"
+  powershell_path="$(jq -r '.probe.executables.powershell.path // empty' "$base.isolation.json" 2>/dev/null || true)"
+  probe_wrapper_path="$(observed_probe_wrapper 2>/dev/null || true)"
   if [ -n "$expected_probe" ] \
-    && python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_b64" "$expected_probe_b64" "$codex_powershell_path" >/dev/null 2>&1 \
+    && [ -n "$probe_wrapper_path" ] \
+    && [ "$(host_path "$probe_wrapper_path")" = "$(host_path "$powershell_path")" ] \
+    && python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_b64" "$expected_probe_b64" "$probe_wrapper_path" >/dev/null 2>&1 \
     && jq -e \
       --arg wrapper_suffix "$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")" \
       --arg wrapper_subject "$(jq -r '.windows_runtime_tools.codex_powershell.publisher_subject // empty' "$AGENT_PUBLISHERS")" \

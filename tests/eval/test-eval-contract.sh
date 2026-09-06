@@ -109,11 +109,11 @@ check "all real eval output directories share one ACL transition lock" grep -Fq 
 check "crashed eval state has identity-bound lifecycle recovery" bash -c 'grep -Fq "eval-recovery-journal.json" "$1" && grep -Fq "windows_process_status" "$1" && grep -Fq "lifecycle recovery complete" "$1"' _ "$EVAL/recover-windows-isolation.sh"
 check "real eval binds the token-resolved user profile instead of caller USERPROFILE" bash -c 'grep -Fq "GetFolderPath([Environment+SpecialFolder]::UserProfile)" "$1" && ! grep -Fq "\${USERPROFILE:-\$HOME}" "$1"' _ "$EVAL/run-eval.sh"
 check "real Agent identity and Windows runtime tools are versioned trust anchors" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin" and (.agents.codex.approved_builds | length > 0 and all(.[]; (.cli_version | length > 0) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_system_tools | keys | sort == ["powershell","whoami"]) and (all(.windows_system_tools[]; (.path | startswith("C:\\Windows\\System32\\")) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_runtime_tools | keys == ["codex_powershell"]) and (.windows_runtime_tools.codex_powershell.user_profile_suffix | endswith("\\pwsh.exe")) and (.windows_runtime_tools.codex_powershell.publisher_subject | startswith("CN=Microsoft Corporation")) and (.windows_runtime_tools.codex_powershell.publisher_thumbprints | length > 0) and (.windows_runtime_tools.codex_powershell.approved_sha256 | length > 0 and all(.[]; test("^[0-9a-f]{64}$")))' "$EVAL/trust/agent-publishers.json"
-probe_wrapper='C:\Users\example\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.exe'
+probe_wrapper='C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe'
 probe_inner='$env:HARNESS_EVAL_PROBE_PAYLOAD='"'"'ZGVidWc='"'"'; Write-Output ok'
 probe_inner_b64="$(printf '%s' "$probe_inner" | base64 | tr -d '\r\n')"
 probe_display="$(cat <<'EOF'
-"C:\\Users\\example\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell\\pwsh.exe" -NoProfile -Command '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'ZGVidWc='; Write-Output ok"
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'ZGVidWc='; Write-Output ok"
 EOF
 )"
 probe_display_b64="$(printf '%s' "$probe_display" | base64 | tr -d '\r\n')"
@@ -122,18 +122,25 @@ if [ "$(python "$EVAL/validate-probe-command.py" --canonical "$probe_inner_b64" 
 else
   bad "probe command serializer matches the approved Codex 0.152.1 golden display"
 fi
-check "probe command validator accepts the exact canonical profile-free wrapper argv" python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$probe_inner_b64" "$probe_wrapper"
+check "probe command validator accepts the exact pinned Codex 0.152.1 wrapper argv" python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$probe_inner_b64" "$probe_wrapper"
+check "production probe derives the observed system wrapper" grep -Fq 'codex_shell_wrapper_win="$system_root_win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"' "$EVAL/run-eval.sh"
+check "production probe validator uses the observed system wrapper" grep -Fq '$expected_probe_command_b64" "$codex_shell_wrapper_win"' "$EVAL/run-eval.sh"
+check "production inner probe stays profile-free" grep -Fq -- "-NoProfile -ExecutionPolicy Bypass -EncodedCommand" "$EVAL/run-eval.sh"
+check "attester rederives and uses the observed system wrapper" grep -Fq 'probe_wrapper_path="$(observed_probe_wrapper)"' "$EVAL/attest-result.sh"
+check "attester probe validator uses the observed system wrapper" grep -Fq '$expected_probe_b64" "$probe_wrapper_path"' "$EVAL/attest-result.sh"
+check "result gate rederives and uses the observed system wrapper" grep -Fq 'probe_wrapper_path="$(observed_probe_wrapper' "$EVAL/check-results.sh"
+check "result gate probe validator uses the observed system wrapper" grep -Fq '$expected_probe_b64" "$probe_wrapper_path"' "$EVAL/check-results.sh"
 if python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$(printf '%s' "$probe_inner extra" | base64 | tr -d '\r\n')" "$probe_wrapper" >/dev/null 2>&1; then
   bad "probe command validator rejects inner-command drift"
 else
   ok "probe command validator rejects inner-command drift"
 fi
 for mutation in \
-  "${probe_display/ -NoProfile/}" \
+  "${probe_display/ -Command/ -NoProfile -Command}" \
   " ${probe_display}" \
   "${probe_display} " \
-  "${probe_display/ -NoProfile/  -NoProfile}" \
-  "${probe_display/ -NoProfile/ -NonInteractive -NoProfile}"; do
+  "${probe_display/ -Command/  -Command}" \
+  "${probe_display/ -Command/ -NonInteractive -Command}"; do
   if python "$EVAL/validate-probe-command.py" "$(printf '%s' "$mutation" | base64 | tr -d '\r\n')" "$probe_inner_b64" "$probe_wrapper" >/dev/null 2>&1; then
     bad "probe command validator rejects noncanonical wrapper argv serialization"
   else
@@ -514,7 +521,8 @@ test_codex_powershell_sha="$(jq -r '.windows_runtime_tools.codex_powershell.appr
 test_codex_powershell_subject="$(jq -r '.windows_runtime_tools.codex_powershell.publisher_subject' "$EVAL/trust/agent-publishers.json")"
 test_codex_powershell_thumbprint="$(jq -r '.windows_runtime_tools.codex_powershell.publisher_thumbprints[0]' "$EVAL/trust/agent-publishers.json")"
 test_probe_command_b64="$(printf '%s' "$test_probe_command" | base64 | tr -d '\r\n')"
-test_probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_command_b64" "$test_codex_powershell_win")"
+test_probe_wrapper_win="$(env -u PSModulePath powershell.exe -NoProfile -Command '$env:SystemRoot + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"' | tr -d '\r')"
+test_probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_command_b64" "$test_probe_wrapper_win")"
 test_probe_result="$(jq -cn '{nonce:"test-nonce",identity:"test-host\\codexsandboxoffline",target_file_readable:true,target_writeable:true,source_workspace_readable:false,controller_readable:false,user_home_readable:false}')"
 jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" '{
   schema_version:2,

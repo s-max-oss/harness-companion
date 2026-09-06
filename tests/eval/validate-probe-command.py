@@ -31,12 +31,11 @@ def decode_canonical(value: str, label: str) -> str:
 
 def canonical_display(wrapper: str, expected: str) -> str:
     # Codex 0.152.1 emits Windows command events using this exact display form:
-    # a double-quoted, backslash-escaped executable followed by -Command.  The
-    # outer shell does not include -NoProfile; the hash-bound inner probe starts
-    # an absolute trusted PowerShell with -NoProfile.  The controller-generated
-    # probe has one or more single quotes, no double quote/backtick, and no
-    # expansion-capable token after its first single quote.  Constrain that
-    # grammar instead of accepting a shell-equivalent alternate serialization.
+    # a double-quoted, backslash-escaped executable followed by the mandatory
+    # profile-free PowerShell argv.  The controller-generated probe has one or
+    # more single quotes, no double quote/backtick, and no expansion-capable
+    # token after its first single quote.  Constrain that grammar instead of
+    # accepting a shell-equivalent alternate serialization.
     if any(ch in wrapper for ch in "\x00\r\n\""):
         fail("wrapper path cannot be represented canonically")
     if len(wrapper) < 3 or wrapper[1:3] != ":\\":
@@ -54,7 +53,7 @@ def canonical_display(wrapper: str, expected: str) -> str:
     escape_path = lambda value: value.replace("\\", "\\\\")
     wrapper_display = f'"{escape_path(wrapper)}"'
     command_display = f"'{escape_path(prefix)}'\"{escape_path(suffix)}\""
-    return f"{wrapper_display} -Command {command_display}"
+    return f"{wrapper_display} -NoProfile -Command {command_display}"
 
 
 if len(sys.argv) == 4 and sys.argv[1] == "--canonical":
@@ -72,4 +71,4 @@ if not recorded_b64 or not expected_b64 or not wrapper:
 recorded = decode_canonical(recorded_b64, "recorded command")
 expected = decode_canonical(expected_b64, "expected command")
 if recorded != canonical_display(wrapper, expected):
-    fail("recorded command was not the exact pinned Codex probe argv")
+    fail("recorded command was not the exact canonical profile-free probe argv")

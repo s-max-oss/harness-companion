@@ -432,6 +432,10 @@ verify_guarded_executables() {
     && [ "$(sha "$reviewer_launch_executable")" = "$reviewer_executable_sha" ] || return 1
   [ -f "$codex_powershell" ] && [ ! -L "$codex_powershell" ] \
     && [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || return 1
+  [ -f "$system_powershell" ] && [ ! -L "$system_powershell" ] \
+    && [ "$(sha "$system_powershell")" = "$system_powershell_sha" ] || return 1
+  [ -f "$system_whoami" ] && [ ! -L "$system_whoami" ] \
+    && [ "$(sha "$system_whoami")" = "$system_whoami_sha" ] || return 1
   for ((i = 0; i < ${#component_launch_paths[@]}; i++)); do
     [ -f "${component_launch_paths[$i]}" ] && [ ! -L "${component_launch_paths[$i]}" ] \
       && [ "$(sha "${component_launch_paths[$i]}")" = "${component_launch_shas[$i]}" ] || return 1
@@ -464,12 +468,14 @@ start_executable_guard() {
   local manifest="$controller/executable-guard.manifest.json"
   local ready="$controller/executable-guard.ready.json"
   local stderr="$controller/executable-guard.stderr"
-  local subject_win reviewer_win codex_powershell_guard_win component_path ready_json ready_fd ready_file_json state_json
+  local subject_win reviewer_win codex_powershell_guard_win system_powershell_guard_win system_whoami_guard_win component_path ready_json ready_fd ready_file_json state_json
   local -a guard_paths
   subject_win="$(cygpath -w "$subject_launch_executable")" || return 1
   reviewer_win="$(cygpath -w "$reviewer_launch_executable")" || return 1
   codex_powershell_guard_win="$(cygpath -w "$codex_powershell")" || return 1
-  guard_paths=("$subject_win" "$reviewer_win" "$codex_powershell_guard_win")
+  system_powershell_guard_win="$(cygpath -w "$system_powershell")" || return 1
+  system_whoami_guard_win="$(cygpath -w "$system_whoami")" || return 1
+  guard_paths=("$subject_win" "$reviewer_win" "$codex_powershell_guard_win" "$system_powershell_guard_win" "$system_whoami_guard_win")
   for component_path in "${component_launch_paths[@]}"; do
     guard_paths+=("$(cygpath -w "$component_path")") || return 1
   done
@@ -938,6 +944,22 @@ component_launch_shas=()
 subject_launch=("$subject_launch_executable")
 reviewer_launch=("$reviewer_launch_executable")
 if [ "$SYNTHETIC" = 0 ]; then
+  system_powershell_win="$(jq -r '.windows_system_tools.powershell.path // empty' "$AGENT_PUBLISHERS")"
+  system_whoami_win="$(jq -r '.windows_system_tools.whoami.path // empty' "$AGENT_PUBLISHERS")"
+  trusted_powershell_sha="$(jq -r '.windows_system_tools.powershell.sha256 // empty | ascii_downcase' "$AGENT_PUBLISHERS")"
+  trusted_whoami_sha="$(jq -r '.windows_system_tools.whoami.sha256 // empty | ascii_downcase' "$AGENT_PUBLISHERS")"
+  jq -en --arg p "$system_powershell_win" --arg w "$system_whoami_win" \
+    --arg ps "$trusted_powershell_sha" --arg ws "$trusted_whoami_sha" \
+    '($p|length)>0 and ($w|length)>0 and ($ps|test("^[0-9a-f]{64}$")) and ($ws|test("^[0-9a-f]{64}$"))' >/dev/null \
+    || die "Windows system-tool trust policy is incomplete"
+  system_powershell="$(cygpath -u "$system_powershell_win")"
+  system_whoami="$(cygpath -u "$system_whoami_win")"
+  [ -f "$system_powershell" ] && [ ! -L "$system_powershell" ] || die "trusted PowerShell is missing or unsafe"
+  [ -f "$system_whoami" ] && [ ! -L "$system_whoami" ] || die "trusted whoami is missing or unsafe"
+  system_powershell_sha="$(sha "$system_powershell")"
+  system_whoami_sha="$(sha "$system_whoami")"
+  [ "$system_powershell_sha" = "$trusted_powershell_sha" ] || die "machine PowerShell hash does not match the versioned trust policy"
+  [ "$system_whoami_sha" = "$trusted_whoami_sha" ] || die "machine whoami hash does not match the versioned trust policy"
   codex_powershell_suffix="$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")"
   codex_powershell_approved="$(jq -c '.windows_runtime_tools.codex_powershell.approved_sha256 // [] | map(ascii_downcase)' "$AGENT_PUBLISHERS")"
   [ -n "$codex_powershell_suffix" ] && [ "$codex_powershell_approved" != '[]' ] || die "Codex PowerShell trust policy is incomplete"
@@ -1032,16 +1054,6 @@ if [ "$SYNTHETIC" = 0 ]; then
   system_root_posix="$(cygpath -u "$system_root_win")"
   program_files_posix="$(cygpath -u "$program_files_win")"
   codex_shell_wrapper_win="$system_root_win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-  system_powershell_win="$(jq -r '.windows_system_tools.powershell.path // empty' "$AGENT_PUBLISHERS")"
-  system_whoami_win="$(jq -r '.windows_system_tools.whoami.path // empty' "$AGENT_PUBLISHERS")"
-  trusted_powershell_sha="$(jq -r '.windows_system_tools.powershell.sha256 // empty | ascii_downcase' "$AGENT_PUBLISHERS")"
-  trusted_whoami_sha="$(jq -r '.windows_system_tools.whoami.sha256 // empty | ascii_downcase' "$AGENT_PUBLISHERS")"
-  jq -en --arg p "$system_powershell_win" --arg w "$system_whoami_win" \
-    --arg ps "$trusted_powershell_sha" --arg ws "$trusted_whoami_sha" \
-    '($p|length)>0 and ($w|length)>0 and ($ps|test("^[0-9a-f]{64}$")) and ($ws|test("^[0-9a-f]{64}$"))' >/dev/null \
-    || die "Windows system-tool trust policy is incomplete"
-  system_powershell="$(cygpath -u "$system_powershell_win")"
-  system_whoami="$(cygpath -u "$system_whoami_win")"
   discovered_powershell="$system_root_posix/System32/WindowsPowerShell/v1.0/powershell.exe"
   discovered_whoami="$system_root_posix/System32/whoami.exe"
   [ "$(host_path "$discovered_powershell")" = "$(host_path "$system_powershell")" ] || die "machine PowerShell path does not match the versioned trust policy"
@@ -1049,12 +1061,6 @@ if [ "$SYNTHETIC" = 0 ]; then
   [ "$(host_path "$discovered_whoami")" = "$(host_path "$system_whoami")" ] || die "machine whoami path does not match the versioned trust policy"
   [ "$(host_path "$system_powershell")" = "$(host_path "$WINDOWS_POWERSHELL")" ] || die "machine PowerShell path does not match the trusted absolute path"
   [ "$(host_path "$system_whoami")" = "$(host_path "$WINDOWS_WHOAMI")" ] || die "machine whoami path does not match the trusted absolute path"
-  [ -f "$system_powershell" ] && [ ! -L "$system_powershell" ] || die "trusted PowerShell is missing or unsafe"
-  [ -f "$system_whoami" ] && [ ! -L "$system_whoami" ] || die "trusted whoami is missing or unsafe"
-  system_powershell_sha="$(sha "$system_powershell")"
-  system_whoami_sha="$(sha "$system_whoami")"
-  [ "$system_powershell_sha" = "$trusted_powershell_sha" ] || die "machine PowerShell hash does not match the versioned trust policy"
-  [ "$system_whoami_sha" = "$trusted_whoami_sha" ] || die "machine whoami hash does not match the versioned trust policy"
   sandbox_path="$system_root_posix/System32/WindowsPowerShell/v1.0:$system_root_posix/System32:$system_root_posix:$program_files_posix/Git/bin:$program_files_posix/Git/usr/bin"
   for tool_dir in "$system_root_posix/System32/WindowsPowerShell/v1.0" "$system_root_posix/System32" "$program_files_posix/Git/bin" "$program_files_posix/Git/usr/bin"; do
     [ -d "$tool_dir" ] && [ ! -L "$tool_dir" ] || die "system tool directory missing or unsafe: $tool_dir"
@@ -1131,7 +1137,7 @@ EOF
   if [ "$AGENT" = codex ]; then
     (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
       "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
-      -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' \
+      -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c 'allow_login_shell=false' \
       --disable browser_use --disable in_app_browser --disable computer_use \
       --disable apps --disable plugins --disable skill_search --disable multi_agent \
       --skip-git-repo-check --ignore-user-config --ignore-rules --model "$MODEL" --json - \
@@ -1235,7 +1241,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || die "Codex PowerShell wrapper changed before isolation probe"
   (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
     "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
-    -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' \
+    -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c 'allow_login_shell=false' \
     --disable browser_use --disable in_app_browser --disable computer_use \
     --disable apps --disable plugins --disable skill_search --disable multi_agent \
     --skip-git-repo-check --ignore-user-config --ignore-rules --model "$MODEL" --json - \
@@ -1325,12 +1331,13 @@ if [ "$SYNTHETIC" = 0 ]; then
   rm -f -- "$probe_target"
   [ ! -e "$probe_target" ] && [ ! -L "$probe_target" ] || die "effective isolation probe target cleanup failed"
   jq --argjson command_event "$probe_event" --argjson result "$probe_result" --argjson payload "$probe_payload" --arg path "$sandbox_path" \
+    --arg shell_wrapper_path "$codex_shell_wrapper_win" \
     --arg powershell_path "$system_powershell_win" --arg powershell_sha256 "$system_powershell_sha" \
     --arg whoami_path "$system_whoami_win" --arg whoami_sha256 "$system_whoami_sha" \
     --arg codex_powershell_path "$codex_powershell_win" --arg codex_powershell_sha256 "$codex_powershell_sha" \
     --argjson codex_powershell_authenticode "$codex_powershell_authenticode" '
     .schema_version = 2
-    | .probe = {command_event:$command_event,result:$result,payload:$payload,sanitized_path:($path | split(":")),executables:{powershell:{path:$powershell_path,sha256:$powershell_sha256},whoami:{path:$whoami_path,sha256:$whoami_sha256},codex_powershell:{path:$codex_powershell_path,sha256:$codex_powershell_sha256,authenticode:$codex_powershell_authenticode}}}
+    | .probe = {command_event:$command_event,result:$result,payload:$payload,shell_wrapper_path:$shell_wrapper_path,sanitized_path:($path | split(":")),executables:{powershell:{path:$powershell_path,sha256:$powershell_sha256},whoami:{path:$whoami_path,sha256:$whoami_sha256},codex_powershell:{path:$codex_powershell_path,sha256:$codex_powershell_sha256,authenticode:$codex_powershell_authenticode}}}
   ' "$isolation_evidence" > "$controller/isolation.with-probe.json"
   mv "$controller/isolation.with-probe.json" "$isolation_evidence"
 else
@@ -1422,7 +1429,7 @@ if [ "$REVIEWER" = codex ]; then
   verify_guarded_executables || die "validated Agent executable guard failed before reviewer"
   (cd "$review_root" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
     "${reviewer_launch[@]}" exec --ephemeral --cd "$review_root" --sandbox read-only --skip-git-repo-check \
-    -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' \
+    -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c 'allow_login_shell=false' \
     --disable shell_tool --disable unified_exec --disable browser_use --disable in_app_browser \
     --disable computer_use --disable apps --disable plugins --disable skill_search --disable multi_agent \
     --ignore-user-config --ignore-rules --model "$REVIEWER_MODEL" --output-schema "$SCHEMA" --json -) \

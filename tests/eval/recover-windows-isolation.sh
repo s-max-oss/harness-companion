@@ -21,6 +21,12 @@ WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 TRUSTED_WINDOWS_ENV="/c/Program Files/Git/usr/bin/env.exe"
 
 die() { echo "eval-recover: $*" >&2; exit 2; }
+recovery_test_crash() {
+  [ "${HARNESS_EVAL_CONTRACT_TEST:-0}" = 1 ] || return 0
+  [ "${HARNESS_EVAL_RECOVERY_TEST_EXIT_STAGE:-}" = "$1" ] || return 0
+  trap - EXIT
+  exit 99
+}
 windows_powershell() { "$TRUSTED_WINDOWS_ENV" -u PSModulePath "$WINDOWS_POWERSHELL" "$@"; }
 host_path() {
   local path="$1"
@@ -31,17 +37,19 @@ print(os.path.normcase(os.path.realpath(sys.argv[1])).replace(os.sep, "/"))
 PY
 }
 windows_process_status() {
-  HARNESS_EVAL_OWNER_PID="$1" HARNESS_EVAL_OWNER_START="$2" HARNESS_EVAL_OWNER_NAME="$3" \
+  local status
+  status="$(HARNESS_EVAL_OWNER_PID="$1" HARNESS_EVAL_OWNER_START="$2" HARNESS_EVAL_OWNER_NAME="$3" \
   HARNESS_EVAL_OWNER_COMMAND="$4" windows_powershell -NoProfile -Command '
     $p = Get-Process -Id ([int]$env:HARNESS_EVAL_OWNER_PID) -ErrorAction SilentlyContinue
     if ($null -eq $p) { "absent"; exit 0 }
     $cim = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $p.Id) -ErrorAction SilentlyContinue
-    if ($null -eq $cim) { "mismatch"; exit 0 }
+    if ($null -eq $cim) { "unknown"; exit 0 }
     $start = $p.StartTime.ToUniversalTime().ToString("o")
     if ($start -ceq $env:HARNESS_EVAL_OWNER_START -and
         ([string]$cim.Name).Equals($env:HARNESS_EVAL_OWNER_NAME, [StringComparison]::OrdinalIgnoreCase) -and
         ([string]$cim.CommandLine) -ceq $env:HARNESS_EVAL_OWNER_COMMAND) { "match" } else { "mismatch" }
-  ' 2>/dev/null | tr -d '\r\n'
+  ' 2>/dev/null | tr -d '\r\n')" || status=unknown
+  case "$status" in absent|match|mismatch|unknown) printf '%s\n' "$status" ;; *) printf '%s\n' unknown ;; esac
 }
 windows_current_identity() {
   local msys_pid="$$" windows_pid
@@ -78,8 +86,10 @@ guard_process_status() {
   ' 2>/dev/null | tr -d '\r\n'
 }
 update_journal_stage() {
-  local next_stage="$1" staged="$ROOT/.harness/.eval-recovery-journal.recover.$$.$RANDOM"
+  local next_stage="$1" staged="$journal_stage_path"
+  [ ! -e "$staged" ] && [ ! -L "$staged" ] || return 1
   jq --arg stage "$next_stage" '.stage = $stage' "$RECOVERY_JOURNAL" > "$staged" || { rm -f -- "$staged"; return 1; }
+  recovery_test_crash recovery_journal_staged
   python - "$staged" "$RECOVERY_JOURNAL" <<'PY' || { rm -f -- "$staged"; return 1; }
 import os, stat, sys, time
 source, destination = sys.argv[1:]
@@ -100,12 +110,23 @@ for attempt in range(200):
 PY
 }
 write_owner() {
-  local process_json="$1" lock_nonce staged="$ACL_LOCK/.owner.json.$$.$RANDOM"
+  local process_json="$1" lock_nonce staged="$acl_owner_stage"
+  [ ! -e "$staged" ] && [ ! -L "$staged" ] || return 1
   lock_nonce="$(python -c 'import secrets; print(secrets.token_hex(32))')" || return 1
   jq -n --arg run_nonce "$journal_nonce" --arg lock_nonce "$lock_nonce" \
     --arg journal "$(cygpath -w "$RECOVERY_JOURNAL")" --argjson process "$process_json" \
     '{schema_version:1,run_nonce:$run_nonce,lock_nonce:$lock_nonce,journal:$journal,process:$process}' > "$staged" || return 1
+  recovery_test_crash recovery_owner_staged
   mv "$staged" "$OWNER_FILE"
+}
+create_marker() {
+  python - "$1" <<'PY'
+import os, sys
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+fd = os.open(sys.argv[1], flags, 0o600)
+try: os.fsync(fd)
+finally: os.close(fd)
+PY
 }
 remove_verified_tree() {
   local path="$1" allowed_parent="$2" required_prefix="$3"
@@ -141,7 +162,9 @@ jq -e '
   and (.controller.name | ascii_downcase) == "bash.exe"
   and all(.controller.start_time_utc,.controller.name,.controller.command_line; type == "string" and length > 0)
   and all(.paths.journal,.paths.run_root,.paths.work_runs_root,.paths.output_dir,.paths.agent_lock,
-          .paths.acl_lock,.paths.acl_owner,.paths.acl_state,.paths.guard_state; type == "string" and length > 0)
+          .paths.acl_lock,.paths.acl_owner,.paths.acl_owner_stage,.paths.acl_state,.paths.guard_state,
+          .paths.journal_stage,.paths.acl_helper_state,.paths.acl_helper_continue,
+          .paths.acl_helper_abort,.paths.acl_helper_recovery; type == "string" and length > 0)
   and ((.paths.publication_lock == null) or (.paths.publication_lock | type == "string" and length > 0))
   and ((.paths.publication_stage == null) or (.paths.publication_stage | type == "string" and length > 0))
 ' "$RECOVERY_JOURNAL" >/dev/null || die "lifecycle recovery journal is invalid"
@@ -158,8 +181,14 @@ output_dir="$(cygpath -u "$(jq -r '.paths.output_dir' "$RECOVERY_JOURNAL")")"
 agent_lock="$(cygpath -u "$(jq -r '.paths.agent_lock' "$RECOVERY_JOURNAL")")"
 recorded_acl_lock="$(cygpath -u "$(jq -r '.paths.acl_lock' "$RECOVERY_JOURNAL")")"
 recorded_acl_owner="$(cygpath -u "$(jq -r '.paths.acl_owner' "$RECOVERY_JOURNAL")")"
+acl_owner_stage="$(cygpath -u "$(jq -r '.paths.acl_owner_stage' "$RECOVERY_JOURNAL")")"
 recorded_acl_state="$(cygpath -u "$(jq -r '.paths.acl_state' "$RECOVERY_JOURNAL")")"
 recorded_guard_state="$(cygpath -u "$(jq -r '.paths.guard_state' "$RECOVERY_JOURNAL")")"
+journal_stage_path="$(cygpath -u "$(jq -r '.paths.journal_stage' "$RECOVERY_JOURNAL")")"
+acl_helper_state="$(cygpath -u "$(jq -r '.paths.acl_helper_state' "$RECOVERY_JOURNAL")")"
+acl_helper_continue="$(cygpath -u "$(jq -r '.paths.acl_helper_continue' "$RECOVERY_JOURNAL")")"
+acl_helper_abort="$(cygpath -u "$(jq -r '.paths.acl_helper_abort' "$RECOVERY_JOURNAL")")"
+acl_helper_recovery="$(cygpath -u "$(jq -r '.paths.acl_helper_recovery' "$RECOVERY_JOURNAL")")"
 publication_lock_win="$(jq -r '.paths.publication_lock // empty' "$RECOVERY_JOURNAL")"
 publication_stage_win="$(jq -r '.paths.publication_stage // empty' "$RECOVERY_JOURNAL")"
 
@@ -169,13 +198,20 @@ publication_stage_win="$(jq -r '.paths.publication_stage // empty' "$RECOVERY_JO
 [ "$(host_path "$agent_lock")" = "$(host_path "$CANONICAL_AGENT_LOCK")" ] || die "Agent lock is not canonical"
 [ "$(host_path "$recorded_acl_lock")" = "$(host_path "$ACL_LOCK")" ] || die "ACL lock is not authoritative"
 [ "$(host_path "$recorded_acl_owner")" = "$(host_path "$OWNER_FILE")" ] || die "ACL owner path is not authoritative"
+[ "$(host_path "$acl_owner_stage")" = "$(host_path "$ACL_LOCK/.owner.stage.$journal_nonce")" ] || die "ACL owner stage is not authoritative"
 [ "$(host_path "$recorded_acl_state")" = "$(host_path "$ACL_STATE")" ] || die "ACL state path is not authoritative"
 [ "$(host_path "$recorded_guard_state")" = "$(host_path "$GUARD_STATE")" ] || die "guard state path is not authoritative"
+[ "$(host_path "$journal_stage_path")" = "$(host_path "$ROOT/.harness/.eval-recovery-journal.stage.$journal_nonce")" ] || die "journal stage is not authoritative"
+[ "$(host_path "$acl_helper_state")" = "$(host_path "$ROOT/.harness/.eval-acl-helper.state.$journal_nonce")" ] || die "ACL helper state path is not authoritative"
+[ "$(host_path "$acl_helper_continue")" = "$(host_path "$ROOT/.harness/.eval-acl-helper.continue.$journal_nonce")" ] || die "ACL helper continue path is not authoritative"
+[ "$(host_path "$acl_helper_abort")" = "$(host_path "$ROOT/.harness/.eval-acl-helper.abort.$journal_nonce")" ] || die "ACL helper abort path is not authoritative"
+[ "$(host_path "$acl_helper_recovery")" = "$(host_path "$ROOT/.harness/.eval-acl-helper.recovery.$journal_nonce")" ] || die "ACL helper recovery path is not authoritative"
 run_root_host="$(host_path "$run_root")"
 case "$run_root_host" in "$(host_path "$WORK_ROOT/runs")"/run.*) ;; *) die "run root is outside the fixed work root" ;; esac
 
 if [ "$journal_stage" = recovery_complete ]; then
-  completed_paths=("$GUARD_STATE" "$ACL_STATE" "$ACL_LOCK" "$CANONICAL_AGENT_LOCK" "$run_root")
+  completed_paths=("$GUARD_STATE" "$ACL_STATE" "$ACL_LOCK" "$CANONICAL_AGENT_LOCK" "$run_root" "$journal_stage_path"
+    "$acl_helper_state" "$acl_helper_continue" "$acl_helper_abort" "$acl_helper_recovery")
   [ -z "$publication_stage_win" ] || completed_paths+=("$(cygpath -u "$publication_stage_win")")
   [ -z "$publication_lock_win" ] || completed_paths+=("$(cygpath -u "$publication_lock_win")")
   for path in "${completed_paths[@]}"; do
@@ -188,6 +224,12 @@ fi
 
 controller_status="$(windows_process_status "$controller_pid" "$controller_start" "$controller_name" "$controller_command")"
 [ "$controller_status" != match ] || die "recorded eval controller is still active (Windows pid $controller_pid)"
+[ "$controller_status" != unknown ] || die "could not verify whether the recorded eval controller is active"
+
+if [ -e "$journal_stage_path" ] || [ -L "$journal_stage_path" ]; then
+  [ -f "$journal_stage_path" ] && [ ! -L "$journal_stage_path" ] || die "journal staging path is unsafe"
+  rm -f -- "$journal_stage_path" || die "could not retire stale journal staging file"
+fi
 
 if [ -e "$ACL_LOCK" ] || [ -L "$ACL_LOCK" ]; then
   [ -d "$ACL_LOCK" ] && [ ! -L "$ACL_LOCK" ] || die "ACL lock is unsafe"
@@ -204,7 +246,12 @@ if [ -e "$ACL_LOCK" ] || [ -L "$ACL_LOCK" ]; then
     owner_command="$(jq -r '.process.command_line' "$OWNER_FILE")"
     owner_status="$(windows_process_status "$owner_pid" "$owner_start" "$owner_name" "$owner_command")"
     [ "$owner_status" != match ] || die "ACL transition lock owner is still active (Windows pid $owner_pid)"
+    [ "$owner_status" != unknown ] || die "could not verify whether the ACL transition lock owner is active"
     rm -f -- "$OWNER_FILE"
+  fi
+  if [ -e "$acl_owner_stage" ] || [ -L "$acl_owner_stage" ]; then
+    [ -f "$acl_owner_stage" ] && [ ! -L "$acl_owner_stage" ] || die "ACL owner staging path is unsafe"
+    rm -f -- "$acl_owner_stage" || die "could not retire stale ACL owner staging file"
   fi
   rmdir "$ACL_LOCK" || die "could not retire stale ACL lock"
 fi
@@ -213,7 +260,7 @@ mkdir "$ACL_LOCK" || die "could not acquire ACL recovery lock"
 lock_owned=true
 cleanup() {
   if [ "${lock_owned:-false}" = true ]; then
-    rm -f -- "$OWNER_FILE" 2>/dev/null || true
+    rm -f -- "$OWNER_FILE" "$acl_owner_stage" 2>/dev/null || true
     rmdir "$ACL_LOCK" 2>/dev/null || true
   fi
 }
@@ -257,6 +304,42 @@ if [ -e "$GUARD_STATE" ] || [ -L "$GUARD_STATE" ]; then
   rm -f -- "$GUARD_STATE" || die "could not retire executable guard state"
 fi
 
+if [ -d "$(dirname "$acl_helper_abort")" ] && [ ! -e "$acl_helper_abort" ] && [ ! -L "$acl_helper_abort" ]; then
+  create_marker "$acl_helper_abort" || die "could not block a late ACL Enter helper"
+fi
+if [ -e "$acl_helper_state" ] || [ -L "$acl_helper_state" ]; then
+  [ -f "$acl_helper_state" ] && [ ! -L "$acl_helper_state" ] || die "ACL Enter helper state is unsafe"
+  jq -e --arg nonce "$journal_nonce" --arg journal "$(cygpath -w "$RECOVERY_JOURNAL")" \
+    --arg helper "$(cygpath -w "$ACL_HELPER")" --arg state "$(cygpath -w "$acl_helper_state")" \
+    --arg continue_file "$(cygpath -w "$acl_helper_continue")" --arg abort_file "$(cygpath -w "$acl_helper_abort")" \
+    --arg recovery_file "$(cygpath -w "$acl_helper_recovery")" '
+      .schema_version == 1 and .nonce == $nonce and .recovery_journal == $journal
+      and .helper_script == $helper and .state_file == $state and .continue_file == $continue_file
+      and .abort_file == $abort_file and .recovery_file == $recovery_file
+      and (.process.pid | type == "number" and . > 0)
+      and all(.process.start_time_utc,.process.name,.process.command_line; type == "string" and length > 0)
+    ' "$acl_helper_state" >/dev/null || die "ACL Enter helper state is invalid"
+  helper_pid="$(jq -r '.process.pid' "$acl_helper_state")"
+  helper_status="$(windows_process_status "$helper_pid" "$(jq -r '.process.start_time_utc' "$acl_helper_state")" \
+    "$(jq -r '.process.name' "$acl_helper_state")" "$(jq -r '.process.command_line' "$acl_helper_state")")"
+  [ "$helper_status" != unknown ] || die "could not verify whether the ACL Enter helper is active"
+  if [ "$helper_status" = match ]; then
+    if [ -e "$acl_helper_continue" ] && [ ! -L "$acl_helper_continue" ] && [ ! -e "$acl_helper_recovery" ] && [ ! -L "$acl_helper_recovery" ]; then
+      create_marker "$acl_helper_recovery" || die "could not release the in-flight ACL Enter helper for recovery"
+    fi
+    for _ in $(seq 1 800); do
+      helper_status="$(windows_process_status "$helper_pid" "$(jq -r '.process.start_time_utc' "$acl_helper_state")" \
+        "$(jq -r '.process.name' "$acl_helper_state")" "$(jq -r '.process.command_line' "$acl_helper_state")")"
+      [ "$helper_status" = absent ] && break
+      if [ "$helper_status" = unknown ]; then sleep 0.025; continue; fi
+      [ "$helper_status" != mismatch ] || break
+      sleep 0.025
+    done
+    [ "$helper_status" != match ] || die "verified ACL Enter helper did not stop; state retained"
+    [ "$helper_status" != unknown ] || die "ACL Enter helper status remained unknown; state retained"
+  fi
+fi
+
 if [ -e "$ACL_STATE" ] || [ -L "$ACL_STATE" ]; then
   [ -f "$ACL_STATE" ] && [ ! -L "$ACL_STATE" ] || die "ACL restoration state is unsafe"
   real_user_home_win="$(windows_powershell -NoProfile -Command '[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)' | tr -d '\r')"
@@ -265,6 +348,8 @@ if [ -e "$ACL_STATE" ] || [ -L "$ACL_STATE" ]; then
     -WorkspaceRoot "$ROOT/.." -ControllerRoot "$run_root/controller" \
     -UserHome "$real_user_home_win" -StateFile "$ACL_STATE" || die "ACL restoration failed; state retained"
 fi
+rm -f -- "$acl_helper_state" "$acl_helper_continue" "$acl_helper_abort" "$acl_helper_recovery" \
+  || die "could not retire ACL Enter handshake state"
 
 if [ -e "$CANONICAL_AGENT_LOCK" ] || [ -L "$CANONICAL_AGENT_LOCK" ]; then
   [ -d "$CANONICAL_AGENT_LOCK" ] && [ ! -L "$CANONICAL_AGENT_LOCK" ] || die "Agent lock is unsafe"
@@ -284,9 +369,10 @@ if [ -n "$publication_lock_win" ]; then
 fi
 remove_verified_tree "$run_root" "$WORK_ROOT/runs" 'run.' || die "could not remove verified isolated run tree"
 
-update_journal_stage recovery_complete || die "could not mark lifecycle recovery complete"
 rm -f -- "$OWNER_FILE" || die "could not retire recovery lock owner"
 rmdir "$ACL_LOCK" || die "recovery completed but ACL lock could not be released"
 lock_owned=false
+recovery_test_crash recovery_lock_released
+update_journal_stage recovery_complete || die "could not mark lifecycle recovery complete"
 rm -f -- "$RECOVERY_JOURNAL" || die "could not retire lifecycle recovery journal"
 echo "eval-recover: lifecycle recovery complete"

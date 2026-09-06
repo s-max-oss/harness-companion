@@ -4,7 +4,9 @@ param(
     [Parameter(Mandatory = $true)][string]$RepoRoot,
     [Parameter(Mandatory = $true)][string]$Bash,
     [string[]]$Stages = @(
-        'run_root_created', 'agent_lock_acquired', 'guard_active', 'isolation_active',
+        'journal_update_staged', 'run_root_created', 'acl_owner_staged',
+        'agent_lock_acquired', 'guard_active', 'isolation_entering',
+        'isolation_entering_after_state', 'isolation_active',
         'publication_paths_reserved', 'publication_staged', 'run_tree_removed'
     )
 )
@@ -51,7 +53,8 @@ function Invoke-ProductionCrash {
     param(
         [Parameter(Mandatory = $true)][string]$Stage,
         [switch]$SimulatePidReuse,
-        [switch]$StopGuardBeforeRecovery
+        [switch]$StopGuardBeforeRecovery,
+        [switch]$TestRecoveryFinalWindow
     )
     Assert-Idle
     $stdout = Join-Path $testRoot ($Stage + '.stdout.log')
@@ -71,14 +74,33 @@ function Invoke-ProductionCrash {
         $process = Start-Process -FilePath $Bash -WindowStyle Hidden -PassThru `
             -WorkingDirectory $RepoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
             -ArgumentList $arguments
-        $holdTimeoutSeconds = if ($Stage -eq 'isolation_active') { 240 } else { 60 }
+        $holdTimeoutSeconds = if ($Stage -like 'isolation_*') { 240 } else { 60 }
         $deadline = [DateTime]::UtcNow.AddSeconds($holdTimeoutSeconds)
         $observed = $false
         while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
             if (Test-Path -LiteralPath $journal -PathType Leaf) {
                 try {
                     $current = Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json
-                    if ([string]$current.stage -eq $Stage) { $observed = $true; break }
+                    $expectedStage = switch ($Stage) {
+                        'journal_update_staged' { 'planned' }
+                        'acl_owner_staged' { 'run_root_created' }
+                        'isolation_entering_after_state' { 'isolation_entering' }
+                        default { $Stage }
+                    }
+                    $helperReady = $true
+                    if ($Stage -eq 'journal_update_staged') {
+                        $helperReady = Test-Path -LiteralPath ([string]$current.paths.journal_stage) -PathType Leaf
+                    }
+                    if ($Stage -eq 'acl_owner_staged') {
+                        $helperReady = Test-Path -LiteralPath ([string]$current.paths.acl_owner_stage) -PathType Leaf
+                    }
+                    if ($Stage -like 'isolation_entering*') {
+                        $helperReady = Test-Path -LiteralPath ([string]$current.paths.acl_helper_state) -PathType Leaf
+                    }
+                    if ($Stage -eq 'isolation_entering_after_state') {
+                        $helperReady = $helperReady -and (Test-Path -LiteralPath $aclState -PathType Leaf)
+                    }
+                    if ([string]$current.stage -eq $expectedStage -and $helperReady) { $observed = $true; break }
                 } catch {}
             }
             Start-Sleep -Milliseconds 25
@@ -125,9 +147,29 @@ function Invoke-ProductionCrash {
         }
         if ($StopGuardBeforeRecovery) { Stop-OrphanGuard }
 
+        if ($TestRecoveryFinalWindow) {
+            $oldRecoveryExit = $env:HARNESS_EVAL_RECOVERY_TEST_EXIT_STAGE
+            try {
+                foreach ($recoveryStage in @('recovery_owner_staged', 'recovery_journal_staged', 'recovery_lock_released')) {
+                    $env:HARNESS_EVAL_RECOVERY_TEST_EXIT_STAGE = $recoveryStage
+                    & $Bash $Recovery
+                    if ($LASTEXITCODE -ne 99) { throw "recovery final-window seam $recoveryStage returned $LASTEXITCODE instead of 99" }
+                    if (-not (Test-Path -LiteralPath $journal -PathType Leaf)) { throw "$recoveryStage did not retain journal" }
+                }
+            } finally {
+                $env:HARNESS_EVAL_RECOVERY_TEST_EXIT_STAGE = $oldRecoveryExit
+            }
+            if (Test-Path -LiteralPath $aclLock) { throw 'final-window recovery retained released ACL lock' }
+        }
         & $Bash $Recovery
         if ($LASTEXITCODE -ne 0) { throw "production recovery failed at $Stage with exit $LASTEXITCODE" }
-        foreach ($path in @($journal, $aclState, $guardState, $aclLock, $agentLock, $runRoot)) {
+        $helperPaths = @(
+            [string]$record.paths.acl_helper_state,
+            [string]$record.paths.acl_helper_continue,
+            [string]$record.paths.acl_helper_abort,
+            [string]$record.paths.acl_helper_recovery
+        )
+        foreach ($path in @($journal, $aclState, $guardState, $aclLock, $agentLock, $runRoot) + $helperPaths) {
             if (Test-Path -LiteralPath $path) { throw "recovery left stale state after ${Stage}: $path" }
         }
     }
@@ -158,13 +200,17 @@ function Invoke-ProductionCrash {
 try {
     foreach ($stage in $Stages) {
         switch ($stage) {
+            'journal_update_staged' { Invoke-ProductionCrash -Stage $stage }
             'run_root_created' { Invoke-ProductionCrash -Stage $stage }
+            'acl_owner_staged' { Invoke-ProductionCrash -Stage $stage }
             'agent_lock_acquired' { Invoke-ProductionCrash -Stage $stage -SimulatePidReuse }
             'guard_active' { Invoke-ProductionCrash -Stage $stage -StopGuardBeforeRecovery }
+            'isolation_entering' { Invoke-ProductionCrash -Stage $stage }
+            'isolation_entering_after_state' { Invoke-ProductionCrash -Stage $stage }
             'isolation_active' { Invoke-ProductionCrash -Stage $stage }
             'publication_paths_reserved' { Invoke-ProductionCrash -Stage $stage }
             'publication_staged' { Invoke-ProductionCrash -Stage $stage }
-            'run_tree_removed' { Invoke-ProductionCrash -Stage $stage }
+            'run_tree_removed' { Invoke-ProductionCrash -Stage $stage -TestRecoveryFinalWindow }
             default { throw "unsupported recovery test stage: $stage" }
         }
     }

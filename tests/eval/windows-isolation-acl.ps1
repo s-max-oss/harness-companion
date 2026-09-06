@@ -15,7 +15,15 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$StateFile,
 
-    [string]$EvidenceFile
+    [string]$EvidenceFile,
+
+    [string]$ProcessStateFile,
+    [string]$ProcessContinueFile,
+    [string]$ProcessAbortFile,
+    [string]$ProcessRecoveryFile,
+    [string]$ProcessNonce,
+    [string]$RecoveryJournal,
+    [switch]$TestPauseAfterState
 )
 
 $ErrorActionPreference = "Stop"
@@ -302,6 +310,37 @@ function Write-JsonAtomic([object]$Value, [string]$Path) {
     }
 }
 
+function Write-JsonCreateNew([object]$Value, [string]$Path) {
+    $parent = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        throw "process-state parent is missing: $parent"
+    }
+    $json = ($Value | ConvertTo-Json -Depth 8 -Compress) + [Environment]::NewLine
+    $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+    $bytes = $utf8WithoutBom.GetBytes($json)
+    $stream = New-Object System.IO.FileStream(
+        $Path,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::Read
+    )
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Assert-HandshakePath([string]$Path, [string]$Root, [string]$Label) {
+    $full = [IO.Path]::GetFullPath($Path)
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $full.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Label escapes the controller root: $Path"
+    }
+    return $full
+}
+
 $sandboxNames = @("CodexSandboxOffline", "CodexSandboxOnline")
 $sandboxAccounts = foreach ($name in $sandboxNames) {
     $user = Get-LocalUser -Name $name -ErrorAction Stop
@@ -350,6 +389,57 @@ if ($Mode -eq "Leave") {
     exit 0
 }
 
+$handshakeValues = @(
+    $ProcessStateFile, $ProcessContinueFile, $ProcessAbortFile,
+    $ProcessRecoveryFile, $ProcessNonce, $RecoveryJournal
+)
+$hasHandshake = @($handshakeValues | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0
+if ($hasHandshake -and @($handshakeValues | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
+    throw 'ACL Enter process handshake must provide every handshake field'
+}
+if ($TestPauseAfterState -and -not $hasHandshake) {
+    throw 'TestPauseAfterState requires the process handshake'
+}
+
+if ($hasHandshake) {
+    if ($ProcessNonce -notmatch '^[0-9a-f]{64}$') { throw 'invalid ACL Enter process nonce' }
+    $handshakeRoot = Split-Path -Parent ([IO.Path]::GetFullPath($RecoveryJournal))
+    $ProcessStateFile = Assert-HandshakePath $ProcessStateFile $handshakeRoot 'process state path'
+    $ProcessContinueFile = Assert-HandshakePath $ProcessContinueFile $handshakeRoot 'process continue path'
+    $ProcessAbortFile = Assert-HandshakePath $ProcessAbortFile $handshakeRoot 'process abort path'
+    $ProcessRecoveryFile = Assert-HandshakePath $ProcessRecoveryFile $handshakeRoot 'process recovery path'
+    foreach ($path in @($ProcessStateFile, $ProcessContinueFile, $ProcessAbortFile, $ProcessRecoveryFile)) {
+        if (Test-Path -LiteralPath $path) { throw "stale ACL Enter handshake path exists: $path" }
+    }
+    if (-not (Test-Path -LiteralPath $RecoveryJournal -PathType Leaf)) {
+        throw "ACL Enter recovery journal is missing: $RecoveryJournal"
+    }
+    $self = Get-Process -Id $PID -ErrorAction Stop
+    $selfCim = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $PID) -ErrorAction Stop
+    Write-JsonCreateNew ([ordered]@{
+        schema_version = 1
+        nonce = $ProcessNonce
+        recovery_journal = [IO.Path]::GetFullPath($RecoveryJournal)
+        helper_script = [IO.Path]::GetFullPath($PSCommandPath)
+        state_file = $ProcessStateFile
+        continue_file = $ProcessContinueFile
+        abort_file = $ProcessAbortFile
+        recovery_file = $ProcessRecoveryFile
+        process = [ordered]@{
+            pid = [int]$PID
+            start_time_utc = $self.StartTime.ToUniversalTime().ToString('o')
+            name = [string]$selfCim.Name
+            command_line = [string]$selfCim.CommandLine
+        }
+    }) $ProcessStateFile
+
+    while (-not (Test-Path -LiteralPath $ProcessContinueFile -PathType Leaf)) {
+        if (Test-Path -LiteralPath $ProcessAbortFile -PathType Leaf) { exit 3 }
+        Start-Sleep -Milliseconds 25
+    }
+    if (Test-Path -LiteralPath $ProcessAbortFile -PathType Leaf) { exit 3 }
+}
+
 if (Test-Path -LiteralPath $StateFile) {
     throw "stale ACL restoration state exists; restore it before entering: $StateFile"
 }
@@ -374,6 +464,22 @@ Write-JsonAtomic ([pscustomobject]@{
     created_at_utc = [DateTime]::UtcNow.ToString("o")
     paths = @($saved)
 }) $StateFile
+
+if ($TestPauseAfterState) {
+    while (-not (Test-Path -LiteralPath $ProcessRecoveryFile -PathType Leaf)) {
+        if (Test-Path -LiteralPath $ProcessAbortFile -PathType Leaf) {
+            & $PSCommandPath -Mode Leave -WorkspaceRoot $WorkspaceRoot -ControllerRoot $ControllerRoot `
+                -UserHome $UserHome -StateFile $StateFile
+            exit 3
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    if (Test-Path -LiteralPath $ProcessAbortFile -PathType Leaf) {
+        & $PSCommandPath -Mode Leave -WorkspaceRoot $WorkspaceRoot -ControllerRoot $ControllerRoot `
+            -UserHome $UserHome -StateFile $StateFile
+        exit 3
+    }
+}
 
 try {
     foreach ($path in $paths) {

@@ -1152,8 +1152,17 @@ if [ "$SYNTHETIC" = 0 ]; then
     < "$probe_prompt") > "$probe_raw" 2> "$probe_err" || probe_rc=$?
   verify_guarded_executables || die "validated Agent executable guard failed after isolation probe"
   [ "$probe_rc" -eq 0 ] || die "effective isolation probe Agent failed (exit $probe_rc)"
-  [ "$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$probe_raw")" -eq 1 ] \
-    || die "effective isolation probe did not execute exactly one command"
+  probe_command_count="$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution")] | length' "$probe_raw")"
+  if [ "$probe_command_count" -ne 1 ]; then
+    probe_event_summary="$(jq -cs '[.[] | {
+      type,
+      item_type:(.item.type // null),
+      message:(if .type == "error" then ((.message // "")[0:500])
+        elif .item.type == "agent_message" then ((.item.text // "")[0:500])
+        else null end)
+    }]' "$probe_raw" 2>/dev/null || printf '[]')"
+    die "effective isolation probe did not execute exactly one command (count=$probe_command_count events=$probe_event_summary)"
+  fi
   probe_event="$(jq -cs '[.[] | select(.type == "item.completed" and .item.type == "command_execution")][0].item' "$probe_raw")"
   jq -e --arg command "$probe_command" '.command == $command and .status == "completed" and .exit_code == 0' <<< "$probe_event" >/dev/null \
     || die "effective isolation probe command did not match the controller command"

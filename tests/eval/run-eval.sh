@@ -1205,9 +1205,14 @@ if [ "$SYNTHETIC" = 0 ]; then
     || die "effective isolation probe command event was invalid"
   jq -e --arg command "$probe_command" '.command == $command and .status == "completed" and .exit_code == 0' <<< "$probe_event" >/dev/null 2>&1 \
     || die "effective isolation probe command did not match the controller command"
-  probe_output="$(jq -r '.aggregated_output' <<< "$probe_event" 2>/dev/null | tr -d '\r')" \
-    || die "effective isolation probe command output was invalid"
-  probe_result="$(jq -Rcs 'split("\n") | map(select(length > 0)) | last | fromjson' <<< "$probe_output" 2>/dev/null)" \
+  probe_result="$(jq -c '
+    .aggregated_output
+    | split("\n")
+    | map(rtrimstr("\r"))
+    | map(select(length > 0))
+    | last
+    | fromjson
+  ' <<< "$probe_event" 2>/dev/null)" \
     || die "effective isolation probe returned invalid JSON"
   jq -e --arg nonce "$probe_nonce" '
     .nonce == $nonce

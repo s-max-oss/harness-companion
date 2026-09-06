@@ -485,6 +485,7 @@ jq -e --arg expected_probe "$expected_probe" '
   and $e.probe.command_event.exit_code == 0
   and $e.probe.command_event.command == $expected_probe
   and (($e.probe.command_event.aggregated_output
+    | if contains("\u0000") then error("invalid NUL") else . end
     | gsub("\r\n"; "\n")
     | if contains("\r") then error("invalid carriage return") else . end
     | split("\n") | map(select(length > 0)) | last | fromjson) == $e.probe.result)

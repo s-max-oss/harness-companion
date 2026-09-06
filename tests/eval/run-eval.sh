@@ -1207,6 +1207,7 @@ if [ "$SYNTHETIC" = 0 ]; then
     || die "effective isolation probe command did not match the controller command"
   probe_result="$(jq -c '
     .aggregated_output
+    | if contains("\u0000") then error("invalid NUL") else . end
     | gsub("\r\n"; "\n")
     | if contains("\r") then error("invalid carriage return") else . end
     | split("\n")

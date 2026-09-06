@@ -498,6 +498,19 @@ while IFS= read -r case_file; do
       and (.reviewer.session_id | type == "string" and length > 0)
       and .reviewer.tools_disabled == true
       and (.reviewer.session_id as $rid | (.subject.session_ids | index($rid)) == null)
+      and (. as $candidate
+        | [$approved_builds[] | select(.cli_version == $candidate.subject.cli_version)] as $builds
+        | ($builds | length) == 1
+        and (($candidate.agent_runtime.components | keys | sort) == ($builds[0].components | keys | sort))
+        and all($builds[0].components | to_entries[];
+          . as $component
+          | ($candidate.agent_runtime.components[$component.key] | keys | sort) == ["authenticode","sha256","source"]
+          and ($candidate.agent_runtime.components[$component.key].source | type == "string" and endswith("/" + $component.key))
+          and (($candidate.agent_runtime.components[$component.key].sha256 | ascii_downcase) == ($component.value.sha256 | ascii_downcase))
+          and $candidate.agent_runtime.components[$component.key].authenticode.status == "Valid"
+          and $candidate.agent_runtime.components[$component.key].authenticode.subject == $codex_publisher_subject
+          and ($candidate.agent_runtime.components[$component.key].authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
+        ))
       and (.artifact_hashes | keys | sort == ["evaluator_events","isolation","objective_checks","project_brief","reviewer_events","reviewer_output","subject_events","transcript","tree","turn_trees"])
     ' "$latest" >/dev/null 2>&1; then
     confirmed=$((confirmed + 1))

@@ -276,6 +276,25 @@ official_agent_build() {
   bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$1" "$2" "$3"
 }
 
+official_agent_component_build() {
+  bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$1" "$2" "$3" "$4"
+}
+
+verify_agent_component_evidence() {
+  local agent="$1" version="$2" component="$3" executable="$4" expected_sha="$5" expected_identity="$6" actual_identity
+  [[ "$component" =~ ^codex-[a-z0-9-]+[.]exe$ ]] || return 1
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+  jq -e 'type == "object" and keys == ["status","subject","thumbprint"]
+    and all(.status,.subject,.thumbprint; type == "string" and length > 0)' <<< "$expected_identity" >/dev/null \
+    || return 1
+  actual_identity="$(official_agent_identity "$agent" "$executable")" || return 1
+  [ "$(sha "$executable")" = "$expected_sha" ] \
+    && official_agent_component_build "$agent" "$version" "$component" "$expected_sha" \
+    && jq -en --argjson expected "$expected_identity" --argjson actual "$actual_identity" '$actual == $expected' >/dev/null \
+    || return 1
+  printf '%s\n' "$actual_identity"
+}
+
 official_agent_path() {
   local agent="$1" executable="$2" user_home="$3" executable_host home_host install_subpath prefix relative executable_names
   executable_host="$(host_path "$executable")" || return 1
@@ -355,6 +374,15 @@ if [ "${1:-}" = "--verify-runtime-tool-evidence" ]; then
   need cygpath
   verify_runtime_tool_evidence "$2" "$3" "$4" "$5" \
     || die "runtime tool evidence verification failed"
+  exit 0
+fi
+
+if [ "${1:-}" = "--verify-agent-component-evidence" ]; then
+  [ "$#" -eq 7 ] || die "usage: attest-result.sh --verify-agent-component-evidence <agent> <version> <component> <executable> <sha256> <identity-json>"
+  need jq
+  need cygpath
+  verify_agent_component_evidence "$2" "$3" "$4" "$5" "$6" "$7" \
+    || die "Agent runtime component evidence verification failed"
   exit 0
 fi
 
@@ -612,6 +640,34 @@ if [ "$production_trust" = true ]; then
     jq -e --arg role "$role" --argjson actual "$actual_identity" '.[$role].authenticode == $actual' "$snapshot_candidate" >/dev/null \
       || die "$role Authenticode identity mismatch"
   done
+  runtime_agent="$(jq -r '.subject.name // empty' "$snapshot_candidate")"
+  runtime_version="$(jq -r '.subject.cli_version // empty' "$snapshot_candidate")"
+  subject_install_dir="$(dirname "$(jq -r '.subject.executable // empty' "$snapshot_candidate")")"
+  reviewer_install_dir="$(dirname "$(jq -r '.reviewer.executable // empty' "$snapshot_candidate")")"
+  [ "$(host_path "$subject_install_dir")" = "$(host_path "$reviewer_install_dir")" ] \
+    || die "subject and Reviewer runtime directories differ"
+  approved_component_names="$(jq -c --arg agent "$runtime_agent" --arg version "$runtime_version" '
+    [.agents[$agent].approved_builds[]? | select(.cli_version == $version) | .components | keys] | if length == 1 then .[0] | sort else [] end
+  ' "$AGENT_PUBLISHERS" | tr -d '\r\n')"
+  candidate_component_names="$(jq -c '[.agent_runtime.components | keys] | if length == 1 then .[0] | sort else [] end' "$snapshot_candidate" | tr -d '\r\n')"
+  [ "$approved_component_names" != '[]' ] && [ "$candidate_component_names" = "$approved_component_names" ] \
+    || die "candidate Codex runtime component set is incomplete"
+  while IFS= read -r component_name; do
+    component_source="$(jq -r --arg name "$component_name" '.agent_runtime.components[$name].source // empty' "$snapshot_candidate")"
+    expected_component_source="$subject_install_dir/$component_name"
+    [ "$(host_path "$component_source")" = "$(host_path "$expected_component_source")" ] \
+      || die "Codex runtime component path is outside the approved install bundle: $component_name"
+    component_sha="$(jq -r --arg name "$component_name" '.agent_runtime.components[$name].sha256 // empty' "$snapshot_candidate")"
+    component_identity="$(jq -c --arg name "$component_name" '.agent_runtime.components[$name].authenticode' "$snapshot_candidate")"
+    component_snapshot="$tmp/runtime-$component_name"
+    component_manifest="$tmp/runtime-$component_name.manifest.json"
+    snapshot_inputs "$component_manifest" "$component_source" "$component_snapshot" \
+      || die "Codex runtime component could not be snapshotted safely: $component_name"
+    executable_snapshot_manifests+=("$component_manifest")
+    verify_agent_component_evidence "$runtime_agent" "$runtime_version" "$component_name" \
+      "$component_snapshot" "$component_sha" "$component_identity" >/dev/null \
+      || die "Codex runtime component does not match its approved build evidence: $component_name"
+  done < <(jq -r '.[]' <<< "$approved_component_names" | tr -d '\r')
 fi
 
 signer_public="$(ssh-keygen -y -f "$SIGNING_KEY" | tr -d '\r')" || die "could not read signing key"
@@ -671,6 +727,19 @@ jq -e \
     and (.reviewer as $agent | any($approved_builds[]; .cli_version == $agent.cli_version and (.sha256 | ascii_downcase) == $agent.executable_sha256))
     and (.reviewer.session_id | type == "string" and length > 0)
     and (.reviewer.session_id as $rid | (.subject.session_ids | index($rid)) == null)
+    and (. as $candidate
+      | [$approved_builds[] | select(.cli_version == $candidate.subject.cli_version)] as $builds
+      | ($builds | length) == 1
+      and (($candidate.agent_runtime.components | keys | sort) == ($builds[0].components | keys | sort))
+      and all($builds[0].components | to_entries[];
+        . as $component
+        | ($candidate.agent_runtime.components[$component.key] | keys | sort) == ["authenticode","sha256","source"]
+        and ($candidate.agent_runtime.components[$component.key].source | type == "string" and endswith("/" + $component.key))
+        and (($candidate.agent_runtime.components[$component.key].sha256 | ascii_downcase) == ($component.value.sha256 | ascii_downcase))
+        and $candidate.agent_runtime.components[$component.key].authenticode.status == "Valid"
+        and $candidate.agent_runtime.components[$component.key].authenticode.subject == $codex_publisher_subject
+        and ($candidate.agent_runtime.components[$component.key].authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
+      ))
     and (.artifact_hashes | keys | sort == ["evaluator_events","isolation","objective_checks","project_brief","reviewer_events","reviewer_output","subject_events","transcript","tree","turn_trees"])
   ' "$snapshot_candidate" >/dev/null || die "candidate is stale, failed, synthetic, unisolated, or structurally invalid"
 

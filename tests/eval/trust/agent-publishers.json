@@ -31,7 +31,18 @@
       "approved_builds": [
         {
           "cli_version": "codex-cli 0.152.1",
-          "sha256": "0d916cde6e0f5231b24f4d861c7a6c591bbed67925d8a26e1335c18a15e31819"
+          "sha256": "0d916cde6e0f5231b24f4d861c7a6c591bbed67925d8a26e1335c18a15e31819",
+          "components": {
+            "codex-code-mode-host.exe": {
+              "sha256": "e9c629663b687dbaba3b924cde883d419cae4dbe7626bb95ce351ddd266f3b76"
+            },
+            "codex-command-runner.exe": {
+              "sha256": "9fc36072fc7c7c8cf89418e81ede261aeeaa9f80252a9238c431f7f593a2079d"
+            },
+            "codex-windows-sandbox-setup.exe": {
+              "sha256": "c939d1f1bc2f59615ba5a2cfe8063dc94205e6461411de09486abee9490dcca6"
+            }
+          }
         }
       ],
       "install_subpath": "AppData/Local/OpenAI/Codex/bin",

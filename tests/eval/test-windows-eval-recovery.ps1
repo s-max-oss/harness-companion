@@ -239,15 +239,17 @@ try {
 finally {
     if (Test-Path -LiteralPath $testRoot -PathType Container) {
         $removed = $false
-        for ($attempt = 0; $attempt -lt 100 -and -not $removed; $attempt++) {
+        $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        while (-not $removed -and [DateTime]::UtcNow -lt $cleanupDeadline) {
             try {
                 [IO.Directory]::Delete($testRoot, $true)
                 $removed = $true
             }
-            catch [IO.IOException] {
+            catch [IO.IOException], [UnauthorizedAccessException] {
                 [GC]::Collect()
                 [GC]::WaitForPendingFinalizers()
                 Start-Sleep -Milliseconds 50
+                $removed = -not (Test-Path -LiteralPath $testRoot)
             }
         }
         if (-not $removed) { throw "could not retire recovery test logs: $testRoot" }

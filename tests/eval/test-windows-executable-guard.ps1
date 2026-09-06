@@ -9,7 +9,10 @@ $ErrorActionPreference = 'Stop'
 $executables = @(
     (Join-Path $TempRoot 'subject-agent.exe'),
     (Join-Path $TempRoot 'reviewer-agent.exe'),
-    (Join-Path $TempRoot 'codex-powershell.exe')
+    (Join-Path $TempRoot 'codex-powershell.exe'),
+    (Join-Path $TempRoot 'codex-code-mode-host.exe'),
+    (Join-Path $TempRoot 'codex-command-runner.exe'),
+    (Join-Path $TempRoot 'codex-windows-sandbox-setup.exe')
 )
 $executable = $executables[0]
 $manifest = Join-Path $TempRoot 'manifest.json'
@@ -65,7 +68,7 @@ try {
         $readyObject.guard_pid -ne $stateObject.guard_pid -or
         $readyObject.guard_start_time_utc -ne $stateObject.guard_start_time_utc -or
         $readyObject.stop_file -ne $stateObject.stop_file -or
-        $readyObject.handle_count -ne 3 -or @($readyObject.paths).Count -ne 3) {
+        $readyObject.handle_count -ne $executables.Count -or @($readyObject.paths).Count -ne $executables.Count) {
         throw 'guard ready signal and persisted recovery state differ'
     }
 

@@ -335,6 +335,10 @@ official_agent_build() {
   bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$1" "$2" "$3"
 }
 
+official_agent_component_build() {
+  bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$1" "$2" "$3" "$4"
+}
+
 official_agent_path() {
   local agent="$1" executable="$2" user_home="$3" executable_host home_host install_subpath prefix relative executable_names
   executable_host="$(host_path "$executable")" || return 1
@@ -418,6 +422,7 @@ PY
 }
 
 verify_guarded_executables() {
+  local i
   [ "$executable_guard_active" = true ] || return 0
   [ "$(guard_process_status)" = match ] || return 1
   kill -0 "$executable_guard_pid" 2>/dev/null || return 1
@@ -427,6 +432,10 @@ verify_guarded_executables() {
     && [ "$(sha "$reviewer_launch_executable")" = "$reviewer_executable_sha" ] || return 1
   [ -f "$codex_powershell" ] && [ ! -L "$codex_powershell" ] \
     && [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || return 1
+  for ((i = 0; i < ${#component_launch_paths[@]}; i++)); do
+    [ -f "${component_launch_paths[$i]}" ] && [ ! -L "${component_launch_paths[$i]}" ] \
+      && [ "$(sha "${component_launch_paths[$i]}")" = "${component_launch_shas[$i]}" ] || return 1
+  done
 }
 
 guard_process_status() {
@@ -455,12 +464,17 @@ start_executable_guard() {
   local manifest="$controller/executable-guard.manifest.json"
   local ready="$controller/executable-guard.ready.json"
   local stderr="$controller/executable-guard.stderr"
-  local subject_win reviewer_win codex_powershell_guard_win ready_json ready_fd ready_file_json state_json
+  local subject_win reviewer_win codex_powershell_guard_win component_path ready_json ready_fd ready_file_json state_json
+  local -a guard_paths
   subject_win="$(cygpath -w "$subject_launch_executable")" || return 1
   reviewer_win="$(cygpath -w "$reviewer_launch_executable")" || return 1
   codex_powershell_guard_win="$(cygpath -w "$codex_powershell")" || return 1
-  jq -n --arg subject "$subject_win" --arg reviewer "$reviewer_win" --arg wrapper "$codex_powershell_guard_win" \
-    '{schema_version:1,paths:([$subject,$reviewer,$wrapper] | unique)}' > "$manifest" || return 1
+  guard_paths=("$subject_win" "$reviewer_win" "$codex_powershell_guard_win")
+  for component_path in "${component_launch_paths[@]}"; do
+    guard_paths+=("$(cygpath -w "$component_path")") || return 1
+  done
+  printf '%s\n' "${guard_paths[@]}" | jq -Rsc \
+    '{schema_version:1,paths:(split("\n") | map(select(length > 0)) | unique)}' > "$manifest" || return 1
   executable_guard_stop="$controller/executable-guard.stop"
   executable_guard_state="$ROOT/.harness/eval-guard-state.json"
   [ ! -e "$executable_guard_state" ] && [ ! -L "$executable_guard_state" ] || return 1
@@ -918,6 +932,9 @@ subject_launch_executable="$subject_executable"
 reviewer_launch_executable="$reviewer_executable"
 subject_authenticode='null'
 reviewer_authenticode='null'
+agent_runtime_components='{}'
+component_launch_paths=()
+component_launch_shas=()
 subject_launch=("$subject_launch_executable")
 reviewer_launch=("$reviewer_launch_executable")
 if [ "$SYNTHETIC" = 0 ]; then
@@ -952,6 +969,34 @@ if [ "$SYNTHETIC" = 0 ]; then
     || die "reviewer executable version identity is invalid"
   official_agent_build "$AGENT" "$subject_version" "$subject_executable_sha" || die "subject executable is not an approved $AGENT build"
   official_agent_build "$REVIEWER" "$reviewer_version" "$reviewer_executable_sha" || die "reviewer executable is not an approved $REVIEWER build"
+  [ "$AGENT" = codex ] && [ "$REVIEWER" = codex ] && [ "$subject_version" = "$reviewer_version" ] \
+    || die "real eval requires one exact Codex runtime bundle"
+  subject_install_dir="$(cd "$(dirname "$subject_executable")" && pwd -P)" || die "could not resolve subject install directory"
+  reviewer_install_dir="$(cd "$(dirname "$reviewer_executable")" && pwd -P)" || die "could not resolve reviewer install directory"
+  [ "$(host_path "$subject_install_dir")" = "$(host_path "$reviewer_install_dir")" ] \
+    || die "subject and Reviewer do not share one exact Codex runtime bundle"
+  mapfile -t component_names < <(jq -r --arg agent "$AGENT" --arg version "$subject_version" '
+    [.agents[$agent].approved_builds[]? | select(.cli_version == $version) | .components | keys[]] | sort[]
+  ' "$AGENT_PUBLISHERS" | tr -d '\r')
+  [ "${#component_names[@]}" -gt 0 ] || die "approved Codex runtime components are missing"
+  for component_name in "${component_names[@]}"; do
+    [[ "$component_name" =~ ^codex-[a-z0-9-]+[.]exe$ ]] || die "unsafe Codex runtime component name"
+    component_source="$subject_install_dir/$component_name"
+    component_launch="$exec_root/$component_name"
+    [ -f "$component_source" ] && [ ! -L "$component_source" ] || die "approved Codex runtime component is missing: $component_name"
+    snapshot_executable "$component_source" "$component_launch" || die "could not safely snapshot Codex runtime component: $component_name"
+    component_sha="$(sha "$component_launch")"
+    component_identity="$(official_agent_identity "$AGENT" "$component_launch")" \
+      || die "Codex runtime component is not an authentic signed build: $component_name"
+    official_agent_component_build "$AGENT" "$subject_version" "$component_name" "$component_sha" \
+      || die "Codex runtime component is not approved for $subject_version: $component_name"
+    component_launch_paths+=("$component_launch")
+    component_launch_shas+=("$component_sha")
+    agent_runtime_components="$(jq -c \
+      --arg name "$component_name" --arg source "$component_source" --arg sha "$component_sha" \
+      --argjson identity "$component_identity" \
+      '. + {($name):{source:$source,sha256:$sha,authenticode:$identity}}' <<< "$agent_runtime_components")"
+  done
   start_executable_guard || die "could not lock the validated Agent executables and PowerShell wrapper"
   verify_guarded_executables || die "validated executable guard failed immediately after acquisition"
   codex_powershell_locked_authenticode="$(official_runtime_tool_identity codex_powershell "$codex_powershell")" \
@@ -1486,10 +1531,11 @@ jq -n \
   --arg subject_name "$AGENT" --arg subject_executable "$subject_executable" --arg subject_executable_sha256 "$subject_executable_sha" --arg subject_cli_version "$subject_version" --arg subject_model "$MODEL" \
   --arg reviewer_name "$REVIEWER" --arg reviewer_executable "$reviewer_executable" --arg reviewer_executable_sha256 "$reviewer_executable_sha" --arg reviewer_cli_version "$reviewer_version" --arg reviewer_model "$REVIEWER_MODEL" --arg reviewer_session_id "$reviewer_session" \
   --argjson subject_authenticode "$subject_authenticode" --argjson reviewer_authenticode "$reviewer_authenticode" \
+  --argjson agent_runtime_components "$agent_runtime_components" \
   --argjson subject_session_ids "$subject_sessions" --argjson passed "$passed" --argjson synthetic "$([ "$SYNTHETIC" = 1 ] && echo true || echo false)" \
   --argjson release_eligible "$release_eligible" --argjson rubric_details "$rubric_details" --argjson artifact_hashes "$artifact_hashes" \
   --slurpfile objective_checks "$objective_checks" \
-  '{schema_version:3,case:$case,case_version:$case_version,spec_version:"2.0.0-rc.3",scenario_ref:$scenario_ref,timestamp:$timestamp,passed:$passed,synthetic:$synthetic,release_eligible:$release_eligible,rubric_score:$rubric_score,rubric_details:$rubric_details,objective_checks:$objective_checks,reviewer_verdict:$reviewer_verdict,notes:$notes,authority:{case_sha256:$case_sha256,skill_sha256:$skill_sha256,runtime_manifest_sha256:$runtime_manifest_sha256,runner_sha256:$runner_sha256,reviewer_schema_sha256:$reviewer_schema_sha256,canonical_rubric_sha256:$canonical_rubric_sha256,attester_sha256:$attester_sha256,isolation_helper_sha256:$isolation_helper_sha256,isolation_recovery_sha256:$isolation_recovery_sha256,isolation_probe_sha256:$isolation_probe_sha256,probe_command_validator_sha256:$probe_command_validator_sha256,executable_guard_sha256:$executable_guard_sha256,agent_publishers_sha256:$agent_publishers_sha256,agent_build_verifier_sha256:$agent_build_verifier_sha256,publisher_sha256:$publisher_sha256},subject:{name:$subject_name,executable:$subject_executable,executable_sha256:$subject_executable_sha256,authenticode:$subject_authenticode,cli_version:$subject_cli_version,model:$subject_model,session_ids:$subject_session_ids},reviewer:{name:$reviewer_name,executable:$reviewer_executable,executable_sha256:$reviewer_executable_sha256,authenticode:$reviewer_authenticode,cli_version:$reviewer_cli_version,model:$reviewer_model,session_id:$reviewer_session_id,tools_disabled:true},isolation:{kind:(if $synthetic then "synthetic-fake-cli" else "windows-native-elevated-acl" end),source_workspace_denied:($synthetic|not),user_home_denied:($synthetic|not),controller_denied:($synthetic|not)},artifact_hashes:$artifact_hashes,attestation:{required:($synthetic|not),status:(if $synthetic then "not-applicable" else "pending" end),identity:null,namespace:null,signer_fingerprint:null}}' \
+  '{schema_version:3,case:$case,case_version:$case_version,spec_version:"2.0.0-rc.3",scenario_ref:$scenario_ref,timestamp:$timestamp,passed:$passed,synthetic:$synthetic,release_eligible:$release_eligible,rubric_score:$rubric_score,rubric_details:$rubric_details,objective_checks:$objective_checks,reviewer_verdict:$reviewer_verdict,notes:$notes,authority:{case_sha256:$case_sha256,skill_sha256:$skill_sha256,runtime_manifest_sha256:$runtime_manifest_sha256,runner_sha256:$runner_sha256,reviewer_schema_sha256:$reviewer_schema_sha256,canonical_rubric_sha256:$canonical_rubric_sha256,attester_sha256:$attester_sha256,isolation_helper_sha256:$isolation_helper_sha256,isolation_recovery_sha256:$isolation_recovery_sha256,isolation_probe_sha256:$isolation_probe_sha256,probe_command_validator_sha256:$probe_command_validator_sha256,executable_guard_sha256:$executable_guard_sha256,agent_publishers_sha256:$agent_publishers_sha256,agent_build_verifier_sha256:$agent_build_verifier_sha256,publisher_sha256:$publisher_sha256},subject:{name:$subject_name,executable:$subject_executable,executable_sha256:$subject_executable_sha256,authenticode:$subject_authenticode,cli_version:$subject_cli_version,model:$subject_model,session_ids:$subject_session_ids},reviewer:{name:$reviewer_name,executable:$reviewer_executable,executable_sha256:$reviewer_executable_sha256,authenticode:$reviewer_authenticode,cli_version:$reviewer_cli_version,model:$reviewer_model,session_id:$reviewer_session_id,tools_disabled:true},agent_runtime:{components:$agent_runtime_components},isolation:{kind:(if $synthetic then "synthetic-fake-cli" else "windows-native-elevated-acl" end),source_workspace_denied:($synthetic|not),user_home_denied:($synthetic|not),controller_denied:($synthetic|not)},artifact_hashes:$artifact_hashes,attestation:{required:($synthetic|not),status:(if $synthetic then "not-applicable" else "pending" end),identity:null,namespace:null,signer_fingerprint:null}}' \
   > "$stage/$base.json"
 
 publish_args=()

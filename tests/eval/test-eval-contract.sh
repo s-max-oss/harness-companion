@@ -145,7 +145,7 @@ if python "$EVAL/validate-probe-command.py" "$(printf '%s\r' "$probe_display" | 
 else
   ok "probe command validator rejects forbidden control bytes"
 fi
-check "real executable guard includes the trusted Codex PowerShell wrapper" bash -c 'grep -Fq -- "--arg wrapper" "$1" && grep -Fq -- "codex_powershell_guard_win" "$1" && grep -Fq -- "sha \"\$codex_powershell\"" "$1"' _ "$EVAL/run-eval.sh"
+check "real executable guard includes the trusted Codex PowerShell wrapper" bash -c 'grep -Fq -- "guard_paths=(\"\$subject_win\" \"\$reviewer_win\" \"\$codex_powershell_guard_win\")" "$1" && grep -Fq -- "sha \"\$codex_powershell\"" "$1" && grep -Fq -- "codex_powershell_locked_authenticode" "$1"' _ "$EVAL/run-eval.sh"
 approved_version="$(jq -r '.agents.codex.approved_builds[0].cli_version' "$EVAL/trust/agent-publishers.json")"
 approved_digest="$(jq -r '.agents.codex.approved_builds[0].sha256' "$EVAL/trust/agent-publishers.json")"
 check "shared production build verifier accepts the exact approved tuple" bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex "$approved_version" "$approved_digest"
@@ -154,7 +154,16 @@ if bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex 
 else
   ok "shared production build verifier rejects a non-approved digest"
 fi
+approved_component_name="$(jq -r '.agents.codex.approved_builds[0].components | keys[0]' "$EVAL/trust/agent-publishers.json")"
+approved_component_digest="$(jq -r --arg component "$approved_component_name" '.agents.codex.approved_builds[0].components[$component].sha256' "$EVAL/trust/agent-publishers.json")"
+check "shared production build verifier accepts an approved runtime component" bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex "$approved_version" "$approved_component_name" "$approved_component_digest"
+if bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex "$approved_version" "$approved_component_name" "${approved_component_digest%?}0" >/dev/null 2>&1; then
+  bad "shared production build verifier rejects a non-approved runtime component digest"
+else
+  ok "shared production build verifier rejects a non-approved runtime component digest"
+fi
 check "real eval launches only handle-locked executable snapshots" bash -c 'grep -Fq "snapshot_executable \"\$subject_executable\" \"\$subject_launch_executable\"" "$1" && grep -Fq "start_executable_guard" "$1" && grep -Fq "verify_guarded_executables" "$1" && grep -Fq "FileShare]::Read" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/windows-executable-guard.ps1"
+check "real eval snapshots and guards the complete approved Codex runtime bundle" bash -c 'grep -Fq "approved Codex runtime components are missing" "$1" && grep -Fq "component_launch_paths" "$1" && grep -Fq "official_agent_component_build" "$1"' _ "$EVAL/run-eval.sh"
 check "probe invokes only hash-bound absolute system executables" bash -c 'grep -Fq "WINDOWS_POWERSHELL=\"/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe\"" "$1" && grep -Fq "WINDOWS_WHOAMI=\"/c/Windows/System32/whoami.exe\"" "$1" && grep -Fq "probe.executables" "$2" && ! grep -Fq "cmd.exe /d /c" "$1" && ! grep -Fq "& whoami.exe" "$3"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh" "$EVAL/windows-isolation-probe.ps1"
 check "all probe evidence parsers reject non-CRLF carriage returns" bash -c '
   for f in "$@"; do
@@ -220,6 +229,26 @@ if command -v powershell.exe >/dev/null 2>&1; then
   else
     ok "attester rejects PowerShell wrapper byte drift"
   fi
+  live_codex="$(command -v codex)"
+  live_codex_dir="$(cd "$(dirname "$live_codex")" && pwd -P)"
+  live_codex_version="$("$live_codex" --version | head -1)"
+  live_component_name='codex-code-mode-host.exe'
+  live_component="$live_codex_dir/$live_component_name"
+  live_component_sha="$(sha256sum "$live_component" | cut -d ' ' -f 1)"
+  live_component_identity="$(jq -cn \
+    --arg status Valid \
+    --arg subject "$(jq -r '.agents.codex.publisher_subject' "$EVAL/trust/agent-publishers.json")" \
+    --arg thumbprint "$(jq -r '.agents.codex.publisher_thumbprints[0]' "$EVAL/trust/agent-publishers.json")" \
+    '{status:$status,subject:$subject,thumbprint:$thumbprint}')"
+  check "attester behaviorally verifies an approved Codex runtime component" bash "$EVAL/attest-result.sh" \
+    --verify-agent-component-evidence codex "$live_codex_version" "$live_component_name" "$live_component" "$live_component_sha" "$live_component_identity"
+  forged_component_identity="$(jq -c '.subject = "CN=Forged"' <<< "$live_component_identity")"
+  if bash "$EVAL/attest-result.sh" --verify-agent-component-evidence codex "$live_codex_version" \
+    "$live_component_name" "$live_component" "$live_component_sha" "$forged_component_identity" >/dev/null 2>&1; then
+    bad "attester rejects forged Codex runtime component identity"
+  else
+    ok "attester rejects forged Codex runtime component identity"
+  fi
   check "production runner crash recovery covers lifecycle stages, PID reuse, and partial cleanup" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-eval-recovery.ps1" -Runner "$(cygpath -w "$EVAL/run-eval.sh")" -Recovery "$(cygpath -w "$EVAL/recover-windows-isolation.sh")" -RepoRoot "$(cygpath -w "$ROOT")" -Bash 'C:\Program Files\Git\bin\bash.exe'
   mkdir -p "$TMP/shadow-bin"
   printf '#!/bin/bash\nprintf shadow > "%s"\nexit 99\n' "$TMP/shadow-hit" > "$TMP/shadow-bin/powershell.exe"
@@ -237,6 +266,8 @@ else
   ok "PowerShell wrapper Authenticode integration is Windows-only"
   ok "PowerShell wrapper forged-identity rejection is Windows-only"
   ok "PowerShell wrapper byte-drift rejection is Windows-only"
+  ok "Codex runtime component verification is Windows-only"
+  ok "Codex runtime component forged-identity rejection is Windows-only"
   ok "Windows crash recovery integration is Windows-only"
   ok "absolute system-tool shadow integration is Windows-only"
 fi
@@ -515,7 +546,8 @@ test_publisher_subject="$(jq -r '.agents.codex.publisher_subject' "$EVAL/trust/a
 test_publisher_thumbprint="$(jq -r '.agents.codex.publisher_thumbprints[0]' "$EVAL/trust/agent-publishers.json")"
 test_approved_version="$(jq -r '.agents.codex.approved_builds[0].cli_version' "$EVAL/trust/agent-publishers.json")"
 test_approved_sha="$(jq -r '.agents.codex.approved_builds[0].sha256' "$EVAL/trust/agent-publishers.json")"
-jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher_subject" --arg publisher_thumbprint "$test_publisher_thumbprint" --arg approved_version "$test_approved_version" --arg approved_sha "$test_approved_sha" '
+test_approved_components="$(jq -c '.agents.codex.approved_builds[0].components' "$EVAL/trust/agent-publishers.json")"
+jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher_subject" --arg publisher_thumbprint "$test_publisher_thumbprint" --arg approved_version "$test_approved_version" --arg approved_sha "$test_approved_sha" --argjson approved_components "$test_approved_components" '
   .synthetic=false
   | .release_eligible=false
   | .reviewer_verdict="REVIEWED"
@@ -525,6 +557,9 @@ jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher
   | .reviewer.executable_sha256=$approved_sha
   | .reviewer.cli_version=$approved_version
   | .reviewer.authenticode={status:"Valid",subject:$publisher_subject,thumbprint:$publisher_thumbprint}
+  | .agent_runtime.components=($approved_components | with_entries(
+      .value={source:("/approved-codex-runtime/" + .key),sha256:.value.sha256,authenticode:{status:"Valid",subject:$publisher_subject,thumbprint:$publisher_thumbprint}}
+    ))
   | .isolation={kind:"windows-native-elevated-acl",source_workspace_denied:true,user_home_denied:true,controller_denied:true}
   | .artifact_hashes.isolation=$isolation_sha
   | .attestation={required:true,status:"pending",identity:null,namespace:null,signer_fingerprint:null}

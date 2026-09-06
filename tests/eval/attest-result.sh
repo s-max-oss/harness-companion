@@ -485,7 +485,9 @@ jq -e --arg expected_probe "$expected_probe" '
   and $e.probe.command_event.exit_code == 0
   and $e.probe.command_event.command == $expected_probe
   and (($e.probe.command_event.aggregated_output
-    | split("\n") | map(rtrimstr("\r")) | map(select(length > 0)) | last | fromjson) == $e.probe.result)
+    | gsub("\r\n"; "\n")
+    | if contains("\r") then error("invalid carriage return") else . end
+    | split("\n") | map(select(length > 0)) | last | fromjson) == $e.probe.result)
   and ($e.probe.payload | keys | sort == ["controller_file","nonce","source_file","target_file","user_home","whoami_file"])
   and ($e.probe.executables | keys | sort == ["powershell","whoami"])
   and (all($e.probe.executables[]; (.path | type == "string" and length > 0) and (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))))
@@ -504,7 +506,7 @@ jq -e --arg expected_probe "$expected_probe" '
   and $e.probe.result.user_home_readable == false
   and ($e.probe.sanitized_path | type == "array" and length >= 4
     and all(.[]; type == "string" and length > 0 and ((ascii_downcase | contains("/users/")) | not)))
-  ' "$snapshot_base.isolation.json" >/dev/null || die "isolation evidence is incomplete"
+  ' "$snapshot_base.isolation.json" >/dev/null 2>&1 || die "isolation evidence is incomplete"
 
 executable_snapshot_manifests=()
 if [ "$production_trust" = true ]; then

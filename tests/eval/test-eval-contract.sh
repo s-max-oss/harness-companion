@@ -119,13 +119,28 @@ else
 fi
 check "real eval launches only handle-locked executable snapshots" bash -c 'grep -Fq "snapshot_executable \"\$subject_executable\" \"\$subject_launch_executable\"" "$1" && grep -Fq "start_executable_guard" "$1" && grep -Fq "verify_guarded_executables" "$1" && grep -Fq "FileShare]::Read" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/windows-executable-guard.ps1"
 check "probe invokes only hash-bound absolute system executables" bash -c 'grep -Fq "WINDOWS_POWERSHELL=\"/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe\"" "$1" && grep -Fq "WINDOWS_WHOAMI=\"/c/Windows/System32/whoami.exe\"" "$1" && grep -Fq "probe.executables" "$2" && ! grep -Fq "cmd.exe /d /c" "$1" && ! grep -Fq "& whoami.exe" "$3"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh" "$EVAL/windows-isolation-probe.ps1"
-check "all probe evidence parsers preserve embedded carriage returns" bash -c '
+check "all probe evidence parsers reject non-CRLF carriage returns" bash -c '
   for f in "$@"; do
-    grep -Fq '\''map(rtrimstr("\r"))'\'' "$f" || exit 1
+    grep -Fq '\''gsub("\r\n"; "\n")'\'' "$f" || exit 1
+    grep -Fq '\''contains("\r")'\'' "$f" || exit 1
     ! grep -Fq '\''gsub("\r"; "")'\'' "$f" || exit 1
   done
   ! grep -Fq '\''probe_output='\'' "$1"
 ' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh" "$EVAL/check-results.sh"
+probe_output_filter='
+  gsub("\r\n"; "\n")
+  | if contains("\r") then error("invalid carriage return") else . end
+  | split("\n") | map(select(length > 0)) | last | fromjson
+'
+if printf 'noise\r\n{"flag":true}\r\n' | jq -Rce "$probe_output_filter" > "$TMP/probe-crlf.json" 2>/dev/null \
+  && jq -e '.flag == true' "$TMP/probe-crlf.json" >/dev/null \
+  && ! printf '{"flag":tr\rue}\n' | jq -Rce "$probe_output_filter" >/dev/null 2>&1 \
+  && ! printf '{"flag":true}\r\r\n' | jq -Rce "$probe_output_filter" >/dev/null 2>&1 \
+  && ! printf '{"flag":tr\0ue}\n' | jq -Rce "$probe_output_filter" >/dev/null 2>&1; then
+  ok "probe output policy accepts CRLF and rejects embedded CR, extra CR, and NUL"
+else
+  bad "probe output policy accepts CRLF and rejects embedded CR, extra CR, and NUL"
+fi
 check "release gate reconstructs Windows evidence from versioned policy without host binaries" bash -c '! grep -Fq "sha \"\$WINDOWS_POWERSHELL\"" "$1" && ! grep -Fq "sha \"\$WINDOWS_WHOAMI\"" "$1" && grep -Fq "windows_system_tools.powershell" "$1"' _ "$EVAL/check-results.sh"
 check "Windows canonical path comparisons are case-normalized" bash -c 'grep -Fq "output_host=\"\$(host_path" "$1" && grep -Fq "allowed_signers_host=\"\$(host_path" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh"
 check "release gate performs a concluding set-wide evidence pass" grep -Fq 'evidence source set changed during concluding verification' "$EVAL/check-results.sh"

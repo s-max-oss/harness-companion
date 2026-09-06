@@ -1207,8 +1207,9 @@ if [ "$SYNTHETIC" = 0 ]; then
     || die "effective isolation probe command did not match the controller command"
   probe_result="$(jq -c '
     .aggregated_output
+    | gsub("\r\n"; "\n")
+    | if contains("\r") then error("invalid carriage return") else . end
     | split("\n")
-    | map(rtrimstr("\r"))
     | map(select(length > 0))
     | last
     | fromjson

@@ -38,9 +38,13 @@ round focused on the subject the user is currently clarifying.
 - Do not impose a numeric question limit. Use the smallest coherent round that
   moves the Brief forward.
 - If the user gives a detailed answer, infer more and ask less.
-- If the user says “I don't know” or “use sensible defaults,” explain the
-  defaults plainly and include them in the confirmation rather than continuing
-  to interrogate the user.
+- If the user says “I don't know” or “use sensible defaults,” explain and apply
+  only the documented Project Brief defaults, and include them in the
+  confirmation rather than continuing to interrogate the user. This is not
+  permission to invent product or implementation defaults such as a framework,
+  database, UI architecture, authentication, or deployment choice. Keep those
+  optional choices explicitly deferred unless the user supplies them and the
+  Brief schema can represent them losslessly.
 - Do not optimize optional fields the user did not ask about.
 
 Prefer language at the user's level. Translate Harness terms before using them:
@@ -90,6 +94,11 @@ As answers arrive, preserve confirmed fields and revise only the fields the user
 changes. When required fields are complete, present a compact, readable Brief
 with source annotations. Explain any important default or unresolved optional
 item in plain language.
+
+The displayed confirmation and the executor input are one contract. Every
+decision shown for approval must have a lossless machine-readable counterpart
+in the exact Brief sent to the executor. Never obtain approval for a richer
+human Brief and silently discard fields while constructing its JSON form.
 
 The confirmation choices are:
 

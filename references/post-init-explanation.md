@@ -16,6 +16,13 @@ Use only facts from the confirmed Brief, repository evidence, executor result,
 and post-init file state. Do not claim that a file was created when it was
 preserved, or that a value was inferred when it came from a default.
 
+Before sending the explanation, reconcile three views: the human Brief the
+user approved, the exact machine-readable Brief passed to the executor, and
+the resulting `PROJECT_BRIEF.json`. They must describe the same decisions. If
+the approved presentation contained a choice that the executed Brief could
+not represent, treat that as a failed consent boundary rather than presenting
+initialization as fully successful. Never silently drop the choice.
+
 ## Generated
 
 Summarize what the executor actually created or updated.
@@ -65,6 +72,12 @@ resolved and for which the confirmed Brief accepted a default.
 - Prioritize defaults the user may reasonably want to revisit, such as
   delivery cadence or secret-handling strategy.
 - Do not describe an explicit user choice as a default.
+- Account for every entry in the confirmed Brief's `defaults_applied` array,
+  grouping related operation preferences in one sentence when useful. Do not
+  replace the actual list with a selective summary that omits values such as
+  a null deadline.
+- Do not report product or implementation choices as defaults unless they were
+  explicitly supplied by the user and represented in the executed Brief.
 
 Example:
 
@@ -77,6 +90,10 @@ Example:
 List optional decisions that remain unresolved after the confirmed Brief.
 
 - Say what is undecided and whether it blocks any current work.
+- Keep optional product and implementation decisions here when no documented,
+  machine-representable Brief default resolves them. A request for “sensible
+  defaults” does not by itself choose a framework, database, UI architecture,
+  authentication, or deployment approach.
 - Never label an execution-critical conflict as deferred. `goal`,
   `success_criteria`, the primary-stack `detected_type`, and
   `initial_project_state.is_git_repo` must already have been resolved before a

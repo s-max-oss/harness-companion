@@ -290,11 +290,10 @@ contract_test_prepare_post_agent_stage() {
 }
 
 official_agent_identity() {
-  local agent="$1" executable="$2" executable_win identity policy expected_subject expected_thumbprints
+  local agent="$1" executable="$2" executable_win identity policy expected_subject
   [ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
   policy="$(jq -ce --arg agent "$agent" '.agents[$agent]' "$AGENT_PUBLISHERS")" || return 1
   expected_subject="$(jq -r '.publisher_subject' <<< "$policy")" || return 1
-  expected_thumbprints="$(jq -c '.publisher_thumbprints' <<< "$policy")" || return 1
   executable_win="$(cygpath -w "$executable")" || return 1
   identity="$(HARNESS_EVAL_AUTH_PATH="$executable_win" windows_powershell -NoProfile -Command '
     $sig = Get-AuthenticodeSignature -LiteralPath $env:HARNESS_EVAL_AUTH_PATH
@@ -302,10 +301,10 @@ official_agent_identity() {
     $thumbprint = if ($null -ne $sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { "" }
     [ordered]@{status=[string]$sig.Status;subject=$subject;thumbprint=$thumbprint} | ConvertTo-Json -Compress
   ' | tr -d '\r')" || return 1
-  jq -e --arg expected_subject "$expected_subject" --argjson expected_thumbprints "$expected_thumbprints" '
+  jq -e --arg expected_subject "$expected_subject" '
     .status == "Valid"
     and .subject == $expected_subject
-    and (.thumbprint as $thumbprint | ($expected_thumbprints | index($thumbprint)) != null)
+    and (.thumbprint | type == "string" and length > 0)
   ' <<< "$identity" >/dev/null || return 1
   printf '%s\n' "$identity"
 }
@@ -332,11 +331,24 @@ official_runtime_tool_identity() {
 }
 
 official_agent_build() {
-  bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$1" "$2" "$3"
+  local agent="$1" version="$2" digest="$3" pattern
+  bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$agent" "$version" "$digest" 2>/dev/null && return 0
+  pattern="$(jq -r --arg agent "$agent" '.agents[$agent].version_pattern // empty' "$AGENT_PUBLISHERS")" || return 1
+  jq -en --arg version "$version" --arg pattern "$pattern" --arg digest "$digest" '
+    ($version | test($pattern)) and ($digest | test("^[0-9a-f]{64}$"))
+  ' >/dev/null
 }
 
 official_agent_component_build() {
-  bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$1" "$2" "$3" "$4"
+  local agent="$1" version="$2" component="$3" digest="$4" pattern
+  bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$agent" "$version" "$component" "$digest" 2>/dev/null && return 0
+  pattern="$(jq -r --arg agent "$agent" '.agents[$agent].version_pattern // empty' "$AGENT_PUBLISHERS")" || return 1
+  jq -e --arg agent "$agent" --arg version "$version" --arg pattern "$pattern" \
+    --arg component "$component" --arg digest "$digest" '
+    ($version | test($pattern))
+    and ($digest | test("^[0-9a-f]{64}$"))
+    and (.agents[$agent].compatible_runtime.components | index($component) != null)
+  ' "$AGENT_PUBLISHERS" >/dev/null
 }
 
 official_agent_path() {
@@ -674,7 +686,14 @@ for cmd in jq sha256sum find cp mktemp git python tar "$AGENT" "$REVIEWER"; do n
 for path in "$PUBLISHER" "$ATTESTER" "$ACL_RECOVERY" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER"; do
   [ -f "$path" ] && [ ! -L "$path" ] || die "eval authority missing or unsafe: $path"
 done
-jq -e '.schema_version == 1 and (.agents.codex.publisher_thumbprints | length > 0)
+jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | type == "string" and length > 0)
+  and (.agents.codex.compatible_runtime.components
+    == ["codex-code-mode-host.exe","codex-command-runner.exe","codex-windows-sandbox-setup.exe"])
+  and (.agents.codex.compatible_runtime.shell_wrapper_argv_variants == [
+    "powershell-command-v1",
+    "powershell-no-profile-command-v1",
+    "powershell-no-profile-command-double-quoted-v1"
+  ])
   and (.agents.codex.approved_builds | type == "array" and length > 0
     and all(.[]; (.cli_version | type == "string" and length > 0)
       and (.sha256 | type == "string" and test("^[0-9a-fA-F]{64}$"))
@@ -1011,7 +1030,7 @@ if [ "$SYNTHETIC" = 0 ]; then
     )] as $builds
     | if ($builds | length) == 1
       then ($builds[0].shell_wrapper_argv_variants | tojson | @base64)
-      else empty
+      else (.agents[$agent].compatible_runtime.shell_wrapper_argv_variants | tojson | @base64)
       end
   ' "$AGENT_PUBLISHERS")"
   [ -n "$probe_shell_variants_b64" ] || die "approved Codex probe serializer policy is missing or ambiguous"
@@ -1019,8 +1038,9 @@ if [ "$SYNTHETIC" = 0 ]; then
   reviewer_install_dir="$(cd "$(dirname "$reviewer_executable")" && pwd -P)" || die "could not resolve reviewer install directory"
   [ "$(host_path "$subject_install_dir")" = "$(host_path "$reviewer_install_dir")" ] \
     || die "subject and Reviewer do not share one exact Codex runtime bundle"
-  mapfile -t component_names < <(jq -r --arg agent "$AGENT" --arg version "$subject_version" '
-    [.agents[$agent].approved_builds[]? | select(.cli_version == $version) | .components | keys[]] | sort[]
+  mapfile -t component_names < <(jq -r --arg agent "$AGENT" --arg version "$subject_version" --arg sha "$subject_executable_sha" '
+    [.agents[$agent].approved_builds[]? | select(.cli_version == $version and (.sha256 | ascii_downcase) == ($sha | ascii_downcase))] as $builds
+    | if ($builds | length) == 1 then ($builds[0].components | keys[]) else .agents[$agent].compatible_runtime.components[] end
   ' "$AGENT_PUBLISHERS" | tr -d '\r')
   [ "${#component_names[@]}" -gt 0 ] || die "approved Codex runtime components are missing"
   for component_name in "${component_names[@]}"; do

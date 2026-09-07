@@ -161,10 +161,11 @@ fi
 check "production probe derives the observed system wrapper" grep -Fq 'codex_shell_wrapper_win="$system_root_win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"' "$EVAL/run-eval.sh"
 check "production probe validator uses the observed system wrapper and build policy" bash -c 'grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1"' _ "$EVAL/run-eval.sh"
 check "production inner probe stays profile-free and binds a guarded script plus payload hash" bash -c 'grep -Fq -- "-NoProfile -ExecutionPolicy Bypass -File" "$1" && grep -Fq -- "-ExpectedPayloadSha256" "$1" && grep -Fq "probe_script_guard_win" "$1"' _ "$EVAL/run-eval.sh"
-check "failed access-boundary probes emit only a path-free boolean summary" bash -c 'grep -Fq "nonce_match:" "$1" && grep -Fq "payload_sha_match:" "$1" && grep -Fq "offline_identity:" "$1" && grep -Fq "did not prove the required access boundary: \$probe_boundary_summary" "$1" && ! grep -Fq "did not prove the required access boundary: \$probe_result" "$1"' _ "$EVAL/run-eval.sh"
+check "failed access-boundary probes emit only a path-free boolean summary" bash -c 'grep -Fq "nonce_match:(.nonce == \$nonce)" "$1" && grep -Fq "payload_sha_match:(.payload_sha256 == \$payload_sha)" "$1" && grep -Fq "target_file_readable:(.target_file_readable == true)" "$1" && grep -Fq "source_workspace_readable:(.source_workspace_readable == true)" "$1" && grep -Fq "did not prove the required access boundary: \$probe_boundary_summary" "$1" && ! grep -Fq "did not prove the required access boundary: \$probe_result" "$1"' _ "$EVAL/run-eval.sh"
 check "all real Codex exec calls disable login shells" bash -c '[ "$(grep -c "allow_login_shell=false" "$1")" -eq 3 ]' _ "$EVAL/run-eval.sh"
 check "attester binds the exact serializer variant to the evidence and build policy" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1"' _ "$EVAL/attest-result.sh"
 check "result gate binds the exact serializer variant without a host PowerShell call" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1" && ! grep -Fq "windows_powershell()" "$1"' _ "$EVAL/check-results.sh"
+check "attester and result gate bind source ACL evidence to live roots and account SIDs" bash -c 'for f in "$@"; do grep -Fq "windows_sandbox_accounts_json" "$f" && grep -Fq "canonical_source_host" "$f" && grep -Fq "canonical_workspace_host" "$f" && grep -Fq "live_sandbox_accounts" "$f" || exit 1; done' _ "$EVAL/attest-result.sh" "$EVAL/check-results.sh"
 check "evidence-bound wrapper comparison accepts deterministic Windows case drift" python "$EVAL/validate-probe-command.py" --same-windows-path 'C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe' 'c:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 if python "$EVAL/validate-probe-command.py" --same-windows-path 'C:\Windowſ\System32\WindowsPowerShell\v1.0\powershell.exe' 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' >/dev/null 2>&1; then
   bad "evidence-bound wrapper comparison rejects Unicode case-fold lookalikes"
@@ -271,7 +272,7 @@ check "ACL state captures and restores DACL only without SeSecurityPrivilege" ba
 check "ACL recovery skips only an explicit ItemNotFoundException" grep -Fq 'catch [System.Management.Automation.ItemNotFoundException]' "$EVAL/windows-isolation-acl.ps1"
 check "ACL recovery binds a stable Windows file identity" bash -c 'grep -Fq "GetFileInformationByHandle" "$1" && grep -Fq "expectedIdentity" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
 check "ACL reads and writes use verified open handles, not pathname ACL APIs" bash -c 'grep -Fq "GetKernelObjectSecurity" "$1" && grep -Fq "SetSecurityInfo" "$1" && ! grep -Eq "Get-Acl|^[[:space:]]*Set-Acl|[.]SetAccessControl[(]" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
-check "ACL helper directly denies and identity-binds the exact probed source file" bash -c 'grep -Fq "SourceFile is required" "$1" && grep -Fq "kind = '\''file'\''" "$1" && grep -Fq "FileSecurity" "$1" && grep -Fq "source_file_deny" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
+check "ACL helper directly denies and identity-binds the exact probed source file" bash -c 'grep -Fq "SourceFile is required" "$1" && grep -Fq "kind = '\''file'\''" "$1" && grep -Fq "FileSecurity" "$1" && grep -Fq -- "-not \$_.IsInherited" "$1" && grep -Fq "source_file_deny" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
 if command -v powershell.exe >/dev/null 2>&1; then
   check "Windows ACL helper round-trips DACL and retains failed recovery state" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-isolation-acl.ps1" -Helper "$EVAL/windows-isolation-acl.ps1"
   mkdir -p "$TMP/executable-guard-test"
@@ -598,7 +599,11 @@ test_whoami_sha="$(sha256sum "$test_whoami_posix" | cut -d ' ' -f 1)"
 test_probe_run_token='0000000000000000000000000000000000000000000000000000000000000000'
 test_probe_run_root_win="C:\\Users\\Public\\harness-companion-eval\\runs\\run.$test_probe_run_token"
 test_probe_controller_root="C:/Users/Public/harness-companion-eval/runs/run.$test_probe_run_token/controller"
-test_probe_payload="$(jq -cnS --arg whoami "$test_whoami_win" --arg controller_file "$test_probe_run_root_win\\controller\\runtime.manifest" '{nonce:"test-nonce",target_file:"C:\\target\\.harness-eval-isolation-sentinel",source_file:"C:\\workspace\\SKILL.md",controller_file:$controller_file,user_home:"C:\\home",whoami_file:$whoami}')"
+test_source_win="$(cygpath -aw "$ROOT/SKILL.md")"
+test_workspace_win="$(cygpath -aw "$ROOT/..")"
+test_offline_sid="$(env -u PSModulePath powershell.exe -NoProfile -Command '(Get-LocalUser -Name "CodexSandboxOffline" -ErrorAction Stop).SID.Value' | tr -d '\r')"
+test_online_sid="$(env -u PSModulePath powershell.exe -NoProfile -Command '(Get-LocalUser -Name "CodexSandboxOnline" -ErrorAction Stop).SID.Value' | tr -d '\r')"
+test_probe_payload="$(jq -cnS --arg whoami "$test_whoami_win" --arg source_file "$test_source_win" --arg controller_file "$test_probe_run_root_win\\controller\\runtime.manifest" '{nonce:"test-nonce",target_file:"C:\\target\\.harness-eval-isolation-sentinel",source_file:$source_file,controller_file:$controller_file,user_home:"C:\\home",whoami_file:$whoami}')"
 test_probe_payload_sha="$(printf '%s' "$test_probe_payload" | sha256sum | cut -d ' ' -f 1)"
 test_probe_script_win="$test_probe_run_root_win\\agent-bin\\isolation-probe.ps1"
 test_probe_script_sha="$(sha256sum "$EVAL/windows-isolation-probe.ps1" | cut -d ' ' -f 1)"
@@ -613,7 +618,7 @@ test_probe_wrapper_win="$(env -u PSModulePath powershell.exe -NoProfile -Command
 test_probe_variant="powershell-no-profile-command-v1"
 test_probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_variant" "$test_probe_command_b64" "$test_probe_wrapper_win")"
 test_probe_result="$(jq -cn --arg payload_sha "$test_probe_payload_sha" '{nonce:"test-nonce",payload_sha256:$payload_sha,identity:"test-host\\codexsandboxoffline",target_file_readable:true,target_writeable:true,source_workspace_readable:false,controller_readable:false,user_home_readable:false}')"
-jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg controller_root "$test_probe_controller_root" --arg shell_wrapper_path "$test_probe_wrapper_win" --arg shell_wrapper_argv_variant "$test_probe_variant" --arg probe_script_path "$test_probe_script_win" --arg probe_script_sha "$test_probe_script_sha" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" '{
+jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg workspace_root "$test_workspace_win" --arg source_file "$test_source_win" --arg offline_sid "$test_offline_sid" --arg online_sid "$test_online_sid" --arg controller_root "$test_probe_controller_root" --arg shell_wrapper_path "$test_probe_wrapper_win" --arg shell_wrapper_argv_variant "$test_probe_variant" --arg probe_script_path "$test_probe_script_win" --arg probe_script_sha "$test_probe_script_sha" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" '{
   schema_version:2,
   isolation:"windows-native-elevated-acl",
   controller_visible_to_agent:false,
@@ -621,23 +626,23 @@ jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n'
   user_home_visible_to_agent:false,
   network:"codex-workspace-write-offline",
   sandbox_accounts:[
-    {Name:"CodexSandboxOffline",Sid:"S-1-5-21-1-2-3-1001"},
-    {Name:"CodexSandboxOnline",Sid:"S-1-5-21-1-2-3-1002"}
+    {Name:"CodexSandboxOffline",Sid:$offline_sid},
+    {Name:"CodexSandboxOnline",Sid:$online_sid}
   ],
-  denied_roots:["C:/workspace","C:/home",$controller_root],
+  denied_roots:[$workspace_root,"C:/home",$controller_root],
   checks:[
-    {path:"C:/workspace",sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
-    {path:"C:/workspace",sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true},
-    {path:"C:/home",sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
-    {path:"C:/home",sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true},
-    {path:$controller_root,sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
-    {path:$controller_root,sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true}
+    {path:$workspace_root,sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,read_execute_denied:true},
+    {path:$workspace_root,sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,read_execute_denied:true},
+    {path:"C:/home",sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,read_execute_denied:true},
+    {path:"C:/home",sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,read_execute_denied:true},
+    {path:$controller_root,sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,read_execute_denied:true},
+    {path:$controller_root,sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,read_execute_denied:true}
   ],
   source_file_deny:{
-    path:"C:/workspace/SKILL.md",
+    path:$source_file,
     checks:[
-      {sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
-      {sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true}
+      {sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,read_execute_denied:true},
+      {sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,read_execute_denied:true}
     ]
   },
   probe:{
@@ -777,6 +782,65 @@ for probe_tamper in script-path payload-hash source-deny-path source-deny-check;
     ok "attester rejects forged probe $probe_tamper evidence"
   fi
 done
+
+mkdir -p "$TMP/coherent-sid-candidates" "$TMP/coherent-sid-results"
+for f in "$attest_base".*; do cp "$f" "$TMP/coherent-sid-candidates/"; done
+coherent_sid_candidate="$TMP/coherent-sid-candidates/$(basename "$attest_candidate")"
+coherent_sid_base="${coherent_sid_candidate%.json}"
+jq --arg offline 'S-1-5-21-9-8-7-6001' --arg online 'S-1-5-21-9-8-7-6002' '
+  .sandbox_accounts |= map(if .Name == "CodexSandboxOffline" then .Sid=$offline else .Sid=$online end)
+  | .checks |= map(if .sandbox_account == "CodexSandboxOffline" then .sandbox_sid=$offline else .sandbox_sid=$online end)
+  | .source_file_deny.checks |= map(if .sandbox_account == "CodexSandboxOffline" then .sandbox_sid=$offline else .sandbox_sid=$online end)
+' "$coherent_sid_base.isolation.json" > "$TMP/coherent-sid-isolation.tmp"
+mv "$TMP/coherent-sid-isolation.tmp" "$coherent_sid_base.isolation.json"
+coherent_sid_sha="$(sha256sum "$coherent_sid_base.isolation.json" | cut -d ' ' -f 1)"
+jq --arg isolation_sha "$coherent_sid_sha" '.artifact_hashes.isolation=$isolation_sha' "$coherent_sid_candidate" > "$TMP/coherent-sid-candidate.tmp"
+mv "$TMP/coherent-sid-candidate.tmp" "$coherent_sid_candidate"
+if bash "$EVAL/attest-result.sh" "$coherent_sid_candidate" \
+  --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/coherent-sid-candidates" \
+  --results-dir="$TMP/coherent-sid-results" --allowed-signers="$TMP/test-release-signers" \
+  > "$TMP/coherent-sid.log" 2>&1; then
+  bad "attester rejects coherently forged sandbox-account SID evidence"
+else
+  ok "attester rejects coherently forged sandbox-account SID evidence"
+fi
+
+mkdir -p "$TMP/coherent-source-candidates" "$TMP/coherent-source-results"
+for f in "$attest_base".*; do cp "$f" "$TMP/coherent-source-candidates/"; done
+coherent_source_candidate="$TMP/coherent-source-candidates/$(basename "$attest_candidate")"
+coherent_source_base="${coherent_source_candidate%.json}"
+coherent_forged_root='C:\forged-workspace'
+coherent_forged_source='C:\forged-workspace\SKILL.md'
+jq --arg root "$coherent_forged_root" --arg source "$coherent_forged_source" '
+  .denied_roots[0] as $old
+  | .denied_roots[0]=$root
+  | .checks |= map(if .path == $old then .path=$root else . end)
+  | .source_file_deny.path=$source
+  | .probe.payload.source_file=$source
+' "$coherent_source_base.isolation.json" > "$TMP/coherent-source-isolation.tmp"
+mv "$TMP/coherent-source-isolation.tmp" "$coherent_source_base.isolation.json"
+coherent_payload_sha="$(jq -cS -j '.probe.payload' "$coherent_source_base.isolation.json" | sha256sum | cut -d ' ' -f 1)"
+coherent_probe_command="& '$test_powershell_win' -NoProfile -ExecutionPolicy Bypass -File '$test_probe_script_win' -ExpectedPayloadSha256 '$coherent_payload_sha'"
+coherent_probe_b64="$(printf '%s' "$coherent_probe_command" | base64 | tr -d '\r\n')"
+coherent_probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_variant" "$coherent_probe_b64" "$test_probe_wrapper_win")"
+jq --arg payload_sha "$coherent_payload_sha" --arg command "$coherent_probe_display" '
+  .probe.result.payload_sha256=$payload_sha
+  | .probe.command_event.command=$command
+  | .probe.command_event.aggregated_output=((.probe.result | tojson) + "\n")
+' "$coherent_source_base.isolation.json" > "$TMP/coherent-source-rebound.tmp"
+mv "$TMP/coherent-source-rebound.tmp" "$coherent_source_base.isolation.json"
+coherent_source_sha="$(sha256sum "$coherent_source_base.isolation.json" | cut -d ' ' -f 1)"
+jq --arg isolation_sha "$coherent_source_sha" '.artifact_hashes.isolation=$isolation_sha' "$coherent_source_candidate" > "$TMP/coherent-source-candidate.tmp"
+mv "$TMP/coherent-source-candidate.tmp" "$coherent_source_candidate"
+if bash "$EVAL/attest-result.sh" "$coherent_source_candidate" \
+  --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/coherent-source-candidates" \
+  --results-dir="$TMP/coherent-source-results" --allowed-signers="$TMP/test-release-signers" \
+  > "$TMP/coherent-source.log" 2>&1; then
+  bad "attester rejects coherently forged source-root evidence"
+else
+  ok "attester rejects coherently forged source-root evidence"
+fi
+
 if bash "$EVAL/attest-result.sh" "$attest_candidate" \
   --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/attest-candidates" \
   --results-dir="$TMP/attested-results" --allowed-signers="$TMP/test-release-signers" \
@@ -855,8 +919,24 @@ mkdir -p "$TMP/gate-forged-source-deny-results"
 for f in "$attested_base".*; do cp "$f" "$TMP/gate-forged-source-deny-results/"; done
 gate_forged_source_result="$TMP/gate-forged-source-deny-results/$(basename "$attested")"
 gate_forged_source_base="${gate_forged_source_result%.json}"
-jq '.source_file_deny.path="C:\\attacker\\SKILL.md"' "$gate_forged_source_base.isolation.json" > "$TMP/gate-forged-source-isolation.tmp"
+jq --arg root "$coherent_forged_root" --arg source "$coherent_forged_source" '
+  .denied_roots[0] as $old
+  | .denied_roots[0]=$root
+  | .checks |= map(if .path == $old then .path=$root else . end)
+  | .source_file_deny.path=$source
+  | .probe.payload.source_file=$source
+' "$gate_forged_source_base.isolation.json" > "$TMP/gate-forged-source-isolation.tmp"
 mv "$TMP/gate-forged-source-isolation.tmp" "$gate_forged_source_base.isolation.json"
+gate_forged_source_payload_sha="$(jq -cS -j '.probe.payload' "$gate_forged_source_base.isolation.json" | sha256sum | cut -d ' ' -f 1)"
+gate_forged_source_command="& '$test_powershell_win' -NoProfile -ExecutionPolicy Bypass -File '$test_probe_script_win' -ExpectedPayloadSha256 '$gate_forged_source_payload_sha'"
+gate_forged_source_command_b64="$(printf '%s' "$gate_forged_source_command" | base64 | tr -d '\r\n')"
+gate_forged_source_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_variant" "$gate_forged_source_command_b64" "$test_probe_wrapper_win")"
+jq --arg payload_sha "$gate_forged_source_payload_sha" --arg command "$gate_forged_source_display" '
+  .probe.result.payload_sha256=$payload_sha
+  | .probe.command_event.command=$command
+  | .probe.command_event.aggregated_output=((.probe.result | tojson) + "\n")
+' "$gate_forged_source_base.isolation.json" > "$TMP/gate-forged-source-rebound.tmp"
+mv "$TMP/gate-forged-source-rebound.tmp" "$gate_forged_source_base.isolation.json"
 gate_forged_source_isolation_sha="$(sha256sum "$gate_forged_source_base.isolation.json" | cut -d ' ' -f 1)"
 jq --arg isolation_sha "$gate_forged_source_isolation_sha" '.artifact_hashes.isolation=$isolation_sha' "$gate_forged_source_result" > "$TMP/gate-forged-source-result.tmp"
 mv "$TMP/gate-forged-source-result.tmp" "$gate_forged_source_result"
@@ -872,6 +952,33 @@ elif grep -Fq 'vague-goal@1(failed-stale-synthetic-unconfirmed-or-unbound)' "$TM
 else
   sed 's/^/  gate-forged-source-deny: /' "$TMP/gate-forged-source-deny.log" >&2
   bad "release gate rejects validly signed forged direct source-deny evidence"
+fi
+
+mkdir -p "$TMP/gate-forged-sid-results"
+for f in "$attested_base".*; do cp "$f" "$TMP/gate-forged-sid-results/"; done
+gate_forged_sid_result="$TMP/gate-forged-sid-results/$(basename "$attested")"
+gate_forged_sid_base="${gate_forged_sid_result%.json}"
+jq --arg offline 'S-1-5-21-9-8-7-6001' --arg online 'S-1-5-21-9-8-7-6002' '
+  .sandbox_accounts |= map(if .Name == "CodexSandboxOffline" then .Sid=$offline else .Sid=$online end)
+  | .checks |= map(if .sandbox_account == "CodexSandboxOffline" then .sandbox_sid=$offline else .sandbox_sid=$online end)
+  | .source_file_deny.checks |= map(if .sandbox_account == "CodexSandboxOffline" then .sandbox_sid=$offline else .sandbox_sid=$online end)
+' "$gate_forged_sid_base.isolation.json" > "$TMP/gate-forged-sid-isolation.tmp"
+mv "$TMP/gate-forged-sid-isolation.tmp" "$gate_forged_sid_base.isolation.json"
+gate_forged_sid_isolation_sha="$(sha256sum "$gate_forged_sid_base.isolation.json" | cut -d ' ' -f 1)"
+jq --arg isolation_sha "$gate_forged_sid_isolation_sha" '.artifact_hashes.isolation=$isolation_sha' "$gate_forged_sid_result" > "$TMP/gate-forged-sid-result.tmp"
+mv "$TMP/gate-forged-sid-result.tmp" "$gate_forged_sid_result"
+rm -f -- "$gate_forged_sid_base.attestation.sig"
+ssh-keygen -Y sign -q -f "$TMP/test-signing-key" -n harness-eval "$gate_forged_sid_result"
+mv "$gate_forged_sid_result.sig" "$gate_forged_sid_base.attestation.sig"
+if HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS="$TMP/test-release-signers" \
+  bash "$EVAL/check-results.sh" --cases-dir="$TMP/cases" --results-dir="$TMP/gate-forged-sid-results" \
+  > "$TMP/gate-forged-sid.log" 2>&1; then
+  bad "release gate rejects validly signed coherent sandbox-account SID forgery"
+elif grep -Fq 'vague-goal@1(failed-stale-synthetic-unconfirmed-or-unbound)' "$TMP/gate-forged-sid.log"; then
+  ok "release gate rejects validly signed coherent sandbox-account SID forgery"
+else
+  sed 's/^/  gate-forged-sid: /' "$TMP/gate-forged-sid.log" >&2
+  bad "release gate rejects validly signed coherent sandbox-account SID forgery"
 fi
 
 # The release gate validates a private snapshot, then verifies that every

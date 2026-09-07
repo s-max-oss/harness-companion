@@ -602,9 +602,19 @@ try {
         )
         foreach ($account in $sandboxAccounts) {
             $matching = @($acl.Access | Where-Object {
-                $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny -and
-                ($_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $account.Sid) -and
-                (($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::ReadAndExecute) -ne 0)
+                $identityAndRightsMatch =
+                    $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny -and
+                    ($_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $account.Sid) -and
+                    (($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::ReadAndExecute) -ne 0) -and
+                    -not $_.IsInherited -and
+                    $_.PropagationFlags -eq [System.Security.AccessControl.PropagationFlags]::None
+                $shapeMatches = if ($kind -eq 'file') {
+                    $_.InheritanceFlags -eq [System.Security.AccessControl.InheritanceFlags]::None
+                } else {
+                    (($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ContainerInherit) -ne 0) -and
+                    (($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ObjectInherit) -ne 0)
+                }
+                $identityAndRightsMatch -and $shapeMatches
             })
             if ($matching.Count -eq 0) {
                 throw "failed to install read deny for $($account.Name) on $path"

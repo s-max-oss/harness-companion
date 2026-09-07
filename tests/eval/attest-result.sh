@@ -208,6 +208,54 @@ print(os.path.normcase(os.path.realpath(sys.argv[1])).replace(os.sep, "/"))
 PY
 }
 
+windows_sandbox_accounts_json() {
+  python - <<'PY'
+import ctypes
+import json
+from ctypes import wintypes
+
+ERROR_INSUFFICIENT_BUFFER = 122
+lookup = ctypes.WinDLL("advapi32", use_last_error=True).LookupAccountNameW
+lookup.argtypes = [
+    wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPVOID,
+    ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR,
+    ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+]
+lookup.restype = wintypes.BOOL
+
+def sid_for(name):
+    sid_size = wintypes.DWORD(0)
+    domain_size = wintypes.DWORD(0)
+    sid_use = wintypes.DWORD(0)
+    ctypes.set_last_error(0)
+    lookup(None, name, None, ctypes.byref(sid_size), None,
+           ctypes.byref(domain_size), ctypes.byref(sid_use))
+    error = ctypes.get_last_error()
+    if error != ERROR_INSUFFICIENT_BUFFER or sid_size.value < 8:
+        raise OSError(error, "could not size account SID", name)
+    sid = (ctypes.c_ubyte * sid_size.value)()
+    domain_capacity = max(1, domain_size.value)
+    domain = ctypes.create_unicode_buffer(domain_capacity)
+    domain_size.value = domain_capacity
+    if not lookup(None, name, sid, ctypes.byref(sid_size), domain,
+                  ctypes.byref(domain_size), ctypes.byref(sid_use)):
+        raise OSError(ctypes.get_last_error(), "could not resolve account SID", name)
+    raw = bytes(sid[:sid_size.value])
+    count = raw[1]
+    if len(raw) != 8 + 4 * count:
+        raise RuntimeError("invalid SID size for " + name)
+    authority = int.from_bytes(raw[2:8], "big")
+    subs = [int.from_bytes(raw[8 + 4*i:12 + 4*i], "little")
+            for i in range(count)]
+    return "S-{}-{}{}".format(
+        raw[0], authority, "".join("-{}".format(value) for value in subs))
+
+accounts = [{"Name": name, "Sid": sid_for(name)} for name in (
+    "CodexSandboxOffline", "CodexSandboxOnline")]
+print(json.dumps(accounts, separators=(",", ":"), sort_keys=True))
+PY
+}
+
 windows_powershell() {
   [ -f "$WINDOWS_POWERSHELL" ] && [ ! -L "$WINDOWS_POWERSHELL" ] || return 127
   [ -f "$TRUSTED_WINDOWS_ENV" ] && [ -x "$TRUSTED_WINDOWS_ENV" ] && [ ! -L "$TRUSTED_WINDOWS_ENV" ] || return 127
@@ -578,11 +626,20 @@ if [ "$production_trust" = true ]; then
     "$evidence_codex_powershell_sha" "$evidence_codex_powershell_identity" >/dev/null \
     || die "live Codex PowerShell wrapper does not match its approved hash and Authenticode evidence"
 fi
+canonical_source_host="$(host_path "$ROOT/SKILL.md")" \
+  || die "could not resolve the canonical source probe path"
+canonical_workspace_host="$(host_path "$(cd "$ROOT/.." && pwd -P)")" \
+  || die "could not resolve the canonical source workspace"
+live_sandbox_accounts="$(windows_sandbox_accounts_json)" \
+  || die "could not resolve the live Codex sandbox account SIDs"
 jq -e \
   --arg wrapper_suffix "$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")" \
   --arg wrapper_subject "$(jq -r '.windows_runtime_tools.codex_powershell.publisher_subject // empty' "$AGENT_PUBLISHERS")" \
+  --arg canonical_source "$canonical_source_host" \
+  --arg canonical_workspace "$canonical_workspace_host" \
   --arg payload_sha "$(jq -cS -j '.probe.payload' "$snapshot_base.isolation.json" | sha256sum | awk '{print $1}')" \
   --arg probe_script_sha "$(sha "$ISOLATION_PROBE")" \
+  --argjson live_sandbox_accounts "$live_sandbox_accounts" \
   --argjson wrapper_thumbprints "$(jq -c '.windows_runtime_tools.codex_powershell.publisher_thumbprints // []' "$AGENT_PUBLISHERS")" \
   --argjson wrapper_hashes "$(jq -c '.windows_runtime_tools.codex_powershell.approved_sha256 // [] | map(ascii_downcase)' "$AGENT_PUBLISHERS")" '
   def norm: gsub("\\\\"; "/") | ascii_downcase | sub("/+$"; "");
@@ -600,9 +657,11 @@ jq -e \
   and $e.user_home_visible_to_agent == false
   and $e.network == "codex-workspace-write-offline"
   and ($e.sandbox_accounts | type == "array" and length == 2)
+  and (($e.sandbox_accounts | sort_by(.Name)) == ($live_sandbox_accounts | sort_by(.Name)))
   and ([$e.sandbox_accounts[].Name] | sort == ["CodexSandboxOffline", "CodexSandboxOnline"])
   and ([$e.sandbox_accounts[].Sid] | unique | length == 2 and all(.[]; test("^S-[0-9-]+$")))
   and ($e.denied_roots | type == "array" and length == 3 and (unique | length == 3) and all(.[]; type == "string" and length > 0))
+  and ($roots[0] == ($canonical_workspace | norm))
   and ($e.checks | type == "array" and length == 6 and all(.[]; .read_execute_denied == true))
   and ([
     $e.denied_roots[] as $root
@@ -653,6 +712,7 @@ jq -e \
   and $e.probe.payload.nonce == $e.probe.result.nonce
   and $e.probe.result.payload_sha256 == $payload_sha
   and ($e.probe.result.nonce | type == "string" and length > 0)
+  and ($source == ($canonical_source | norm))
   and ($source | startswith($roots[0] + "/")) and ($source | endswith("/skill.md"))
   and $user_home == $roots[1]
   and ($controller_file | startswith($roots[2] + "/")) and ($controller_file | endswith("/runtime.manifest"))

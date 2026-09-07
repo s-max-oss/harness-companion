@@ -134,6 +134,45 @@ try {
     Invoke-Helper "Leave" $normal
     Assert-Restored $normal $before
 
+    $legacy = New-Round "legacy-schema-2"
+    $before = @{
+        Workspace = Get-Dacl $legacy.Workspace
+        UserHome = Get-Dacl $legacy.UserHome
+        Controller = Get-Dacl $legacy.Controller
+        Source = Get-Dacl $legacy.Source
+    }
+    Invoke-Helper "Enter" $legacy
+    $legacyState3 = Get-Content -LiteralPath $legacy.State -Raw | ConvertFrom-Json
+    $legacySourceEntry = @($legacyState3.paths | Where-Object { $_.kind -eq 'file' })
+    if ($legacySourceEntry.Count -ne 1) {
+        throw "schema-3 state did not contain one source file for legacy setup"
+    }
+    $legacySourceAcl = New-Object System.Security.AccessControl.FileSecurity
+    $legacySourceAcl.SetSecurityDescriptorSddlForm(
+        [string]$legacySourceEntry[0].sddl,
+        [System.Security.AccessControl.AccessControlSections]::Access
+    )
+    Set-Acl -LiteralPath $legacy.Source -AclObject $legacySourceAcl
+    $legacyDirectories = @($legacyState3.paths | Where-Object { $_.kind -eq 'directory' } | ForEach-Object {
+        [pscustomobject]@{
+            path = $_.path
+            identity = $_.identity
+            sddl = $_.sddl
+        }
+    })
+    $legacyState2 = [pscustomobject]@{
+        schema_version = 2
+        created_at_utc = $legacyState3.created_at_utc
+        paths = $legacyDirectories
+    }
+    [System.IO.File]::WriteAllText(
+        $legacy.State,
+        ($legacyState2 | ConvertTo-Json -Depth 8),
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+    Invoke-Helper "Leave" $legacy
+    Assert-Restored $legacy $before
+
     $missing = New-Round "missing"
     $before = @{
         Workspace = Get-Dacl $missing.Workspace

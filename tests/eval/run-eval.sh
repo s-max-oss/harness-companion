@@ -1360,12 +1360,12 @@ if [ "$SYNTHETIC" = 0 ]; then
       {
         nonce_match:(.nonce == $nonce),
         payload_sha_match:(.payload_sha256 == $payload_sha),
-        offline_identity:(.identity | type == "string" and (ascii_downcase | endswith("\\codexsandboxoffline"))),
-        target_file_readable:.target_file_readable,
-        target_writeable:.target_writeable,
-        source_workspace_readable:.source_workspace_readable,
-        controller_readable:.controller_readable,
-        user_home_readable:.user_home_readable
+        offline_identity:(if (.identity | type) == "string" then (.identity | ascii_downcase | endswith("\\codexsandboxoffline")) else false end),
+        target_file_readable:(.target_file_readable == true),
+        target_writeable:(.target_writeable == true),
+        source_workspace_readable:(.source_workspace_readable == true),
+        controller_readable:(.controller_readable == true),
+        user_home_readable:(.user_home_readable == true)
       }
     ' <<< "$probe_result" 2>/dev/null || printf '{"summary_unavailable":true}')"
     die "effective isolation probe did not prove the required access boundary: $probe_boundary_summary"

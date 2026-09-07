@@ -2,6 +2,56 @@
 # Exact Agent build allowlist check shared by the runner and attester.
 
 set -euo pipefail
+if [ "${1:-}" = "--verify-publisher-identity" ]; then
+  [ "$#" -eq 4 ] || { echo "eval-build: usage: verify-agent-build.sh --verify-publisher-identity <policy> <agent> <identity-json>" >&2; exit 2; }
+  policy="$2"; agent="$3"; identity="$4"
+  [ -f "$policy" ] && [ ! -L "$policy" ] \
+    || { echo "eval-build: policy missing or unsafe" >&2; exit 2; }
+  command -v jq >/dev/null 2>&1 || { echo "eval-build: jq is required" >&2; exit 2; }
+  jq -e --arg agent "$agent" --argjson identity "$identity" '
+    (.agents[$agent] | type == "object")
+    and $identity.status == "Valid"
+    and $identity.subject == .agents[$agent].publisher_subject
+    and ($identity.thumbprint | type == "string" and length > 0)
+  ' "$policy" >/dev/null
+  exit $?
+fi
+
+if [ "${1:-}" = "--resolve-runtime-policy" ]; then
+  [ "$#" -eq 5 ] || { echo "eval-build: usage: verify-agent-build.sh --resolve-runtime-policy <policy> <agent> <version> <sha256>" >&2; exit 2; }
+  policy="$2"; agent="$3"; version="$4"; digest="${5,,}"
+  [ -f "$policy" ] && [ ! -L "$policy" ] \
+    || { echo "eval-build: policy missing or unsafe" >&2; exit 2; }
+  command -v jq >/dev/null 2>&1 || { echo "eval-build: jq is required" >&2; exit 2; }
+  jq -ce --arg agent "$agent" --arg version "$version" --arg digest "$digest" '
+    .agents[$agent] as $agent_policy
+    | select($agent_policy | type == "object")
+    | [$agent_policy.approved_builds[]?
+        | select(.cli_version == $version and (.sha256 | ascii_downcase) == $digest)] as $exact
+    | if ($exact | length) == 1 then
+        $exact[0] | {
+          approval:"exact",
+          shell_wrapper_argv_variants,
+          components
+        }
+      elif ($exact | length) == 0
+        and ($version | test($agent_policy.version_pattern))
+        and ($digest | test("^[0-9a-f]{64}$"))
+        and ($agent_policy.compatible_runtime.shell_wrapper_argv_variants | type == "array" and length > 0)
+        and ($agent_policy.compatible_runtime.components | type == "array" and length > 0)
+        and all($agent_policy.compatible_runtime.components[]; test("^codex-[a-z0-9-]+[.]exe$"))
+      then {
+        approval:"compatible",
+        shell_wrapper_argv_variants:$agent_policy.compatible_runtime.shell_wrapper_argv_variants,
+        components:($agent_policy.compatible_runtime.components
+          | map({key:.,value:{sha256:null}}) | from_entries)
+      }
+      else empty
+      end
+  ' "$policy"
+  exit $?
+fi
+
 if [ "${1:-}" = "--verify-bundle-evidence" ]; then
   [ "$#" -eq 3 ] || { echo "eval-build: usage: verify-agent-build.sh --verify-bundle-evidence <policy> <candidate>" >&2; exit 2; }
   policy="$2"; candidate="$3"

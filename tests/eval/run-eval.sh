@@ -290,10 +290,8 @@ contract_test_prepare_post_agent_stage() {
 }
 
 official_agent_identity() {
-  local agent="$1" executable="$2" executable_win identity policy expected_subject
+  local agent="$1" executable="$2" executable_win identity
   [ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
-  policy="$(jq -ce --arg agent "$agent" '.agents[$agent]' "$AGENT_PUBLISHERS")" || return 1
-  expected_subject="$(jq -r '.publisher_subject' <<< "$policy")" || return 1
   executable_win="$(cygpath -w "$executable")" || return 1
   identity="$(HARNESS_EVAL_AUTH_PATH="$executable_win" windows_powershell -NoProfile -Command '
     $sig = Get-AuthenticodeSignature -LiteralPath $env:HARNESS_EVAL_AUTH_PATH
@@ -301,11 +299,8 @@ official_agent_identity() {
     $thumbprint = if ($null -ne $sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { "" }
     [ordered]@{status=[string]$sig.Status;subject=$subject;thumbprint=$thumbprint} | ConvertTo-Json -Compress
   ' | tr -d '\r')" || return 1
-  jq -e --arg expected_subject "$expected_subject" '
-    .status == "Valid"
-    and .subject == $expected_subject
-    and (.thumbprint | type == "string" and length > 0)
-  ' <<< "$identity" >/dev/null || return 1
+  bash "$AGENT_BUILD_VERIFIER" --verify-publisher-identity \
+    "$AGENT_PUBLISHERS" "$agent" "$identity" >/dev/null 2>&1 || return 1
   printf '%s\n' "$identity"
 }
 
@@ -331,24 +326,15 @@ official_runtime_tool_identity() {
 }
 
 official_agent_build() {
-  local agent="$1" version="$2" digest="$3" pattern
-  bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$agent" "$version" "$digest" 2>/dev/null && return 0
-  pattern="$(jq -r --arg agent "$agent" '.agents[$agent].version_pattern // empty' "$AGENT_PUBLISHERS")" || return 1
-  jq -en --arg version "$version" --arg pattern "$pattern" --arg digest "$digest" '
-    ($version | test($pattern)) and ($digest | test("^[0-9a-f]{64}$"))
-  ' >/dev/null
+  bash "$AGENT_BUILD_VERIFIER" --resolve-runtime-policy \
+    "$AGENT_PUBLISHERS" "$1" "$2" "$3" 2>/dev/null
 }
 
 official_agent_component_build() {
-  local agent="$1" version="$2" component="$3" digest="$4" pattern
-  bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$agent" "$version" "$component" "$digest" 2>/dev/null && return 0
-  pattern="$(jq -r --arg agent "$agent" '.agents[$agent].version_pattern // empty' "$AGENT_PUBLISHERS")" || return 1
-  jq -e --arg agent "$agent" --arg version "$version" --arg pattern "$pattern" \
-    --arg component "$component" --arg digest "$digest" '
-    ($version | test($pattern))
-    and ($digest | test("^[0-9a-f]{64}$"))
-    and (.agents[$agent].compatible_runtime.components | index($component) != null)
-  ' "$AGENT_PUBLISHERS" >/dev/null
+  local policy_json="$1" component="$2" digest="${3,,}" expected
+  expected="$(jq -r --arg component "$component" '.components[$component].sha256 // empty' <<< "$policy_json")" || return 1
+  jq -e --arg component "$component" '.components | has($component)' <<< "$policy_json" >/dev/null || return 1
+  [ -z "$expected" ] || [ "${expected,,}" = "$digest" ]
 }
 
 official_agent_path() {
@@ -970,6 +956,7 @@ reviewer_launch_executable="$reviewer_executable"
 subject_authenticode='null'
 reviewer_authenticode='null'
 agent_runtime_components='{}'
+agent_runtime_policy='null'
 component_launch_paths=()
 component_launch_shas=()
 subject_launch=("$subject_launch_executable")
@@ -1020,29 +1007,22 @@ if [ "$SYNTHETIC" = 0 ]; then
     || die "subject executable version identity is invalid"
   jq -en --arg version "$reviewer_version" --arg pattern "$reviewer_version_pattern" '$version | test($pattern)' >/dev/null \
     || die "reviewer executable version identity is invalid"
-  official_agent_build "$AGENT" "$subject_version" "$subject_executable_sha" || die "subject executable is not an approved $AGENT build"
-  official_agent_build "$REVIEWER" "$reviewer_version" "$reviewer_executable_sha" || die "reviewer executable is not an approved $REVIEWER build"
+  agent_runtime_policy="$(official_agent_build "$AGENT" "$subject_version" "$subject_executable_sha")" \
+    || die "subject executable is not an approved or compatible signed $AGENT build"
+  reviewer_runtime_policy="$(official_agent_build "$REVIEWER" "$reviewer_version" "$reviewer_executable_sha")" \
+    || die "reviewer executable is not an approved or compatible signed $REVIEWER build"
   [ "$AGENT" = codex ] && [ "$REVIEWER" = codex ] && [ "$subject_version" = "$reviewer_version" ] \
     || die "real eval requires one exact Codex runtime bundle"
-  probe_shell_variants_b64="$(jq -r --arg agent "$AGENT" --arg version "$subject_version" --arg sha "$subject_executable_sha" '
-    [.agents[$agent].approved_builds[]? | select(
-      .cli_version == $version and (.sha256 | ascii_downcase) == ($sha | ascii_downcase)
-    )] as $builds
-    | if ($builds | length) == 1
-      then ($builds[0].shell_wrapper_argv_variants | tojson | @base64)
-      else (.agents[$agent].compatible_runtime.shell_wrapper_argv_variants | tojson | @base64)
-      end
-  ' "$AGENT_PUBLISHERS")"
+  [ "$agent_runtime_policy" = "$reviewer_runtime_policy" ] \
+    || die "subject and Reviewer resolved different Codex runtime policies"
+  probe_shell_variants_b64="$(jq -r '.shell_wrapper_argv_variants | tojson | @base64' <<< "$agent_runtime_policy")"
   [ -n "$probe_shell_variants_b64" ] || die "approved Codex probe serializer policy is missing or ambiguous"
   subject_install_dir="$(cd "$(dirname "$subject_executable")" && pwd -P)" || die "could not resolve subject install directory"
   reviewer_install_dir="$(cd "$(dirname "$reviewer_executable")" && pwd -P)" || die "could not resolve reviewer install directory"
   [ "$(host_path "$subject_install_dir")" = "$(host_path "$reviewer_install_dir")" ] \
     || die "subject and Reviewer do not share one exact Codex runtime bundle"
-  mapfile -t component_names < <(jq -r --arg agent "$AGENT" --arg version "$subject_version" --arg sha "$subject_executable_sha" '
-    [.agents[$agent].approved_builds[]? | select(.cli_version == $version and (.sha256 | ascii_downcase) == ($sha | ascii_downcase))] as $builds
-    | if ($builds | length) == 1 then ($builds[0].components | keys[]) else .agents[$agent].compatible_runtime.components[] end
-  ' "$AGENT_PUBLISHERS" | tr -d '\r')
-  [ "${#component_names[@]}" -gt 0 ] || die "approved Codex runtime components are missing"
+  mapfile -t component_names < <(jq -r '.components | keys[]' <<< "$agent_runtime_policy" | tr -d '\r')
+  [ "${#component_names[@]}" -gt 0 ] || die "approved or compatible Codex runtime components are missing"
   for component_name in "${component_names[@]}"; do
     [[ "$component_name" =~ ^codex-[a-z0-9-]+[.]exe$ ]] || die "unsafe Codex runtime component name"
     component_source="$subject_install_dir/$component_name"
@@ -1052,7 +1032,7 @@ if [ "$SYNTHETIC" = 0 ]; then
     component_sha="$(sha "$component_launch")"
     component_identity="$(official_agent_identity "$AGENT" "$component_launch")" \
       || die "Codex runtime component is not an authentic signed build: $component_name"
-    official_agent_component_build "$AGENT" "$subject_version" "$component_name" "$component_sha" \
+    official_agent_component_build "$agent_runtime_policy" "$component_name" "$component_sha" \
       || die "Codex runtime component is not approved for $subject_version: $component_name"
     component_launch_paths+=("$component_launch")
     component_launch_shas+=("$component_sha")
@@ -1443,16 +1423,38 @@ if [ -f "$brief" ] && [ ! -L "$brief" ] && jq -e 'type == "object"' "$brief" >/d
   while IFS= read -r path_json; do
     expected_value="$(jq -c --argjson p "$path_json" '.expected_brief_fields | getpath($p)' "$CASE")"
     dotted="$(jq -r 'map(tostring) | join(".")' <<< "$path_json")"
-    if jq -e --argjson p "$path_json" --argjson expected "$expected_value" 'getpath($p) == $expected' "$brief" >/dev/null; then
+    if MSYS2_ARG_CONV_EXCL='"/' jq -e --argjson p "$path_json" --argjson expected "$expected_value" 'getpath($p) == $expected' "$brief" >/dev/null; then
       add_objective "Brief field matches: $dotted" true "expected=$expected_value"
     else
       actual="$(jq -c --argjson p "$path_json" 'try getpath($p) catch null' "$brief" 2>/dev/null || printf null)"
       add_objective "Brief field matches: $dotted" false "expected=$expected_value actual=$actual"
     fi
-  done < <(jq -c '.expected_brief_fields | paths(scalars)' "$CASE")
+  done < <(jq -c '.expected_brief_fields
+    | paths as $path
+    | select((getpath($path) | type) != "object" and (getpath($path) | type) != "array")
+    | $path' "$CASE")
 else
   add_objective "PROJECT_BRIEF.json is a valid object" false "missing, invalid, or symlinked Brief"
 fi
+
+while IFS= read -r forbidden; do
+  forbidden="${forbidden%$'\r'}"
+  if grep -Fiq -- "$forbidden" "$transcript"; then
+    add_objective "Dialog does not invent an unapproved choice: $forbidden" false "forbidden phrase appeared"
+  else
+    add_objective "Dialog does not invent an unapproved choice: $forbidden" true "phrase absent"
+  fi
+done < <(jq -r '.objective_dialog_rules.forbidden_phrases[]?' "$CASE")
+
+final_assistant_response="$(jq -rs '[.[] | select(.role == "assistant")] | last | .content // ""' "$transcript")"
+while IFS= read -r required_regex; do
+  required_regex="${required_regex%$'\r'}"
+  if grep -Eiq -- "$required_regex" <<< "$final_assistant_response"; then
+    add_objective "Final explanation covers: $required_regex" true "required explanation present"
+  else
+    add_objective "Final explanation covers: $required_regex" false "required explanation absent"
+  fi
+done < <(jq -r '.objective_dialog_rules.final_response_required_regexes[]?' "$CASE")
 
 brief_capture="$controller/project-brief.json"
 if [ -f "$brief" ] && [ ! -L "$brief" ]; then

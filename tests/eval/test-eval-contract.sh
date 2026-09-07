@@ -64,6 +64,9 @@ for c in "${cases[@]}"; do
     and (.expected_dialog_signals.asked_at_most_per_round == null)
     and (.expected_post_init_files | type == "array" and length >= 5)
     and (.expected_brief_fields | type == "object")
+    and ((.objective_dialog_rules // {}) | type == "object")
+    and ((.objective_dialog_rules.forbidden_phrases // []) | type == "array" and all(.[]; type == "string" and length > 0))
+    and ((.objective_dialog_rules.final_response_required_regexes // []) | type == "array" and all(.[]; type == "string" and length > 0))
     and (.reviewer_rubric.checks | type == "array" and length >= 3)
     and (.reviewer_rubric.pass_criteria | type == "string" and length > 0)
     and (.reviewer_rubric.fail_criteria | type == "string" and length > 0)
@@ -236,8 +239,40 @@ if bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex 
 else
   ok "shared production build verifier rejects a non-approved runtime component digest"
 fi
+compatible_policy="$(bash "$EVAL/verify-agent-build.sh" --resolve-runtime-policy "$EVAL/trust/agent-publishers.json" codex "codex-cli 999.1.2" "$(printf '0%.0s' {1..64})")"
+if jq -e '
+  .approval == "compatible"
+  and (.components | keys | sort == ["codex-code-mode-host.exe","codex-command-runner.exe","codex-windows-sandbox-setup.exe"])
+  and all(.components[]; .sha256 == null)
+' <<< "$compatible_policy" >/dev/null; then
+  ok "daily verifier accepts an unlisted signed-compatible Codex version without weakening component membership"
+else
+  bad "daily verifier accepts an unlisted signed-compatible Codex version without weakening component membership"
+fi
+for invalid_tuple in \
+  'codex 999.1.2|0000000000000000000000000000000000000000000000000000000000000000' \
+  'codex-cli 999.1.2|not-a-sha256'; do
+  invalid_version="${invalid_tuple%%|*}"; invalid_digest="${invalid_tuple#*|}"
+  if bash "$EVAL/verify-agent-build.sh" --resolve-runtime-policy "$EVAL/trust/agent-publishers.json" codex "$invalid_version" "$invalid_digest" >/dev/null 2>&1; then
+    bad "daily verifier rejects malformed compatible build identity"
+  else
+    ok "daily verifier rejects malformed compatible build identity"
+  fi
+done
+publisher_subject="$(jq -r '.agents.codex.publisher_subject' "$EVAL/trust/agent-publishers.json")"
+rotated_identity="$(jq -cn --arg subject "$publisher_subject" '{status:"Valid",subject:$subject,thumbprint:"ROTATED-CERTIFICATE-NOT-YET-ALLOWLISTED"}')"
+check "daily verifier accepts a valid rotated certificate from the exact publisher" bash "$EVAL/verify-agent-build.sh" --verify-publisher-identity "$EVAL/trust/agent-publishers.json" codex "$rotated_identity"
+for invalid_identity in \
+  "$(jq -cn --arg subject "$publisher_subject" '{status:"NotSigned",subject:$subject,thumbprint:"ROTATED"}')" \
+  "$(jq -cn '{status:"Valid",subject:"CN=Someone Else",thumbprint:"ROTATED"}')"; do
+  if bash "$EVAL/verify-agent-build.sh" --verify-publisher-identity "$EVAL/trust/agent-publishers.json" codex "$invalid_identity" >/dev/null 2>&1; then
+    bad "daily verifier rejects invalid or wrong-publisher signatures"
+  else
+    ok "daily verifier rejects invalid or wrong-publisher signatures"
+  fi
+done
 check "real eval launches only handle-locked executable snapshots" bash -c 'grep -Fq "snapshot_executable \"\$subject_executable\" \"\$subject_launch_executable\"" "$1" && grep -Fq "start_executable_guard" "$1" && grep -Fq "verify_guarded_executables" "$1" && grep -Fq "FileShare]::Read" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/windows-executable-guard.ps1"
-check "real eval snapshots and guards the complete approved Codex runtime bundle" bash -c 'grep -Fq "approved Codex runtime components are missing" "$1" && grep -Fq "component_launch_paths" "$1" && grep -Fq "official_agent_component_build" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval snapshots and guards the complete approved or compatible Codex runtime bundle" bash -c 'grep -Fq "approved or compatible Codex runtime components are missing" "$1" && grep -Fq "component_launch_paths" "$1" && grep -Fq "official_agent_component_build" "$1"' _ "$EVAL/run-eval.sh"
 check "probe invokes only hash-bound absolute system executables" bash -c 'grep -Fq "WINDOWS_POWERSHELL=\"/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe\"" "$1" && grep -Fq "WINDOWS_WHOAMI=\"/c/Windows/System32/whoami.exe\"" "$1" && grep -Fq "probe.executables" "$2" && ! grep -Fq "cmd.exe /d /c" "$1" && ! grep -Fq "& whoami.exe" "$3"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh" "$EVAL/windows-isolation-probe.ps1"
 check "all probe evidence parsers reject non-CRLF carriage returns" bash -c '
   for f in "$@"; do
@@ -390,12 +425,12 @@ fi
 if printf '%s' "$prompt" | grep -qi 'newest_user_message.*' >/dev/null; then :; fi
 if printf '%s' "$prompt" | grep -qi 'Approve it and initialize'; then
   mkdir -p .harness
-  printf '%s\n' '{"schema_version":1,"advisory":true,"detected_type":"python","goal":"Team task app","success_criteria":["Tasks work"],"cadence":"stable","stack":"python","test_framework":"pytest"}' > .harness/PROJECT_BRIEF.json
+  printf '%s\n' '{"schema_version":1,"advisory":true,"detected_type":"python","goal":"Team task app","success_criteria":["Tasks work"],"cadence":"stable","deadline":null,"secrets_handling":"unspecified","external_network":"ask","operation_preferences":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"},"defaults_applied":[{"field":"/cadence","rationale":"Use small, verified increments with one feature in progress at a time.","source":"spec_default","value":"stable"},{"field":"/deadline","rationale":"No delivery deadline was specified.","source":"spec_default","value":null},{"field":"/secrets_handling","rationale":"No credential storage mechanism is needed for initial setup.","source":"spec_default","value":"unspecified"},{"field":"/external_network","rationale":"Ask before external network access.","source":"spec_default","value":"ask"},{"field":"/operation_preferences","rationale":"Require separate authorization for consequential operations.","source":"spec_default","value":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"}}],"stack":"python","test_framework":"pytest"}' > .harness/PROJECT_BRIEF.json
   printf '%s\n' '# Project Brief' > .harness/PROJECT_BRIEF.md
   printf '%s\n' '{"schema_version":1}' > .harness/.template-snapshot.json
   printf '%s\n' '# Agent instructions' > AGENTS.md
   printf '%s\n' '{"schema_version":1,"features":[]}' > feature_list.json
-  text='Initialized after approval. Generated, inferred, defaulted, and deferred decisions are explained.'
+  text='Initialized after approval. Generated, inferred, and defaulted decisions are explained. No deadline was specified; optional product architecture remains deferred.'
 elif printf '%s' "$prompt" | grep -qi 'sensible defaults'; then
   text='I applied safe defaults and present the complete annotated Brief. Please approve before I write.'
 elif printf '%s' "$prompt" | grep -qi 'small web app'; then
@@ -436,12 +471,12 @@ fi
 prompt="$(cat "$prompt_file")"
 if printf '%s' "$prompt" | grep -qi 'Approve it and initialize'; then
   mkdir -p .harness
-  printf '%s\n' '{"schema_version":1,"advisory":true,"detected_type":"python","goal":"Team task app","success_criteria":["Tasks work"],"cadence":"stable","stack":"python","test_framework":"pytest"}' > .harness/PROJECT_BRIEF.json
+  printf '%s\n' '{"schema_version":1,"advisory":true,"detected_type":"python","goal":"Team task app","success_criteria":["Tasks work"],"cadence":"stable","deadline":null,"secrets_handling":"unspecified","external_network":"ask","operation_preferences":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"},"defaults_applied":[{"field":"/cadence","rationale":"Use small, verified increments with one feature in progress at a time.","source":"spec_default","value":"stable"},{"field":"/deadline","rationale":"No delivery deadline was specified.","source":"spec_default","value":null},{"field":"/secrets_handling","rationale":"No credential storage mechanism is needed for initial setup.","source":"spec_default","value":"unspecified"},{"field":"/external_network","rationale":"Ask before external network access.","source":"spec_default","value":"ask"},{"field":"/operation_preferences","rationale":"Require separate authorization for consequential operations.","source":"spec_default","value":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"}}],"stack":"python","test_framework":"pytest"}' > .harness/PROJECT_BRIEF.json
   printf '%s\n' '# Project Brief' > .harness/PROJECT_BRIEF.md
   printf '%s\n' '{"schema_version":1}' > .harness/.template-snapshot.json
   printf '%s\n' '# Agent instructions' > AGENTS.md
   printf '%s\n' '{"schema_version":1,"features":[]}' > feature_list.json
-  text='Initialized after approval. Generated, inferred, defaulted, and deferred decisions are explained.'
+  text='Initialized after approval. Generated, inferred, and defaulted decisions are explained. No deadline was specified; optional product architecture remains deferred.'
 elif printf '%s' "$prompt" | grep -qi 'sensible defaults'; then text='I applied safe defaults and present the complete annotated Brief. Please approve before I write.'
 elif printf '%s' "$prompt" | grep -qi 'small web app'; then text='I preserved the task app goal and success criteria; inferred Python and pytest.'
 else text='I can infer Python and pytest. What should the product do, and how will we know it succeeds?'; fi

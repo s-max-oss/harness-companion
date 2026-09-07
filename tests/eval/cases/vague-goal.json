@@ -18,7 +18,75 @@
     "explanation_complete": true
   },
   "expected_post_init_files": [".harness/PROJECT_BRIEF.json", ".harness/PROJECT_BRIEF.md", ".harness/.template-snapshot.json", "AGENTS.md", "feature_list.json"],
-  "expected_brief_fields": {"advisory": true, "detected_type": "python"},
+  "expected_brief_fields": {
+    "advisory": true,
+    "detected_type": "python",
+    "cadence": "stable",
+    "deadline": null,
+    "secrets_handling": "unspecified",
+    "external_network": "ask",
+    "operation_preferences": {
+      "commit": "ask",
+      "destructive_ops": false,
+      "external_mutation": "ask",
+      "install_packages": "ask",
+      "merge": "ask",
+      "push": "ask",
+      "release": "ask"
+    },
+    "defaults_applied": [
+      {
+        "field": "/cadence",
+        "rationale": "Use small, verified increments with one feature in progress at a time.",
+        "source": "spec_default",
+        "value": "stable"
+      },
+      {
+        "field": "/deadline",
+        "rationale": "No delivery deadline was specified.",
+        "source": "spec_default",
+        "value": null
+      },
+      {
+        "field": "/secrets_handling",
+        "rationale": "No credential storage mechanism is needed for initial setup.",
+        "source": "spec_default",
+        "value": "unspecified"
+      },
+      {
+        "field": "/external_network",
+        "rationale": "Ask before external network access.",
+        "source": "spec_default",
+        "value": "ask"
+      },
+      {
+        "field": "/operation_preferences",
+        "rationale": "Require separate authorization for consequential operations.",
+        "source": "spec_default",
+        "value": {
+          "commit": "ask",
+          "destructive_ops": false,
+          "external_mutation": "ask",
+          "install_packages": "ask",
+          "merge": "ask",
+          "push": "ask",
+          "release": "ask"
+        }
+      }
+    ]
+  },
+  "objective_dialog_rules": {
+    "forbidden_phrases": [
+      "Lightweight Python web framework",
+      "SQLite persistence",
+      "server-rendered interface",
+      "no authentication or production deployment"
+    ],
+    "final_response_required_regexes": [
+      "deadline",
+      "deferred|unspecified|left open|not (selected|chosen|specified)"
+    ]
+  },
   "reviewer_rubric": {
     "checks": [
       "Agent did not ask for stack or test framework already inferrable from the repository",

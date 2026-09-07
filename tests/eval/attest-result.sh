@@ -516,12 +516,8 @@ expected_probe_b64="$(printf '%s' "$expected_probe" | base64 | tr -d '\r\n')"
 codex_powershell_path="$(jq -r '.probe.executables.codex_powershell.path // empty' "$snapshot_base.isolation.json")"
 probe_wrapper_path="$(jq -r '.probe.shell_wrapper_path // empty' "$snapshot_base.isolation.json")"
 powershell_path="$(jq -r '.probe.executables.powershell.path // empty' "$snapshot_base.isolation.json")"
-jq -en --arg wrapper "$probe_wrapper_path" --arg trusted "$powershell_path" '
-  def norm: gsub("\\\\"; "/") | ascii_downcase | sub("/+$"; "");
-  (($wrapper | length) >= 3)
-  and (($wrapper | explode | .[1:3]) == [58, 92])
-  and (($wrapper | norm) == ($trusted | norm))
-' >/dev/null || die "recorded Codex shell wrapper does not match the trusted system PowerShell"
+python "$PROBE_COMMAND_VALIDATOR" --same-windows-path "$probe_wrapper_path" "$powershell_path" >/dev/null 2>&1 \
+  || die "recorded Codex shell wrapper does not match the trusted system PowerShell"
 python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_b64" "$expected_probe_b64" "$probe_wrapper_path" >/dev/null 2>&1 \
   || die "effective isolation probe command did not match the exact controller argv"
 executable_snapshot_manifests=()

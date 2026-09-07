@@ -29,6 +29,15 @@ done
 for cmd in jq sha256sum find python ssh-keygen iconv base64 tr; do command -v "$cmd" >/dev/null 2>&1 || { echo "eval-gate: $cmd is required" >&2; exit 2; }; done
 [ -d "$CASES_DIR" ] && [ ! -L "$CASES_DIR" ] || { echo "eval-gate: cases directory missing or unsafe" >&2; exit 2; }
 [ -d "$RESULTS_DIR" ] && [ ! -L "$RESULTS_DIR" ] || { echo "eval-gate: results directory missing or unsafe" >&2; exit 1; }
+if [ -n "${HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS:-}" ]; then
+  cases_abs="$(cd "$CASES_DIR" && pwd -P)"
+  results_abs="$(cd "$RESULTS_DIR" && pwd -P)"
+  canonical_cases_abs="$(cd "$SCRIPT_DIR/cases" && pwd -P)"
+  canonical_results_abs="$(cd "$SCRIPT_DIR/results" && pwd -P)"
+  [ "$cases_abs" != "$canonical_cases_abs" ] && [ "$results_abs" != "$canonical_results_abs" ] \
+    || { echo "eval-gate: custom signer anchor is test-only" >&2; exit 2; }
+  ALLOWED_SIGNERS="$HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS"
+fi
 [ -f "$ALLOWED_SIGNERS" ] && [ ! -L "$ALLOWED_SIGNERS" ] || { echo "eval-gate: trusted signer anchor missing or unsafe" >&2; exit 2; }
 for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
 
@@ -378,8 +387,7 @@ while IFS= read -r case_file; do
   probe_wrapper_path="$(jq -r '.probe.shell_wrapper_path // empty' "$base.isolation.json" 2>/dev/null || true)"
   if [ -n "$expected_probe" ] \
     && [ -n "$probe_wrapper_path" ] \
-    && jq -en --arg wrapper "$probe_wrapper_path" --arg trusted "$powershell_path" \
-      'def norm: gsub("\\\\"; "/") | ascii_downcase | sub("/+$"; ""); (($wrapper | length) >= 3) and (($wrapper | explode | .[1:3]) == [58, 92]) and (($wrapper | norm) == ($trusted | norm))' >/dev/null \
+    && python "$PROBE_COMMAND_VALIDATOR" --same-windows-path "$probe_wrapper_path" "$powershell_path" >/dev/null 2>&1 \
     && python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_b64" "$expected_probe_b64" "$probe_wrapper_path" >/dev/null 2>&1 \
     && jq -e \
       --arg wrapper_suffix "$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")" \

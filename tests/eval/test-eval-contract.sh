@@ -127,8 +127,9 @@ check "production probe derives the observed system wrapper" grep -Fq 'codex_she
 check "production probe validator uses the observed system wrapper" grep -Fq '$expected_probe_command_b64" "$codex_shell_wrapper_win"' "$EVAL/run-eval.sh"
 check "production inner probe stays profile-free" grep -Fq -- "-NoProfile -ExecutionPolicy Bypass -EncodedCommand" "$EVAL/run-eval.sh"
 check "all real Codex exec calls disable login shells" bash -c '[ "$(grep -c "allow_login_shell=false" "$1")" -eq 3 ]' _ "$EVAL/run-eval.sh"
-check "attester uses the evidence-bound system wrapper" bash -c 'grep -Fq ".probe.shell_wrapper_path" "$1" && grep -Eq "python .*PROBE_COMMAND_VALIDATOR.*recorded_probe_b64.*expected_probe_b64.*probe_wrapper_path" "$1" && ! grep -Fq "observed_probe_wrapper" "$1"' _ "$EVAL/attest-result.sh"
-check "result gate uses the evidence-bound system wrapper without a host PowerShell call" bash -c 'grep -Fq ".probe.shell_wrapper_path" "$1" && grep -Eq "python .*PROBE_COMMAND_VALIDATOR.*recorded_probe_b64.*expected_probe_b64.*probe_wrapper_path" "$1" && ! grep -Fq "observed_probe_wrapper" "$1" && ! grep -Fq "windows_powershell()" "$1"' _ "$EVAL/check-results.sh"
+check "attester uses the evidence-bound system wrapper" bash -c 'grep -Fq ".probe.shell_wrapper_path" "$1" && grep -Fq -- "--same-windows-path" "$1" && grep -Eq "python .*PROBE_COMMAND_VALIDATOR.*recorded_probe_b64.*expected_probe_b64.*probe_wrapper_path" "$1" && ! grep -Fq "observed_probe_wrapper" "$1"' _ "$EVAL/attest-result.sh"
+check "result gate uses the evidence-bound system wrapper without a host PowerShell call" bash -c 'grep -Fq ".probe.shell_wrapper_path" "$1" && grep -Fq -- "--same-windows-path" "$1" && grep -Eq "python .*PROBE_COMMAND_VALIDATOR.*recorded_probe_b64.*expected_probe_b64.*probe_wrapper_path" "$1" && ! grep -Fq "observed_probe_wrapper" "$1" && ! grep -Fq "windows_powershell()" "$1"' _ "$EVAL/check-results.sh"
+check "evidence-bound wrapper comparison accepts deterministic Windows case drift" python "$EVAL/validate-probe-command.py" --same-windows-path 'C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe' 'c:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 if python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$(printf '%s' "$probe_inner extra" | base64 | tr -d '\r\n')" "$probe_wrapper" >/dev/null 2>&1; then
   bad "probe command validator rejects inner-command drift"
 else
@@ -139,6 +140,8 @@ for mutation in \
   " ${probe_display}" \
   "${probe_display} " \
   "${probe_display/ -NoProfile/  -NoProfile}" \
+  "${probe_display/ -NoProfile/ -NoProfile -NoProfile}" \
+  "${probe_display/ -NoProfile -Command/ -Command -NoProfile}" \
   "${probe_display/ -NoProfile/ -NonInteractive -NoProfile}"; do
   if python "$EVAL/validate-probe-command.py" "$(printf '%s' "$mutation" | base64 | tr -d '\r\n')" "$probe_inner_b64" "$probe_wrapper" >/dev/null 2>&1; then
     bad "probe command validator rejects noncanonical wrapper argv serialization"
@@ -485,6 +488,13 @@ check "detached attestation verifies against an independent public anchor" \
   bash -c 'ssh-keygen -Y verify -q -f "$1" -I test-identity -n harness-eval -s "$2" < "$3"' _ "$TMP/test-allowed-signers" "$TMP/payload.sig" "$TMP/payload"
 printf 'tamper\n' >> "$TMP/payload"
 if ssh-keygen -Y verify -q -f "$TMP/test-allowed-signers" -I test-identity -n harness-eval -s "$TMP/payload.sig" < "$TMP/payload"; then bad "detached attestation rejects payload drift"; else ok "detached attestation rejects payload drift"; fi
+if HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS="$TMP/test-allowed-signers" bash "$EVAL/check-results.sh" > "$TMP/canonical-custom-anchor.log" 2>&1; then
+  bad "release gate confines custom signer anchors to noncanonical test directories"
+elif grep -Fq 'custom signer anchor is test-only' "$TMP/canonical-custom-anchor.log"; then
+  ok "release gate confines custom signer anchors to noncanonical test directories"
+else
+  bad "release gate confines custom signer anchors to noncanonical test directories"
+fi
 
 printf 'source\n' > "$TMP/no-replace-source"
 printf 'existing\n' > "$TMP/no-replace-destination"
@@ -635,6 +645,7 @@ else
   bad "separate post-Agent attester promotes a validated candidate"
 fi
 attested="$TMP/attested-results/$(basename "$result")"
+attested_base="${attested%.json}"
 check "attested result is release-eligible and binds its candidate" jq -e \
   --arg candidate_sha "$(sha256sum "$attest_candidate" | cut -d ' ' -f 1)" '
     .schema_version == 3 and .passed == true and .synthetic == false and .release_eligible == true
@@ -645,10 +656,39 @@ check "attested result signature verifies against its independent anchor" \
   bash -c 'ssh-keygen -Y verify -q -f "$1" -I harness-eval-release -n harness-eval -s "$2" < "$3"' \
   _ "$TMP/test-release-signers" "${attested%.json}.attestation.sig" "$attested"
 
+# Even a correctly signed result must not let forged isolation evidence pass
+# the independent release gate. Rebind the companion hash, then sign the
+# altered result with the authorized test-only key so signature verification
+# succeeds before the semantic wrapper check fails.
+mkdir -p "$TMP/gate-forged-wrapper-results"
+for f in "$attested_base".*; do cp "$f" "$TMP/gate-forged-wrapper-results/"; done
+gate_forged_result="$TMP/gate-forged-wrapper-results/$(basename "$attested")"
+gate_forged_base="${gate_forged_result%.json}"
+jq '.probe.shell_wrapper_path="C:\\Windows\\System32\\cmd.exe"' "$gate_forged_base.isolation.json" > "$TMP/gate-forged-isolation.tmp"
+mv "$TMP/gate-forged-isolation.tmp" "$gate_forged_base.isolation.json"
+gate_forged_isolation_sha="$(sha256sum "$gate_forged_base.isolation.json" | cut -d ' ' -f 1)"
+jq --arg isolation_sha "$gate_forged_isolation_sha" '.artifact_hashes.isolation=$isolation_sha' "$gate_forged_result" > "$TMP/gate-forged-result.tmp"
+mv "$TMP/gate-forged-result.tmp" "$gate_forged_result"
+rm -f -- "$gate_forged_base.attestation.sig"
+ssh-keygen -Y sign -q -f "$TMP/test-signing-key" -n harness-eval "$gate_forged_result"
+mv "$gate_forged_result.sig" "$gate_forged_base.attestation.sig"
+check "forged-wrapper gate fixture has a valid independent signature" \
+  bash -c 'ssh-keygen -Y verify -q -f "$1" -I harness-eval-release -n harness-eval -s "$2" < "$3"' \
+  _ "$TMP/test-release-signers" "$gate_forged_base.attestation.sig" "$gate_forged_result"
+if HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS="$TMP/test-release-signers" \
+  bash "$EVAL/check-results.sh" --cases-dir="$TMP/cases" --results-dir="$TMP/gate-forged-wrapper-results" \
+  > "$TMP/gate-forged-wrapper.log" 2>&1; then
+  bad "release gate rejects validly signed forged-wrapper evidence"
+elif grep -Fq 'vague-goal@1(failed-stale-synthetic-unconfirmed-or-unbound)' "$TMP/gate-forged-wrapper.log"; then
+  ok "release gate rejects validly signed forged-wrapper evidence"
+else
+  sed 's/^/  gate-forged-wrapper: /' "$TMP/gate-forged-wrapper.log" >&2
+  bad "release gate rejects validly signed forged-wrapper evidence"
+fi
+
 # The release gate validates a private snapshot, then verifies that every
 # authoritative source still has the same identity and bytes before passing.
 mkdir -p "$TMP/gate-race-results"
-attested_base="${attested%.json}"
 for f in "$attested_base".*; do cp "$f" "$TMP/gate-race-results/"; done
 cat > "$TMP/gate-race-hook.sh" <<'HOOK'
 #!/bin/bash

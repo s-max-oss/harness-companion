@@ -56,6 +56,22 @@ def canonical_display(wrapper: str, expected: str) -> str:
     return f"{wrapper_display} -NoProfile -Command {command_display}"
 
 
+def canonical_windows_path(value: str, label: str) -> str:
+    if any(ch in value for ch in "\x00\r\n\""):
+        fail(f"{label} contains a forbidden byte")
+    if len(value) < 3 or value[1:3] != ":\\":
+        fail(f"{label} is not an absolute Windows drive path")
+    return value.replace("\\", "/").rstrip("/").casefold()
+
+
+if len(sys.argv) == 4 and sys.argv[1] == "--same-windows-path":
+    left = canonical_windows_path(sys.argv[2], "left path")
+    right = canonical_windows_path(sys.argv[3], "right path")
+    if left != right:
+        fail("Windows paths do not identify the same canonical path")
+    raise SystemExit(0)
+
+
 if len(sys.argv) == 4 and sys.argv[1] == "--canonical":
     expected = decode_canonical(sys.argv[2], "expected command")
     wrapper = sys.argv[3]

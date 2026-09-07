@@ -239,7 +239,12 @@ try {
 finally {
     if (Test-Path -LiteralPath $testRoot -PathType Container) {
         $removed = $false
-        $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        # A crashed Windows process can keep its redirected log handles alive
+        # briefly after every recovery assertion has completed.  The full
+        # contract suite creates substantially more handle pressure than this
+        # test in isolation, so allow those already-terminated handles to drain
+        # while keeping cleanup bounded and fail-closed.
+        $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(120)
         while (-not $removed -and [DateTime]::UtcNow -lt $cleanupDeadline) {
             try {
                 [IO.Directory]::Delete($testRoot, $true)

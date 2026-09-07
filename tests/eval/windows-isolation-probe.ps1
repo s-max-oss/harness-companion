@@ -1,12 +1,26 @@
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-f]{64}$')]
+    [string]$ExpectedPayloadSha256
+)
+
 $ErrorActionPreference = "Stop"
 
 $payloadEncoded = [System.Environment]::GetEnvironmentVariable("HARNESS_EVAL_PROBE_PAYLOAD")
 if ([string]::IsNullOrWhiteSpace($payloadEncoded)) {
     throw "HARNESS_EVAL_PROBE_PAYLOAD is required"
 }
-$payloadJson = [System.Text.Encoding]::UTF8.GetString(
-    [System.Convert]::FromBase64String($payloadEncoded)
-)
+$payloadBytes = [System.Convert]::FromBase64String($payloadEncoded)
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $payloadSha256 = ([System.BitConverter]::ToString($sha256.ComputeHash($payloadBytes))).Replace('-', '').ToLowerInvariant()
+} finally {
+    $sha256.Dispose()
+}
+if ($payloadSha256 -cne $ExpectedPayloadSha256) {
+    throw "HARNESS_EVAL_PROBE_PAYLOAD hash mismatch"
+}
+$payloadJson = [System.Text.Encoding]::UTF8.GetString($payloadBytes)
 $payload = $payloadJson | ConvertFrom-Json
 
 function Test-FileRead([string]$Path) {
@@ -51,6 +65,7 @@ try {
 
 [ordered]@{
     nonce = $payload.nonce
+    payload_sha256 = $payloadSha256
     identity = (& ([string]$payload.whoami_file)).Trim()
     target_file_readable = Test-FileRead $payload.target_file
     target_writeable = $targetWrite

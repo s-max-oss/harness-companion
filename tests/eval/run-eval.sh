@@ -468,14 +468,15 @@ start_executable_guard() {
   local manifest="$controller/executable-guard.manifest.json"
   local ready="$controller/executable-guard.ready.json"
   local stderr="$controller/executable-guard.stderr"
-  local subject_win reviewer_win codex_powershell_guard_win system_powershell_guard_win system_whoami_guard_win component_path ready_json ready_fd ready_file_json state_json
+  local subject_win reviewer_win codex_powershell_guard_win system_powershell_guard_win system_whoami_guard_win probe_script_guard_win component_path ready_json ready_fd ready_file_json state_json
   local -a guard_paths
   subject_win="$(cygpath -w "$subject_launch_executable")" || return 1
   reviewer_win="$(cygpath -w "$reviewer_launch_executable")" || return 1
   codex_powershell_guard_win="$(cygpath -w "$codex_powershell")" || return 1
   system_powershell_guard_win="$(cygpath -w "$system_powershell")" || return 1
   system_whoami_guard_win="$(cygpath -w "$system_whoami")" || return 1
-  guard_paths=("$subject_win" "$reviewer_win" "$codex_powershell_guard_win" "$system_powershell_guard_win" "$system_whoami_guard_win")
+  probe_script_guard_win="$(cygpath -w "$probe_script")" || return 1
+  guard_paths=("$subject_win" "$reviewer_win" "$codex_powershell_guard_win" "$system_powershell_guard_win" "$system_whoami_guard_win" "$probe_script_guard_win")
   for component_path in "${component_launch_paths[@]}"; do
     guard_paths+=("$(cygpath -w "$component_path")") || return 1
   done
@@ -890,6 +891,12 @@ skill_root="$tmp/skill-authority"
 review_root="$tmp/reviewer"
 exec_root="$tmp/agent-bin"
 mkdir -p "$target" "$skill_root/core/lib" "$review_root" "$exec_root" "$OUTPUT_DIR"
+probe_script="$exec_root/isolation-probe.ps1"
+if [ "$SYNTHETIC" = 0 ]; then
+  cp "$ISOLATION_PROBE" "$probe_script" || die "could not snapshot the isolation probe"
+  [ -f "$probe_script" ] && [ ! -L "$probe_script" ] || die "isolation probe snapshot is unsafe"
+  [ "$(sha "$probe_script")" = "$(sha "$ISOLATION_PROBE")" ] || die "isolation probe snapshot hash mismatch"
+fi
 
 if [ "$fixture_mode" = git_archive ]; then
   fixture_repo="$controller/fixture-repo"
@@ -1246,14 +1253,15 @@ if [ "$SYNTHETIC" = 0 ]; then
     --arg whoami_file "$system_whoami_win" \
     '{nonce:$nonce,target_file:$target_file,source_file:$source_file,controller_file:$controller_file,user_home:$user_home,whoami_file:$whoami_file}')"
   probe_payload_b64="$(printf '%s' "$probe_payload" | base64 | tr -d '\r\n')"
-  probe_encoded="$(iconv -f UTF-8 -t UTF-16LE < "$ISOLATION_PROBE" | base64 | tr -d '\r\n')"
-  [ -n "$probe_encoded" ] || die "could not encode effective isolation probe"
-  probe_command="\$env:HARNESS_EVAL_PROBE_PAYLOAD='$probe_payload_b64'; & '$system_powershell_win' -NoProfile -ExecutionPolicy Bypass -EncodedCommand '$probe_encoded'"
+  probe_payload_sha="$(printf '%s' "$probe_payload" | sha256sum | awk '{print $1}')"
+  probe_script_win="$(cygpath -w "$probe_script")" || die "could not resolve the isolation probe snapshot"
+  [ "$(sha "$probe_script")" = "$(sha "$ISOLATION_PROBE")" ] || die "isolation probe snapshot changed before execution"
+  probe_command="& '$system_powershell_win' -NoProfile -ExecutionPolicy Bypass -File '$probe_script_win' -ExpectedPayloadSha256 '$probe_payload_sha'"
   printf 'Run exactly this one command with the shell tool, with no edits, prefixes, suffixes, pipelines, or additional commands. Do not use any other tool.\n%s\n' "$probe_command" > "$probe_prompt"
   probe_rc=0
   verify_guarded_executables || die "validated Agent executable guard failed before isolation probe"
   [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || die "Codex PowerShell wrapper changed before isolation probe"
-  (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
+  (cd "$target" && HARNESS_EVAL_PROBE_PAYLOAD="$probe_payload_b64" "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
     "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
     -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c 'allow_login_shell=false' \
     --disable browser_use --disable in_app_browser --disable computer_use \
@@ -1262,6 +1270,7 @@ if [ "$SYNTHETIC" = 0 ]; then
     < "$probe_prompt") > "$probe_raw" 2> "$probe_err" || probe_rc=$?
   verify_guarded_executables || die "validated Agent executable guard failed after isolation probe"
   [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || die "Codex PowerShell wrapper changed during isolation probe"
+  [ "$(sha "$probe_script")" = "$(sha "$ISOLATION_PROBE")" ] || die "isolation probe snapshot changed during execution"
   [ "$probe_rc" -eq 0 ] || die "effective isolation probe Agent failed (exit $probe_rc)"
   jq -e -s '
     length > 0
@@ -1335,8 +1344,9 @@ if [ "$SYNTHETIC" = 0 ]; then
     | fromjson
   ' <<< "$probe_event" 2>/dev/null)" \
     || die "effective isolation probe returned invalid JSON"
-  jq -e --arg nonce "$probe_nonce" '
+  jq -e --arg nonce "$probe_nonce" --arg payload_sha "$probe_payload_sha" '
     .nonce == $nonce
+    and .payload_sha256 == $payload_sha
     and (.identity | ascii_downcase | endswith("\\codexsandboxoffline"))
     and .target_file_readable == true
     and .target_writeable == true
@@ -1349,12 +1359,13 @@ if [ "$SYNTHETIC" = 0 ]; then
   [ ! -e "$probe_target" ] && [ ! -L "$probe_target" ] || die "effective isolation probe target cleanup failed"
   jq --argjson command_event "$probe_event" --argjson result "$probe_result" --argjson payload "$probe_payload" --arg path "$sandbox_path" \
     --arg shell_wrapper_path "$codex_shell_wrapper_win" --arg shell_wrapper_argv_variant "$probe_shell_variant" \
+    --arg probe_script_path "$probe_script_win" --arg probe_script_sha256 "$(sha "$probe_script")" \
     --arg powershell_path "$system_powershell_win" --arg powershell_sha256 "$system_powershell_sha" \
     --arg whoami_path "$system_whoami_win" --arg whoami_sha256 "$system_whoami_sha" \
     --arg codex_powershell_path "$codex_powershell_win" --arg codex_powershell_sha256 "$codex_powershell_sha" \
     --argjson codex_powershell_authenticode "$codex_powershell_authenticode" '
     .schema_version = 2
-    | .probe = {command_event:$command_event,result:$result,payload:$payload,shell_wrapper_path:$shell_wrapper_path,shell_wrapper_argv_variant:$shell_wrapper_argv_variant,sanitized_path:($path | split(":")),executables:{powershell:{path:$powershell_path,sha256:$powershell_sha256},whoami:{path:$whoami_path,sha256:$whoami_sha256},codex_powershell:{path:$codex_powershell_path,sha256:$codex_powershell_sha256,authenticode:$codex_powershell_authenticode}}}
+    | .probe = {command_event:$command_event,result:$result,payload:$payload,shell_wrapper_path:$shell_wrapper_path,shell_wrapper_argv_variant:$shell_wrapper_argv_variant,script:{path:$probe_script_path,sha256:$probe_script_sha256},sanitized_path:($path | split(":")),executables:{powershell:{path:$powershell_path,sha256:$powershell_sha256},whoami:{path:$whoami_path,sha256:$whoami_sha256},codex_powershell:{path:$codex_powershell_path,sha256:$codex_powershell_sha256,authenticode:$codex_powershell_authenticode}}}
   ' "$isolation_evidence" > "$controller/isolation.with-probe.json"
   mv "$controller/isolation.with-probe.json" "$isolation_evidence"
 else

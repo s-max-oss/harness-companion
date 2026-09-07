@@ -110,15 +110,15 @@ check "crashed eval state has identity-bound lifecycle recovery" bash -c 'grep -
 check "real eval binds the token-resolved user profile instead of caller USERPROFILE" bash -c 'grep -Fq "GetFolderPath([Environment+SpecialFolder]::UserProfile)" "$1" && ! grep -Fq "\${USERPROFILE:-\$HOME}" "$1"' _ "$EVAL/run-eval.sh"
 check "real Agent identity and Windows runtime tools are versioned trust anchors" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin" and (.agents.codex.approved_builds | length > 0 and all(.[]; (.cli_version | length > 0) and (.sha256 | test("^[0-9a-f]{64}$")) and .shell_wrapper_argv_variants == ["powershell-command-v1","powershell-no-profile-command-v1"])) and (.windows_system_tools | keys | sort == ["powershell","whoami"]) and (all(.windows_system_tools[]; (.path | startswith("C:\\Windows\\System32\\")) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_runtime_tools | keys == ["codex_powershell"]) and (.windows_runtime_tools.codex_powershell.user_profile_suffix | endswith("\\pwsh.exe")) and (.windows_runtime_tools.codex_powershell.publisher_subject | startswith("CN=Microsoft Corporation")) and (.windows_runtime_tools.codex_powershell.publisher_thumbprints | length > 0) and (.windows_runtime_tools.codex_powershell.approved_sha256 | length > 0 and all(.[]; test("^[0-9a-f]{64}$")))' "$EVAL/trust/agent-publishers.json"
 probe_wrapper='C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe'
-probe_inner='$env:HARNESS_EVAL_PROBE_PAYLOAD='"'"'ZGVidWc='"'"'; Write-Output ok'
+probe_inner="& 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File 'C:\\agent-bin\\isolation-probe.ps1' -ExpectedPayloadSha256 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'"
 probe_inner_b64="$(printf '%s' "$probe_inner" | base64 | tr -d '\r\n')"
 probe_variants_b64="$(printf '%s' '["powershell-command-v1","powershell-no-profile-command-v1"]' | base64 | tr -d '\r\n')"
 probe_display_command="$(cat <<'EOF'
-"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'ZGVidWc='; Write-Output ok"
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '& '"'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File 'C:\\agent-bin\\isolation-probe.ps1' -ExpectedPayloadSha256 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'"
 EOF
 )"
 probe_display_no_profile="$(cat <<'EOF'
-"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -Command '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'ZGVidWc='; Write-Output ok"
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -Command '& '"'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File 'C:\\agent-bin\\isolation-probe.ps1' -ExpectedPayloadSha256 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'"
 EOF
 )"
 probe_display_command_b64="$(printf '%s' "$probe_display_command" | base64 | tr -d '\r\n')"
@@ -147,7 +147,7 @@ else
 fi
 check "production probe derives the observed system wrapper" grep -Fq 'codex_shell_wrapper_win="$system_root_win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"' "$EVAL/run-eval.sh"
 check "production probe validator uses the observed system wrapper and build policy" bash -c 'grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1"' _ "$EVAL/run-eval.sh"
-check "production inner probe stays profile-free" grep -Fq -- "-NoProfile -ExecutionPolicy Bypass -EncodedCommand" "$EVAL/run-eval.sh"
+check "production inner probe stays profile-free and binds a guarded script plus payload hash" bash -c 'grep -Fq -- "-NoProfile -ExecutionPolicy Bypass -File" "$1" && grep -Fq -- "-ExpectedPayloadSha256" "$1" && grep -Fq "probe_script_guard_win" "$1"' _ "$EVAL/run-eval.sh"
 check "all real Codex exec calls disable login shells" bash -c '[ "$(grep -c "allow_login_shell=false" "$1")" -eq 3 ]' _ "$EVAL/run-eval.sh"
 check "attester binds the exact serializer variant to the evidence and build policy" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1"' _ "$EVAL/attest-result.sh"
 check "result gate binds the exact serializer variant without a host PowerShell call" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1" && ! grep -Fq "windows_powershell()" "$1"' _ "$EVAL/check-results.sh"
@@ -182,7 +182,7 @@ if python "$EVAL/validate-probe-command.py" --identify "$(printf '%s\r' "$probe_
 else
   ok "probe command validator rejects forbidden control bytes"
 fi
-check "real executable guard includes both PowerShell runtimes and inner whoami" bash -c 'grep -Fq -- "guard_paths=(\"\$subject_win\" \"\$reviewer_win\" \"\$codex_powershell_guard_win\" \"\$system_powershell_guard_win\" \"\$system_whoami_guard_win\")" "$1" && grep -Fq -- "sha \"\$system_powershell\"" "$1" && grep -Fq -- "sha \"\$system_whoami\"" "$1" && grep -Fq -- "codex_powershell_locked_authenticode" "$1"' _ "$EVAL/run-eval.sh"
+check "real executable guard includes both PowerShell runtimes, inner whoami, and the probe script" bash -c 'grep -Fq -- "guard_paths=(\"\$subject_win\" \"\$reviewer_win\" \"\$codex_powershell_guard_win\" \"\$system_powershell_guard_win\" \"\$system_whoami_guard_win\" \"\$probe_script_guard_win\")" "$1" && grep -Fq -- "sha \"\$system_powershell\"" "$1" && grep -Fq -- "sha \"\$system_whoami\"" "$1" && grep -Fq -- "codex_powershell_locked_authenticode" "$1"' _ "$EVAL/run-eval.sh"
 approved_version="$(jq -r '.agents.codex.approved_builds[0].cli_version' "$EVAL/trust/agent-publishers.json")"
 approved_digest="$(jq -r '.agents.codex.approved_builds[0].sha256' "$EVAL/trust/agent-publishers.json")"
 check "shared production build verifier accepts the exact approved tuple" bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex "$approved_version" "$approved_digest"
@@ -562,9 +562,10 @@ test_whoami_win="$(cygpath -w "$test_whoami_posix")"
 test_powershell_sha="$(sha256sum "$test_powershell_posix" | cut -d ' ' -f 1)"
 test_whoami_sha="$(sha256sum "$test_whoami_posix" | cut -d ' ' -f 1)"
 test_probe_payload="$(jq -cnS --arg whoami "$test_whoami_win" '{nonce:"test-nonce",target_file:"C:\\target\\.harness-eval-isolation-sentinel",source_file:"C:\\workspace\\SKILL.md",controller_file:"C:\\controller\\runtime.manifest",user_home:"C:\\home",whoami_file:$whoami}')"
-test_probe_payload_b64="$(printf '%s' "$test_probe_payload" | base64 | tr -d '\r\n')"
-test_probe_program_b64="$(iconv -f UTF-8 -t UTF-16LE < "$EVAL/windows-isolation-probe.ps1" | base64 | tr -d '\r\n')"
-test_probe_command="\$env:HARNESS_EVAL_PROBE_PAYLOAD='$test_probe_payload_b64'; & '$test_powershell_win' -NoProfile -ExecutionPolicy Bypass -EncodedCommand '$test_probe_program_b64'"
+test_probe_payload_sha="$(printf '%s' "$test_probe_payload" | sha256sum | cut -d ' ' -f 1)"
+test_probe_script_win='C:\agent-bin\isolation-probe.ps1'
+test_probe_script_sha="$(sha256sum "$EVAL/windows-isolation-probe.ps1" | cut -d ' ' -f 1)"
+test_probe_command="& '$test_powershell_win' -NoProfile -ExecutionPolicy Bypass -File '$test_probe_script_win' -ExpectedPayloadSha256 '$test_probe_payload_sha'"
 test_codex_powershell_suffix="$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix' "$EVAL/trust/agent-publishers.json")"
 test_codex_powershell_win="C:\\home\\$test_codex_powershell_suffix"
 test_codex_powershell_sha="$(jq -r '.windows_runtime_tools.codex_powershell.approved_sha256[0]' "$EVAL/trust/agent-publishers.json")"
@@ -574,8 +575,8 @@ test_probe_command_b64="$(printf '%s' "$test_probe_command" | base64 | tr -d '\r
 test_probe_wrapper_win="$(env -u PSModulePath powershell.exe -NoProfile -Command '$env:SystemRoot + "\System32\WindowsPowerShell\v1.0\powershell.exe"' | tr -d '\r')"
 test_probe_variant="powershell-no-profile-command-v1"
 test_probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_variant" "$test_probe_command_b64" "$test_probe_wrapper_win")"
-test_probe_result="$(jq -cn '{nonce:"test-nonce",identity:"test-host\\codexsandboxoffline",target_file_readable:true,target_writeable:true,source_workspace_readable:false,controller_readable:false,user_home_readable:false}')"
-jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg shell_wrapper_path "$test_probe_wrapper_win" --arg shell_wrapper_argv_variant "$test_probe_variant" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" '{
+test_probe_result="$(jq -cn --arg payload_sha "$test_probe_payload_sha" '{nonce:"test-nonce",payload_sha256:$payload_sha,identity:"test-host\\codexsandboxoffline",target_file_readable:true,target_writeable:true,source_workspace_readable:false,controller_readable:false,user_home_readable:false}')"
+jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg shell_wrapper_path "$test_probe_wrapper_win" --arg shell_wrapper_argv_variant "$test_probe_variant" --arg probe_script_path "$test_probe_script_win" --arg probe_script_sha "$test_probe_script_sha" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" '{
   schema_version:2,
   isolation:"windows-native-elevated-acl",
   controller_visible_to_agent:false,
@@ -601,6 +602,7 @@ jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n'
     result:$result,
     shell_wrapper_path:$shell_wrapper_path,
     shell_wrapper_argv_variant:$shell_wrapper_argv_variant,
+    script:{path:$probe_script_path,sha256:$probe_script_sha},
     executables:{powershell:{path:$powershell_path,sha256:$powershell_sha},whoami:{path:$whoami_path,sha256:$whoami_sha},codex_powershell:{path:$codex_powershell_path,sha256:$codex_powershell_sha,authenticode:{status:"Valid",subject:$codex_powershell_subject,thumbprint:$codex_powershell_thumbprint}}},
     sanitized_path:["/c/Windows/System32/WindowsPowerShell/v1.0","/c/Windows/System32","/c/Windows","/c/Program Files/Git/bin","/c/Program Files/Git/usr/bin"]
   }
@@ -698,6 +700,33 @@ else
   sed 's/^/  wrong-variant: /' "$TMP/wrong-variant.log" >&2
   bad "attester rejects a forged probe serializer variant"
 fi
+for probe_tamper in script-path payload-hash; do
+  tamper_candidates="$TMP/$probe_tamper-candidates"
+  tamper_results="$TMP/$probe_tamper-results"
+  mkdir -p "$tamper_candidates" "$tamper_results"
+  for f in "$attest_base".*; do cp "$f" "$tamper_candidates/"; done
+  tamper_candidate="$tamper_candidates/$(basename "$attest_candidate")"
+  tamper_base="${tamper_candidate%.json}"
+  if [ "$probe_tamper" = script-path ]; then
+    jq '.probe.script.path="C:\\attacker\\isolation-probe.ps1"' "$tamper_base.isolation.json" > "$TMP/$probe_tamper-isolation.tmp"
+  else
+    jq --arg bad '0000000000000000000000000000000000000000000000000000000000000000' \
+      '.probe.result.payload_sha256=$bad | .probe.command_event.aggregated_output=((.probe.result | tojson) + "\n")' \
+      "$tamper_base.isolation.json" > "$TMP/$probe_tamper-isolation.tmp"
+  fi
+  mv "$TMP/$probe_tamper-isolation.tmp" "$tamper_base.isolation.json"
+  tamper_sha="$(sha256sum "$tamper_base.isolation.json" | cut -d ' ' -f 1)"
+  jq --arg isolation_sha "$tamper_sha" '.artifact_hashes.isolation=$isolation_sha' "$tamper_candidate" > "$TMP/$probe_tamper-candidate.tmp"
+  mv "$TMP/$probe_tamper-candidate.tmp" "$tamper_candidate"
+  if bash "$EVAL/attest-result.sh" "$tamper_candidate" \
+    --signing-key="$TMP/test-signing-key" --candidates-dir="$tamper_candidates" \
+    --results-dir="$tamper_results" --allowed-signers="$TMP/test-release-signers" \
+    > "$TMP/$probe_tamper.log" 2>&1; then
+    bad "attester rejects forged probe $probe_tamper evidence"
+  else
+    ok "attester rejects forged probe $probe_tamper evidence"
+  fi
+done
 if bash "$EVAL/attest-result.sh" "$attest_candidate" \
   --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/attest-candidates" \
   --results-dir="$TMP/attested-results" --allowed-signers="$TMP/test-release-signers" \

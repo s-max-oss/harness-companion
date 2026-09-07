@@ -310,7 +310,7 @@ official_agent_path() {
 }
 
 expected_probe_command() {
-  local evidence="$1" payload payload_b64 probe_b64 powershell_path powershell_sha whoami_path whoami_sha trusted_powershell_path trusted_powershell_sha trusted_whoami_path trusted_whoami_sha
+  local evidence="$1" payload payload_sha powershell_path powershell_sha whoami_path whoami_sha trusted_powershell_path trusted_powershell_sha trusted_whoami_path trusted_whoami_sha controller_file controller_suffix script_path recorded_script_path recorded_script_sha
   payload="$(jq -cS '.probe.payload' "$evidence")" || return 1
   [ "$payload" != null ] || return 1
   powershell_path="$(jq -r '.probe.executables.powershell.path // empty' "$evidence")" || return 1
@@ -326,11 +326,17 @@ expected_probe_command() {
   [ "$whoami_path" = "$trusted_whoami_path" ] || return 1
   [ "${whoami_sha,,}" = "$trusted_whoami_sha" ] || return 1
   [ "$(jq -r '.whoami_file // empty' <<< "$payload")" = "$whoami_path" ] || return 1
-  payload_b64="$(printf '%s' "$payload" | base64 | tr -d '\r\n')" || return 1
-  probe_b64="$(iconv -f UTF-8 -t UTF-16LE < "$ISOLATION_PROBE" | base64 | tr -d '\r\n')" || return 1
-  [ -n "$probe_b64" ] || return 1
-  printf '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'"'%s'"'"'; & '"'"'%s'"'"' -NoProfile -ExecutionPolicy Bypass -EncodedCommand '"'"'%s'"'"'\n' \
-    "$payload_b64" "$powershell_path" "$probe_b64"
+  payload_sha="$(printf '%s' "$payload" | sha256sum | awk '{print $1}')" || return 1
+  controller_file="$(jq -r '.controller_file // empty' <<< "$payload")" || return 1
+  controller_suffix='\controller\runtime.manifest'
+  case "$controller_file" in *"$controller_suffix") ;; *) return 1 ;; esac
+  script_path="${controller_file%"$controller_suffix"}\agent-bin\isolation-probe.ps1"
+  recorded_script_path="$(jq -r '.probe.script.path // empty' "$evidence")" || return 1
+  recorded_script_sha="$(jq -r '.probe.script.sha256 // empty | ascii_downcase' "$evidence")" || return 1
+  [ "$recorded_script_path" = "$script_path" ] || return 1
+  [ "$recorded_script_sha" = "$(sha "$ISOLATION_PROBE")" ] || return 1
+  printf '& '"'"'%s'"'"' -NoProfile -ExecutionPolicy Bypass -File '"'"'%s'"'"' -ExpectedPayloadSha256 '"'"'%s'"'"'\n' \
+    "$powershell_path" "$script_path" "$payload_sha"
 }
 
 runtime_file_manifest() {
@@ -574,6 +580,8 @@ fi
 jq -e \
   --arg wrapper_suffix "$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")" \
   --arg wrapper_subject "$(jq -r '.windows_runtime_tools.codex_powershell.publisher_subject // empty' "$AGENT_PUBLISHERS")" \
+  --arg payload_sha "$(jq -cS -j '.probe.payload' "$snapshot_base.isolation.json" | sha256sum | awk '{print $1}')" \
+  --arg probe_script_sha "$(sha "$ISOLATION_PROBE")" \
   --argjson wrapper_thumbprints "$(jq -c '.windows_runtime_tools.codex_powershell.publisher_thumbprints // []' "$AGENT_PUBLISHERS")" \
   --argjson wrapper_hashes "$(jq -c '.windows_runtime_tools.codex_powershell.approved_sha256 // [] | map(ascii_downcase)' "$AGENT_PUBLISHERS")" '
   def norm: gsub("\\\\"; "/") | ascii_downcase | sub("/+$"; "");
@@ -582,6 +590,7 @@ jq -e \
   | ($e.probe.payload.target_file | norm) as $target
   | ($e.probe.payload.source_file | norm) as $source
   | ($e.probe.payload.controller_file | norm) as $controller_file
+  | ($controller_file | sub("/controller/runtime\\.manifest$"; "/agent-bin/isolation-probe.ps1")) as $probe_script
   | ($e.probe.payload.user_home | norm) as $user_home
   | $e.schema_version == 2
   and $e.isolation == "windows-native-elevated-acl"
@@ -614,6 +623,9 @@ jq -e \
     | if contains("\r") then error("invalid carriage return") else . end
     | split("\n") | map(select(length > 0)) | last | fromjson) == $e.probe.result)
   and ($e.probe.payload | keys | sort == ["controller_file","nonce","source_file","target_file","user_home","whoami_file"])
+  and ($e.probe.script | keys | sort == ["path","sha256"])
+  and (($e.probe.script.path | norm) == $probe_script)
+  and $e.probe.script.sha256 == $probe_script_sha
   and ($e.probe.executables | keys | sort == ["codex_powershell","powershell","whoami"])
   and (all($e.probe.executables[]; (.path | type == "string" and length > 0) and (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))))
   and (($e.probe.executables.codex_powershell.path | norm) == (($user_home + "/" + $wrapper_suffix) | norm))
@@ -621,8 +633,9 @@ jq -e \
   and $e.probe.executables.codex_powershell.authenticode.status == "Valid"
   and $e.probe.executables.codex_powershell.authenticode.subject == $wrapper_subject
   and ($e.probe.executables.codex_powershell.authenticode.thumbprint as $thumbprint | ($wrapper_thumbprints | index($thumbprint)) != null)
-  and ($e.probe.result | keys | sort == ["controller_readable","identity","nonce","source_workspace_readable","target_file_readable","target_writeable","user_home_readable"])
+  and ($e.probe.result | keys | sort == ["controller_readable","identity","nonce","payload_sha256","source_workspace_readable","target_file_readable","target_writeable","user_home_readable"])
   and $e.probe.payload.nonce == $e.probe.result.nonce
+  and $e.probe.result.payload_sha256 == $payload_sha
   and ($e.probe.result.nonce | type == "string" and length > 0)
   and ($source | startswith($roots[0] + "/")) and ($source | endswith("/skill.md"))
   and $user_home == $roots[1]

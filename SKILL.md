@@ -72,6 +72,13 @@ Load `references/conversational-principles.md` and `references/post-init-explana
 
    Treat the command as illustrative argument binding, not permission to interpolate untrusted shell text. Use the host's structured process API or safely quoted arguments in a real invocation.
 
+   Approval freezes the exact human Brief that was just presented. Build the
+   executor JSON by copying its goal, success-criterion strings, and other
+   decisions exactly; never regenerate, paraphrase, personalize (for example,
+   by inserting “the user's”), or reinterpret them from earlier messages. If
+   the exact approved Brief cannot be recovered from conversation context, do
+   not write—present it again and ask for confirmation.
+
 ### Resume and update safety
 
 For resume on a managed-valid project, first perform a no-write 3-way comparison and explain which files are identical, template-only changes, user-modified, or missing. Offer **apply the template-only changes**, **keep all existing files**, or **cancel**. Only an approved exact plan may execute; user-modified files must be preserved. Use the same stable-Brief dry-run and plan-token apply sequence as explicit update below. If the user keeps all or cancels, do not apply the plan.

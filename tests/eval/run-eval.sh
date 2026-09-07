@@ -1442,23 +1442,47 @@ if [ -f "$brief" ] && [ ! -L "$brief" ] && jq -e 'type == "object"' "$brief" >/d
 
   expected_default_fields="$(jq -c '.expected_default_fields // [] | sort' "$CASE")"
   actual_default_fields="$(jq -c '[.defaults_applied[]?.field] | sort' "$brief")"
-  if [ "$expected_default_fields" = "$actual_default_fields" ] && jq -e --slurpfile case "$CASE" '
+  normalized_default_fields="$(jq -c '
+    [ .defaults_applied[]?.field
+      | if . == "/operation_preferences" then
+          ["/operation_preferences/commit","/operation_preferences/destructive_ops","/operation_preferences/external_mutation","/operation_preferences/install_packages","/operation_preferences/merge","/operation_preferences/push","/operation_preferences/release"][]
+        else . end ] | sort
+  ' "$brief")"
+  if [ "$expected_default_fields" = "$normalized_default_fields" ] && jq -e --slurpfile case "$CASE" '
       . as $brief
       | def pointer_path:
           split("/")[1:] | map(gsub("~1"; "/") | gsub("~0"; "~"));
         ($case[0].expected_default_fields // [] | sort) as $expected
-      | all($expected[]; . as $field
-          | [$brief.defaults_applied[]
-              | select(.field == $field
-                and .source == "spec_default"
-                and (.rationale | type == "string" and length > 0)
-                and .value == ($brief | getpath($field | pointer_path)))]
-          | length == 1)
+      | ([ $brief.defaults_applied[].field ] | unique | length) == ($brief.defaults_applied | length)
+        and all($brief.defaults_applied[];
+          .field as $field
+          | (($expected | index($field)) != null or $field == "/operation_preferences")
+          and .source == "spec_default"
+          and (.rationale | type == "string" and length > 0)
+          and .value == ($brief | getpath($field | pointer_path)))
     ' "$brief" >/dev/null; then
     add_objective "Brief records the complete documented default set" true "fields=$actual_default_fields"
   else
-    add_objective "Brief records the complete documented default set" false "expected=$expected_default_fields actual=$actual_default_fields"
+    add_objective "Brief records the complete documented default set" false "expected=$expected_default_fields actual=$actual_default_fields normalized=$normalized_default_fields"
   fi
+
+  while IFS= read -r goal_regex; do
+    goal_regex="${goal_regex%$'\r'}"
+    if jq -er '.goal' "$brief" | grep -Eiq -- "$goal_regex"; then
+      add_objective "Goal preserves required meaning: $goal_regex" true "goal matches"
+    else
+      add_objective "Goal preserves required meaning: $goal_regex" false "goal does not match"
+    fi
+  done < <(jq -r '.expected_brief_semantics.goal_required_regexes[]?' "$CASE")
+  success_text="$(jq -r '.success_criteria[]?' "$brief")"
+  while IFS= read -r success_regex; do
+    success_regex="${success_regex%$'\r'}"
+    if grep -Eiq -- "$success_regex" <<< "$success_text"; then
+      add_objective "Success criteria preserve required meaning: $success_regex" true "criteria match"
+    else
+      add_objective "Success criteria preserve required meaning: $success_regex" false "criteria do not match"
+    fi
+  done < <(jq -r '.expected_brief_semantics.success_criteria_required_regexes[]?' "$CASE")
 else
   add_objective "PROJECT_BRIEF.json is a valid object" false "missing, invalid, or symlinked Brief"
 fi

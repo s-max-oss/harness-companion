@@ -104,6 +104,11 @@ decision shown for approval must have a lossless machine-readable counterpart
 in the exact Brief sent to the executor. Never obtain approval for a richer
 human Brief and silently discard fields while constructing its JSON form.
 
+After approval, copy the exact presented goal and success-criterion strings
+into the executor JSON. Do not reconstruct them from earlier user messages or
+change perspective by adding phrases such as “the user's.” If the exact
+approved wording is unavailable, present the Brief again; do not execute.
+
 The confirmation choices are:
 
 - **Approve** — pass the exact confirmed Brief to the executor.

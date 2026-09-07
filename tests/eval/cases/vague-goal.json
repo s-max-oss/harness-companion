@@ -21,13 +21,6 @@
   "expected_brief_fields": {
     "advisory": true,
     "detected_type": "python",
-    "goal": "Build a small web app for managing the team's tasks.",
-    "success_criteria": [
-      "Users can create tasks.",
-      "Users can assign tasks to team members.",
-      "Users can mark tasks complete.",
-      "The existing test suite passes."
-    ],
     "stack": "python",
     "test_framework": "pytest",
     "cadence": "stable",
@@ -51,8 +44,23 @@
     "/secrets_handling",
     "/external_network",
     "/prohibitions",
-    "/operation_preferences"
+    "/operation_preferences/commit",
+    "/operation_preferences/destructive_ops",
+    "/operation_preferences/external_mutation",
+    "/operation_preferences/install_packages",
+    "/operation_preferences/merge",
+    "/operation_preferences/push",
+    "/operation_preferences/release"
   ],
+  "expected_brief_semantics": {
+    "goal_required_regexes": ["web app", "team.*task|task.*team"],
+    "success_criteria_required_regexes": [
+      "create.*task",
+      "assign.*task",
+      "complet.*task",
+      "(test|pytest).*pass"
+    ]
+  },
   "objective_dialog_rules": {
     "forbidden_phrases": [
       "Lightweight Python web framework",

@@ -31,11 +31,14 @@ def decode_canonical(value: str, label: str) -> str:
 
 def canonical_display(wrapper: str, expected: str) -> str:
     # Codex 0.152.1 emits Windows command events using this exact display form:
-    # a double-quoted, backslash-escaped executable followed by the mandatory
-    # profile-free PowerShell argv.  The controller-generated probe has one or
-    # more single quotes, no double quote/backtick, and no expansion-capable
-    # token after its first single quote.  Constrain that grammar instead of
-    # accepting a shell-equivalent alternate serialization.
+    # a double-quoted, backslash-escaped executable followed by its non-login
+    # PowerShell `-Command` argv.  `allow_login_shell=false` constrains login
+    # semantics; it does not add `-NoProfile` to this Windows wrapper.  The
+    # controller-generated command invokes the hash-bound inner PowerShell with
+    # `-NoProfile`, and has one or more single quotes, no double quote/backtick,
+    # and no expansion-capable token after its first single quote.  Constrain
+    # that grammar instead of accepting a shell-equivalent alternate
+    # serialization.
     if any(ch in wrapper for ch in "\x00\r\n\""):
         fail("wrapper path cannot be represented canonically")
     if len(wrapper) < 3 or wrapper[1:3] != ":\\":
@@ -53,7 +56,7 @@ def canonical_display(wrapper: str, expected: str) -> str:
     escape_path = lambda value: value.replace("\\", "\\\\")
     wrapper_display = f'"{escape_path(wrapper)}"'
     command_display = f"'{escape_path(prefix)}'\"{escape_path(suffix)}\""
-    return f"{wrapper_display} -NoProfile -Command {command_display}"
+    return f"{wrapper_display} -Command {command_display}"
 
 
 def canonical_windows_path(value: str, label: str) -> str:
@@ -90,4 +93,4 @@ if not recorded_b64 or not expected_b64 or not wrapper:
 recorded = decode_canonical(recorded_b64, "recorded command")
 expected = decode_canonical(expected_b64, "expected command")
 if recorded != canonical_display(wrapper, expected):
-    fail("recorded command was not the exact canonical profile-free probe argv")
+    fail("recorded command was not the exact canonical non-login probe argv")

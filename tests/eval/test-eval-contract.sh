@@ -113,7 +113,7 @@ probe_wrapper='C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe'
 probe_inner='$env:HARNESS_EVAL_PROBE_PAYLOAD='"'"'ZGVidWc='"'"'; Write-Output ok'
 probe_inner_b64="$(printf '%s' "$probe_inner" | base64 | tr -d '\r\n')"
 probe_display="$(cat <<'EOF'
-"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -Command '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'ZGVidWc='; Write-Output ok"
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'ZGVidWc='; Write-Output ok"
 EOF
 )"
 probe_display_b64="$(printf '%s' "$probe_display" | base64 | tr -d '\r\n')"
@@ -122,7 +122,7 @@ if [ "$(python "$EVAL/validate-probe-command.py" --canonical "$probe_inner_b64" 
 else
   bad "probe command serializer matches the approved Codex 0.152.1 golden display"
 fi
-check "probe command validator accepts the exact canonical profile-free wrapper argv" python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$probe_inner_b64" "$probe_wrapper"
+check "probe command validator accepts the exact canonical non-login wrapper argv" python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$probe_inner_b64" "$probe_wrapper"
 check "production probe derives the observed system wrapper" grep -Fq 'codex_shell_wrapper_win="$system_root_win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"' "$EVAL/run-eval.sh"
 check "production probe validator uses the observed system wrapper" grep -Fq '$expected_probe_command_b64" "$codex_shell_wrapper_win"' "$EVAL/run-eval.sh"
 check "production inner probe stays profile-free" grep -Fq -- "-NoProfile -ExecutionPolicy Bypass -EncodedCommand" "$EVAL/run-eval.sh"
@@ -141,13 +141,14 @@ else
   ok "probe command validator rejects inner-command drift"
 fi
 for mutation in \
-  "${probe_display/ -NoProfile/}" \
+  "${probe_display/ -Command/}" \
   " ${probe_display}" \
   "${probe_display} " \
-  "${probe_display/ -NoProfile/  -NoProfile}" \
-  "${probe_display/ -NoProfile/ -NoProfile -NoProfile}" \
-  "${probe_display/ -NoProfile -Command/ -Command -NoProfile}" \
-  "${probe_display/ -NoProfile/ -NonInteractive -NoProfile}"; do
+  "${probe_display/ -Command/  -Command}" \
+  "${probe_display/ -Command/ -Command -Command}" \
+  "${probe_display/ -Command/ -NoProfile -Command}" \
+  "${probe_display/ -Command/ -NonInteractive -Command}" \
+  "${probe_display/ -Command/ -Command -NoProfile}"; do
   if python "$EVAL/validate-probe-command.py" "$(printf '%s' "$mutation" | base64 | tr -d '\r\n')" "$probe_inner_b64" "$probe_wrapper" >/dev/null 2>&1; then
     bad "probe command validator rejects noncanonical wrapper argv serialization"
   else

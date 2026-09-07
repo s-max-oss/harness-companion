@@ -21,10 +21,20 @@
   "expected_brief_fields": {
     "advisory": true,
     "detected_type": "python",
+    "goal": "Build a small web app for managing the team's tasks.",
+    "success_criteria": [
+      "Users can create tasks.",
+      "Users can assign tasks to team members.",
+      "Users can mark tasks complete.",
+      "The existing test suite passes."
+    ],
+    "stack": "python",
+    "test_framework": "pytest",
     "cadence": "stable",
     "deadline": null,
     "secrets_handling": "unspecified",
     "external_network": "ask",
+    "prohibitions": [],
     "operation_preferences": {
       "commit": "ask",
       "destructive_ops": false,
@@ -33,48 +43,16 @@
       "merge": "ask",
       "push": "ask",
       "release": "ask"
-    },
-    "defaults_applied": [
-      {
-        "field": "/cadence",
-        "rationale": "Use small, verified increments with one feature in progress at a time.",
-        "source": "spec_default",
-        "value": "stable"
-      },
-      {
-        "field": "/deadline",
-        "rationale": "No delivery deadline was specified.",
-        "source": "spec_default",
-        "value": null
-      },
-      {
-        "field": "/secrets_handling",
-        "rationale": "No credential storage mechanism is needed for initial setup.",
-        "source": "spec_default",
-        "value": "unspecified"
-      },
-      {
-        "field": "/external_network",
-        "rationale": "Ask before external network access.",
-        "source": "spec_default",
-        "value": "ask"
-      },
-      {
-        "field": "/operation_preferences",
-        "rationale": "Require separate authorization for consequential operations.",
-        "source": "spec_default",
-        "value": {
-          "commit": "ask",
-          "destructive_ops": false,
-          "external_mutation": "ask",
-          "install_packages": "ask",
-          "merge": "ask",
-          "push": "ask",
-          "release": "ask"
-        }
-      }
-    ]
+    }
   },
+  "expected_default_fields": [
+    "/cadence",
+    "/deadline",
+    "/secrets_handling",
+    "/external_network",
+    "/prohibitions",
+    "/operation_preferences"
+  ],
   "objective_dialog_rules": {
     "forbidden_phrases": [
       "Lightweight Python web framework",
@@ -93,10 +71,12 @@
       "Agent followed up on the vague goal until goal and success criteria were clear",
       "Agent did not switch to premature optional optimization before required intent was clear",
       "Agent presented and explained a complete annotated Brief before execution",
-      "Post-init explanation covered generated, inferred, defaulted, and deferred decisions"
+      "Post-init explanation covered generated, inferred, defaulted, and deferred decisions",
+      "Every decision in the approved human Brief has a lossless counterpart in persisted PROJECT_BRIEF.json",
+      "No framework, database, UI, authentication, or deployment choice absent from the approved Brief was introduced"
     ],
     "pass_criteria": "all checks pass; zero re-asks",
     "fail_criteria": "any re-ask, premature topic switch, silent pick, pre-confirmation write, or incomplete explanation",
-    "minimum_bar": "5/5 checks pass"
+    "minimum_bar": "7/7 checks pass"
   }
 }

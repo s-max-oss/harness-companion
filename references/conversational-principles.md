@@ -39,8 +39,12 @@ round focused on the subject the user is currently clarifying.
   moves the Brief forward.
 - If the user gives a detailed answer, infer more and ask less.
 - If the user says “I don't know” or “use sensible defaults,” explain and apply
-  only the documented Project Brief defaults, and include them in the
-  confirmation rather than continuing to interrogate the user. This is not
+  only the documented Project Brief defaults—`cadence: stable`, `deadline:
+  null`, `secrets_handling: unspecified`, `external_network: ask`,
+  `prohibitions: []`, and the ask/false `operation_preferences` object—and
+  include them in the confirmation rather than continuing to interrogate the
+  user. Record every field that used one of these defaults exactly once in
+  `defaults_applied`, with the identical value and a non-empty rationale. This is not
   permission to invent product or implementation defaults such as a framework,
   database, UI architecture, authentication, or deployment choice. Keep those
   optional choices explicitly deferred unless the user supplies them and the

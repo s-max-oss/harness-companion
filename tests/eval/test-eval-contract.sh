@@ -64,6 +64,7 @@ for c in "${cases[@]}"; do
     and (.expected_dialog_signals.asked_at_most_per_round == null)
     and (.expected_post_init_files | type == "array" and length >= 5)
     and (.expected_brief_fields | type == "object")
+    and ((.expected_default_fields // []) | type == "array" and all(.[]; type == "string" and startswith("/")))
     and ((.objective_dialog_rules // {}) | type == "object")
     and ((.objective_dialog_rules.forbidden_phrases // []) | type == "array" and all(.[]; type == "string" and length > 0))
     and ((.objective_dialog_rules.final_response_required_regexes // []) | type == "array" and all(.[]; type == "string" and length > 0))
@@ -169,8 +170,8 @@ check "all real Codex exec calls disable login shells" bash -c '[ "$(grep -c "al
 check "attester binds the exact serializer variant to the evidence and build policy" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1"' _ "$EVAL/attest-result.sh"
 check "result gate binds the exact serializer variant without a host PowerShell call" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1" && ! grep -Fq "windows_powershell()" "$1"' _ "$EVAL/check-results.sh"
 check "attester and result gate bind source ACL evidence to live roots and account SIDs" bash -c 'for f in "$@"; do grep -Fq "windows_sandbox_accounts_json" "$f" && grep -Fq "canonical_source_host" "$f" && grep -Fq "canonical_workspace_host" "$f" && grep -Fq "live_sandbox_accounts" "$f" || exit 1; done' _ "$EVAL/attest-result.sh" "$EVAL/check-results.sh"
-check "guided init keeps approved defaults losslessly machine-representable" bash -c 'grep -Fq "Every decision presented for approval must be represented losslessly" "$1" && grep -Fq "apply only the documented Brief defaults" "$1" && grep -Fq "do not invent product or implementation defaults" "$1"' _ "$ROOT/SKILL.md"
-check "conversation guidance does not turn sensible defaults into product architecture" bash -c 'grep -Fq "only the documented Project Brief defaults" "$1" && grep -Fq "framework," "$1" && grep -Fq "database," "$1" && grep -Fq "explicitly deferred" "$1"' _ "$ROOT/references/conversational-principles.md"
+check "guided init keeps approved defaults losslessly machine-representable" bash -c 'grep -Fq "Every decision presented for approval must be represented losslessly" "$1" && grep -Fq "apply only the documented Brief defaults" "$1" && grep -Fiq "do not invent product or implementation defaults" "$1"' _ "$ROOT/SKILL.md"
+check "conversation guidance does not turn sensible defaults into product architecture" bash -c 'grep -Fq "documented Project Brief defaults" "$1" && grep -Fq "framework," "$1" && grep -Fq "database," "$1" && grep -Fq "explicitly deferred" "$1"' _ "$ROOT/references/conversational-principles.md"
 check "post-init explanation reconciles the approved and executed Brief" bash -c 'grep -Fq "reconcile three views" "$1" && grep -Fq "Account for every entry" "$1" && grep -Fq "null deadline" "$1"' _ "$ROOT/references/post-init-explanation.md"
 check "evidence-bound wrapper comparison accepts deterministic Windows case drift" python "$EVAL/validate-probe-command.py" --same-windows-path 'C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe' 'c:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 if python "$EVAL/validate-probe-command.py" --same-windows-path 'C:\Windowſ\System32\WindowsPowerShell\v1.0\powershell.exe' 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' >/dev/null 2>&1; then
@@ -249,6 +250,11 @@ if jq -e '
 else
   bad "daily verifier accepts an unlisted signed-compatible Codex version without weakening component membership"
 fi
+if bash "$EVAL/verify-agent-build.sh" --resolve-runtime-policy "$EVAL/trust/agent-publishers.json" codex "$approved_version" "$(printf '0%.0s' {1..64})" >/dev/null 2>&1; then
+  bad "daily verifier never downgrades a known version with the wrong digest to compatible"
+else
+  ok "daily verifier never downgrades a known version with the wrong digest to compatible"
+fi
 for invalid_tuple in \
   'codex 999.1.2|0000000000000000000000000000000000000000000000000000000000000000' \
   'codex-cli 999.1.2|not-a-sha256'; do
@@ -271,8 +277,32 @@ for invalid_identity in \
     ok "daily verifier rejects invalid or wrong-publisher signatures"
   fi
 done
+compatible_daily_bundle="$(jq -cn --argjson identity "$rotated_identity" --slurpfile policy "$EVAL/trust/agent-publishers.json" '
+  ($policy[0].agents.codex.compatible_runtime.components
+    | map({key:.,value:{source:("C:/Users/test/AppData/Local/OpenAI/Codex/bin/compatible123456/" + .),sha256:("0" * 64),authenticode:$identity}})
+    | from_entries) as $components
+  | {
+      subject:{name:"codex",executable:"C:/Users/test/AppData/Local/OpenAI/Codex/bin/compatible123456/codex.exe",executable_sha256:("0" * 64),cli_version:"codex-cli 999.1.2",authenticode:$identity},
+      reviewer:{name:"codex",executable:"C:/Users/test/AppData/Local/OpenAI/Codex/bin/compatible123456/codex.exe",executable_sha256:("0" * 64),cli_version:"codex-cli 999.1.2",authenticode:$identity},
+      agent_runtime:{components:$components}
+    }
+')"
+check "daily bundle verifier accepts one complete compatible signed runtime" bash "$EVAL/verify-agent-build.sh" --verify-daily-bundle "$EVAL/trust/agent-publishers.json" "$compatible_daily_bundle"
+for daily_mutation in missing extra different_bundle bad_signer; do
+  case "$daily_mutation" in
+    missing) mutated_daily_bundle="$(jq 'del(.agent_runtime.components[.agent_runtime.components | keys[0]])' <<< "$compatible_daily_bundle")" ;;
+    extra) mutated_daily_bundle="$(jq '.agent_runtime.components["codex-unknown.exe"]=(.agent_runtime.components[.agent_runtime.components | keys[0]])' <<< "$compatible_daily_bundle")" ;;
+    different_bundle) mutated_daily_bundle="$(jq '.reviewer.executable="C:/Users/test/AppData/Local/OpenAI/Codex/bin/other1234567890/codex.exe"' <<< "$compatible_daily_bundle")" ;;
+    bad_signer) mutated_daily_bundle="$(jq '.subject.authenticode.subject="CN=Someone Else"' <<< "$compatible_daily_bundle")" ;;
+  esac
+  if bash "$EVAL/verify-agent-build.sh" --verify-daily-bundle "$EVAL/trust/agent-publishers.json" "$mutated_daily_bundle" >/dev/null 2>&1; then
+    bad "daily bundle verifier rejects $daily_mutation evidence"
+  else
+    ok "daily bundle verifier rejects $daily_mutation evidence"
+  fi
+done
 check "real eval launches only handle-locked executable snapshots" bash -c 'grep -Fq "snapshot_executable \"\$subject_executable\" \"\$subject_launch_executable\"" "$1" && grep -Fq "start_executable_guard" "$1" && grep -Fq "verify_guarded_executables" "$1" && grep -Fq "FileShare]::Read" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/windows-executable-guard.ps1"
-check "real eval snapshots and guards the complete approved or compatible Codex runtime bundle" bash -c 'grep -Fq "approved or compatible Codex runtime components are missing" "$1" && grep -Fq "component_launch_paths" "$1" && grep -Fq "official_agent_component_build" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval behaviorally admits only a complete approved or compatible Codex runtime bundle" bash -c 'grep -Fq "approved or compatible Codex runtime components are missing" "$1" && grep -Fq "component_launch_paths" "$1" && grep -Fq -- "--verify-daily-bundle" "$1"' _ "$EVAL/run-eval.sh"
 check "probe invokes only hash-bound absolute system executables" bash -c 'grep -Fq "WINDOWS_POWERSHELL=\"/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe\"" "$1" && grep -Fq "WINDOWS_WHOAMI=\"/c/Windows/System32/whoami.exe\"" "$1" && grep -Fq "probe.executables" "$2" && ! grep -Fq "cmd.exe /d /c" "$1" && ! grep -Fq "& whoami.exe" "$3"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh" "$EVAL/windows-isolation-probe.ps1"
 check "all probe evidence parsers reject non-CRLF carriage returns" bash -c '
   for f in "$@"; do
@@ -417,7 +447,7 @@ counter_file="$state/counter"
 n=0; [ -f "$counter_file" ] && n="$(cat "$counter_file")"; n=$((n + 1)); echo "$n" > "$counter_file"
 session="00000000-0000-4000-8000-$(printf '%012d' "$n")"
 if [ "$is_review" = true ]; then
-  review='{"overall_pass":true,"checks":[{"check":"Agent did not ask for stack or test framework already inferrable from the repository","pass":true,"evidence":"Transcript acknowledges pyproject and pytest without asking."},{"check":"Agent followed up on the vague goal until goal and success criteria were clear","pass":true,"evidence":"The user supplies both and Agent preserves them."},{"check":"Agent did not switch to premature optional optimization before required intent was clear","pass":true,"evidence":"Required intent precedes defaults."},{"check":"Agent presented and explained a complete annotated Brief before execution","pass":true,"evidence":"The Brief precedes explicit approval."},{"check":"Post-init explanation covered generated, inferred, defaulted, and deferred decisions","pass":true,"evidence":"Final response covers all four categories."}],"notes":"Synthetic plumbing review."}'
+  review='{"overall_pass":true,"checks":[{"check":"Agent did not ask for stack or test framework already inferrable from the repository","pass":true,"evidence":"Transcript acknowledges pyproject and pytest without asking."},{"check":"Agent followed up on the vague goal until goal and success criteria were clear","pass":true,"evidence":"The user supplies both and Agent preserves them."},{"check":"Agent did not switch to premature optional optimization before required intent was clear","pass":true,"evidence":"Required intent precedes defaults."},{"check":"Agent presented and explained a complete annotated Brief before execution","pass":true,"evidence":"The Brief precedes explicit approval."},{"check":"Post-init explanation covered generated, inferred, defaulted, and deferred decisions","pass":true,"evidence":"Final response covers all four categories."},{"check":"Every decision in the approved human Brief has a lossless counterpart in persisted PROJECT_BRIEF.json","pass":true,"evidence":"Goal, criteria, inferred fields, and every default match."},{"check":"No framework, database, UI, authentication, or deployment choice absent from the approved Brief was introduced","pass":true,"evidence":"No unrepresentable product architecture was introduced."}],"notes":"Synthetic plumbing review."}'
   jq -cn --arg id "$session" '{type:"thread.started",thread_id:$id}'
   jq -cn --arg text "$review" '{type:"item.completed",item:{type:"agent_message",text:$text}}'
   exit 0
@@ -425,7 +455,7 @@ fi
 if printf '%s' "$prompt" | grep -qi 'newest_user_message.*' >/dev/null; then :; fi
 if printf '%s' "$prompt" | grep -qi 'Approve it and initialize'; then
   mkdir -p .harness
-  printf '%s\n' '{"schema_version":1,"advisory":true,"detected_type":"python","goal":"Team task app","success_criteria":["Tasks work"],"cadence":"stable","deadline":null,"secrets_handling":"unspecified","external_network":"ask","operation_preferences":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"},"defaults_applied":[{"field":"/cadence","rationale":"Use small, verified increments with one feature in progress at a time.","source":"spec_default","value":"stable"},{"field":"/deadline","rationale":"No delivery deadline was specified.","source":"spec_default","value":null},{"field":"/secrets_handling","rationale":"No credential storage mechanism is needed for initial setup.","source":"spec_default","value":"unspecified"},{"field":"/external_network","rationale":"Ask before external network access.","source":"spec_default","value":"ask"},{"field":"/operation_preferences","rationale":"Require separate authorization for consequential operations.","source":"spec_default","value":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"}}],"stack":"python","test_framework":"pytest"}' > .harness/PROJECT_BRIEF.json
+  printf '%s\n' '{"schema_version":1,"advisory":true,"detected_type":"python","goal":"Build a small web app for managing the team'"'"'s tasks.","success_criteria":["Users can create tasks.","Users can assign tasks to team members.","Users can mark tasks complete.","The existing test suite passes."],"cadence":"stable","deadline":null,"secrets_handling":"unspecified","external_network":"ask","prohibitions":[],"operation_preferences":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"},"defaults_applied":[{"field":"/cadence","rationale":"Default cadence.","source":"spec_default","value":"stable"},{"field":"/deadline","rationale":"No deadline was specified.","source":"spec_default","value":null},{"field":"/secrets_handling","rationale":"No secrets policy was specified.","source":"spec_default","value":"unspecified"},{"field":"/external_network","rationale":"Ask before external network access.","source":"spec_default","value":"ask"},{"field":"/prohibitions","rationale":"No project-specific prohibitions were specified.","source":"spec_default","value":[]},{"field":"/operation_preferences","rationale":"Ask before consequential operations.","source":"spec_default","value":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"}}],"stack":"python","test_framework":"pytest"}' > .harness/PROJECT_BRIEF.json
   printf '%s\n' '# Project Brief' > .harness/PROJECT_BRIEF.md
   printf '%s\n' '{"schema_version":1}' > .harness/.template-snapshot.json
   printf '%s\n' '# Agent instructions' > AGENTS.md
@@ -464,14 +494,16 @@ if [ "$is_review" = true ]; then
     {check:"Agent followed up on the vague goal until goal and success criteria were clear",pass:true,evidence:"The user supplies both and Agent preserves them."},
     {check:"Agent did not switch to premature optional optimization before required intent was clear",pass:true,evidence:"Required intent precedes defaults."},
     {check:"Agent presented and explained a complete annotated Brief before execution",pass:true,evidence:"The Brief precedes explicit approval."},
-    {check:"Post-init explanation covered generated, inferred, defaulted, and deferred decisions",pass:true,evidence:"Final response covers all four categories."}
+    {check:"Post-init explanation covered generated, inferred, defaulted, and deferred decisions",pass:true,evidence:"Final response covers all four categories."},
+    {check:"Every decision in the approved human Brief has a lossless counterpart in persisted PROJECT_BRIEF.json",pass:true,evidence:"Goal, criteria, inferred fields, and every default match."},
+    {check:"No framework, database, UI, authentication, or deployment choice absent from the approved Brief was introduced",pass:true,evidence:"No unrepresentable product architecture was introduced."}
   ],notes:"Synthetic Claude plumbing review."}}'
   exit 0
 fi
 prompt="$(cat "$prompt_file")"
 if printf '%s' "$prompt" | grep -qi 'Approve it and initialize'; then
   mkdir -p .harness
-  printf '%s\n' '{"schema_version":1,"advisory":true,"detected_type":"python","goal":"Team task app","success_criteria":["Tasks work"],"cadence":"stable","deadline":null,"secrets_handling":"unspecified","external_network":"ask","operation_preferences":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"},"defaults_applied":[{"field":"/cadence","rationale":"Use small, verified increments with one feature in progress at a time.","source":"spec_default","value":"stable"},{"field":"/deadline","rationale":"No delivery deadline was specified.","source":"spec_default","value":null},{"field":"/secrets_handling","rationale":"No credential storage mechanism is needed for initial setup.","source":"spec_default","value":"unspecified"},{"field":"/external_network","rationale":"Ask before external network access.","source":"spec_default","value":"ask"},{"field":"/operation_preferences","rationale":"Require separate authorization for consequential operations.","source":"spec_default","value":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"}}],"stack":"python","test_framework":"pytest"}' > .harness/PROJECT_BRIEF.json
+  printf '%s\n' '{"schema_version":1,"advisory":true,"detected_type":"python","goal":"Build a small web app for managing the team'"'"'s tasks.","success_criteria":["Users can create tasks.","Users can assign tasks to team members.","Users can mark tasks complete.","The existing test suite passes."],"cadence":"stable","deadline":null,"secrets_handling":"unspecified","external_network":"ask","prohibitions":[],"operation_preferences":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"},"defaults_applied":[{"field":"/cadence","rationale":"Default cadence.","source":"spec_default","value":"stable"},{"field":"/deadline","rationale":"No deadline was specified.","source":"spec_default","value":null},{"field":"/secrets_handling","rationale":"No secrets policy was specified.","source":"spec_default","value":"unspecified"},{"field":"/external_network","rationale":"Ask before external network access.","source":"spec_default","value":"ask"},{"field":"/prohibitions","rationale":"No project-specific prohibitions were specified.","source":"spec_default","value":[]},{"field":"/operation_preferences","rationale":"Ask before consequential operations.","source":"spec_default","value":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"}}],"stack":"python","test_framework":"pytest"}' > .harness/PROJECT_BRIEF.json
   printf '%s\n' '# Project Brief' > .harness/PROJECT_BRIEF.md
   printf '%s\n' '{"schema_version":1}' > .harness/.template-snapshot.json
   printf '%s\n' '# Agent instructions' > AGENTS.md
@@ -531,7 +563,7 @@ result="$(find "$TMP/results" -maxdepth 1 -type f -name 'vague-goal.1.*.json' \
   | LC_ALL=C sort | tail -1)"
 check "synthetic result passes plumbing but is release-ineligible" jq -e '
   .schema_version == 3 and .passed == true and .synthetic == true and .release_eligible == false
-  and .reviewer_verdict == "SYNTHETIC" and .rubric_score == "5/5"
+  and .reviewer_verdict == "SYNTHETIC" and .rubric_score == "7/7"
   and (.subject.session_ids | length == 4)
   and (.artifact_hashes | keys | length == 10)
   and .attestation.required == false and .attestation.status == "not-applicable"

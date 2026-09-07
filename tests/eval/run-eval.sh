@@ -330,13 +330,6 @@ official_agent_build() {
     "$AGENT_PUBLISHERS" "$1" "$2" "$3" 2>/dev/null
 }
 
-official_agent_component_build() {
-  local policy_json="$1" component="$2" digest="${3,,}" expected
-  expected="$(jq -r --arg component "$component" '.components[$component].sha256 // empty' <<< "$policy_json")" || return 1
-  jq -e --arg component "$component" '.components | has($component)' <<< "$policy_json" >/dev/null || return 1
-  [ -z "$expected" ] || [ "${expected,,}" = "$digest" ]
-}
-
 official_agent_path() {
   local agent="$1" executable="$2" user_home="$3" executable_host home_host install_subpath prefix relative executable_names
   executable_host="$(host_path "$executable")" || return 1
@@ -1032,8 +1025,6 @@ if [ "$SYNTHETIC" = 0 ]; then
     component_sha="$(sha "$component_launch")"
     component_identity="$(official_agent_identity "$AGENT" "$component_launch")" \
       || die "Codex runtime component is not an authentic signed build: $component_name"
-    official_agent_component_build "$agent_runtime_policy" "$component_name" "$component_sha" \
-      || die "Codex runtime component is not approved for $subject_version: $component_name"
     component_launch_paths+=("$component_launch")
     component_launch_shas+=("$component_sha")
     agent_runtime_components="$(jq -c \
@@ -1041,6 +1032,21 @@ if [ "$SYNTHETIC" = 0 ]; then
       --argjson identity "$component_identity" \
       '. + {($name):{source:$source,sha256:$sha,authenticode:$identity}}' <<< "$agent_runtime_components")"
   done
+  daily_bundle_evidence="$(jq -cn \
+    --arg subject_name "$AGENT" --arg subject_executable "$subject_executable" \
+    --arg subject_sha "$subject_executable_sha" --arg subject_version "$subject_version" \
+    --argjson subject_identity "$subject_authenticode" \
+    --arg reviewer_name "$REVIEWER" --arg reviewer_executable "$reviewer_executable" \
+    --arg reviewer_sha "$reviewer_executable_sha" --arg reviewer_version "$reviewer_version" \
+    --argjson reviewer_identity "$reviewer_authenticode" --argjson components "$agent_runtime_components" '
+      {
+        subject:{name:$subject_name,executable:$subject_executable,executable_sha256:$subject_sha,cli_version:$subject_version,authenticode:$subject_identity},
+        reviewer:{name:$reviewer_name,executable:$reviewer_executable,executable_sha256:$reviewer_sha,cli_version:$reviewer_version,authenticode:$reviewer_identity},
+        agent_runtime:{components:$components}
+      }
+    ')" || die "could not compose daily Codex runtime evidence"
+  bash "$AGENT_BUILD_VERIFIER" --verify-daily-bundle "$AGENT_PUBLISHERS" "$daily_bundle_evidence" \
+    || die "Codex runtime bundle failed daily signed-compatibility admission"
   start_executable_guard || die "could not lock the validated Agent executables and PowerShell wrapper"
   verify_guarded_executables || die "validated executable guard failed immediately after acquisition"
   codex_powershell_locked_authenticode="$(official_runtime_tool_identity codex_powershell "$codex_powershell")" \
@@ -1431,8 +1437,28 @@ if [ -f "$brief" ] && [ ! -L "$brief" ] && jq -e 'type == "object"' "$brief" >/d
     fi
   done < <(jq -c '.expected_brief_fields
     | paths as $path
-    | select((getpath($path) | type) != "object" and (getpath($path) | type) != "array")
+    | select((getpath($path) | type) != "object")
     | $path' "$CASE")
+
+  expected_default_fields="$(jq -c '.expected_default_fields // [] | sort' "$CASE")"
+  actual_default_fields="$(jq -c '[.defaults_applied[]?.field] | sort' "$brief")"
+  if [ "$expected_default_fields" = "$actual_default_fields" ] && jq -e --slurpfile case "$CASE" '
+      . as $brief
+      | def pointer_path:
+          split("/")[1:] | map(gsub("~1"; "/") | gsub("~0"; "~"));
+        ($case[0].expected_default_fields // [] | sort) as $expected
+      | all($expected[]; . as $field
+          | [$brief.defaults_applied[]
+              | select(.field == $field
+                and .source == "spec_default"
+                and (.rationale | type == "string" and length > 0)
+                and .value == ($brief | getpath($field | pointer_path)))]
+          | length == 1)
+    ' "$brief" >/dev/null; then
+    add_objective "Brief records the complete documented default set" true "fields=$actual_default_fields"
+  else
+    add_objective "Brief records the complete documented default set" false "expected=$expected_default_fields actual=$actual_default_fields"
+  fi
 else
   add_objective "PROJECT_BRIEF.json is a valid object" false "missing, invalid, or symlinked Brief"
 fi

@@ -680,7 +680,8 @@ jq -e '.schema_version == 1 and (.agents.codex.publisher_thumbprints | length > 
       and (.sha256 | type == "string" and test("^[0-9a-fA-F]{64}$"))
       and (.shell_wrapper_argv_variants == [
         "powershell-command-v1",
-        "powershell-no-profile-command-v1"
+        "powershell-no-profile-command-v1",
+        "powershell-no-profile-command-double-quoted-v1"
       ])))' "$AGENT_PUBLISHERS" >/dev/null \
   || die "Agent publisher trust policy is invalid"
 real_user_home=""

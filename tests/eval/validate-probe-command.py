@@ -13,6 +13,7 @@ import sys
 VARIANT_ARGUMENTS = {
     "powershell-command-v1": ("-Command",),
     "powershell-no-profile-command-v1": ("-NoProfile", "-Command"),
+    "powershell-no-profile-command-double-quoted-v1": ("-NoProfile", "-Command"),
 }
 
 
@@ -55,7 +56,8 @@ def decode_variants(value: str) -> list[str]:
 
 
 def canonical_display(wrapper: str, expected: str, variant: str) -> str:
-    # Codex 0.152.1 has emitted two exact Windows structured-event forms for
+    # Codex 0.152.1 has emitted a small closed set of exact Windows
+    # structured-event forms for
     # the same non-login shell request.  The caller supplies a versioned,
     # build-bound closed set and this function still performs byte-for-byte
     # matching; it never accepts a shell-equivalent free-form serialization.
@@ -67,6 +69,14 @@ def canonical_display(wrapper: str, expected: str, variant: str) -> str:
         fail("wrapper must be an absolute Windows drive path")
     if any(ch in expected for ch in "\x00\r\n\"`"):
         fail("expected command cannot be represented canonically")
+    escape_path = lambda value: value.replace("\\", "\\\\")
+    wrapper_display = f'"{escape_path(wrapper)}"'
+    wrapper_args = " ".join(VARIANT_ARGUMENTS[variant])
+    if variant == "powershell-no-profile-command-double-quoted-v1":
+        if "$" in expected:
+            fail("double-quoted command cannot contain expansion-capable text")
+        return f'{wrapper_display} {wrapper_args} "{escape_path(expected)}"'
+
     first_quote = expected.find("'")
     if first_quote < 0:
         fail("expected command is outside the controller probe grammar")
@@ -75,10 +85,7 @@ def canonical_display(wrapper: str, expected: str, variant: str) -> str:
     if "$" in suffix:
         fail("expected command has expansion-capable text after quote switch")
 
-    escape_path = lambda value: value.replace("\\", "\\\\")
-    wrapper_display = f'"{escape_path(wrapper)}"'
     command_display = f"'{escape_path(prefix)}'\"{escape_path(suffix)}\""
-    wrapper_args = " ".join(VARIANT_ARGUMENTS[variant])
     return f"{wrapper_display} {wrapper_args} {command_display}"
 
 

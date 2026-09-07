@@ -108,11 +108,11 @@ check "real eval records an effective Offline-sandbox access probe" bash -c 'gre
 check "all real eval output directories share one ACL transition lock" grep -Fq 'acl_lock="$ROOT/.harness/eval-acl.lock"' "$EVAL/run-eval.sh"
 check "crashed eval state has identity-bound lifecycle recovery" bash -c 'grep -Fq "eval-recovery-journal.json" "$1" && grep -Fq "windows_process_status" "$1" && grep -Fq "lifecycle recovery complete" "$1"' _ "$EVAL/recover-windows-isolation.sh"
 check "real eval binds the token-resolved user profile instead of caller USERPROFILE" bash -c 'grep -Fq "GetFolderPath([Environment+SpecialFolder]::UserProfile)" "$1" && ! grep -Fq "\${USERPROFILE:-\$HOME}" "$1"' _ "$EVAL/run-eval.sh"
-check "real Agent identity and Windows runtime tools are versioned trust anchors" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin" and (.agents.codex.approved_builds | length > 0 and all(.[]; (.cli_version | length > 0) and (.sha256 | test("^[0-9a-f]{64}$")) and .shell_wrapper_argv_variants == ["powershell-command-v1","powershell-no-profile-command-v1"])) and (.windows_system_tools | keys | sort == ["powershell","whoami"]) and (all(.windows_system_tools[]; (.path | startswith("C:\\Windows\\System32\\")) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_runtime_tools | keys == ["codex_powershell"]) and (.windows_runtime_tools.codex_powershell.user_profile_suffix | endswith("\\pwsh.exe")) and (.windows_runtime_tools.codex_powershell.publisher_subject | startswith("CN=Microsoft Corporation")) and (.windows_runtime_tools.codex_powershell.publisher_thumbprints | length > 0) and (.windows_runtime_tools.codex_powershell.approved_sha256 | length > 0 and all(.[]; test("^[0-9a-f]{64}$")))' "$EVAL/trust/agent-publishers.json"
+check "real Agent identity and Windows runtime tools are versioned trust anchors" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin" and (.agents.codex.approved_builds | length > 0 and all(.[]; (.cli_version | length > 0) and (.sha256 | test("^[0-9a-f]{64}$")) and .shell_wrapper_argv_variants == ["powershell-command-v1","powershell-no-profile-command-v1","powershell-no-profile-command-double-quoted-v1"])) and (.windows_system_tools | keys | sort == ["powershell","whoami"]) and (all(.windows_system_tools[]; (.path | startswith("C:\\Windows\\System32\\")) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_runtime_tools | keys == ["codex_powershell"]) and (.windows_runtime_tools.codex_powershell.user_profile_suffix | endswith("\\pwsh.exe")) and (.windows_runtime_tools.codex_powershell.publisher_subject | startswith("CN=Microsoft Corporation")) and (.windows_runtime_tools.codex_powershell.publisher_thumbprints | length > 0) and (.windows_runtime_tools.codex_powershell.approved_sha256 | length > 0 and all(.[]; test("^[0-9a-f]{64}$")))' "$EVAL/trust/agent-publishers.json"
 probe_wrapper='C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe'
 probe_inner="& 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File 'C:\\agent-bin\\isolation-probe.ps1' -ExpectedPayloadSha256 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'"
 probe_inner_b64="$(printf '%s' "$probe_inner" | base64 | tr -d '\r\n')"
-probe_variants_b64="$(printf '%s' '["powershell-command-v1","powershell-no-profile-command-v1"]' | base64 | tr -d '\r\n')"
+probe_variants_b64="$(printf '%s' '["powershell-command-v1","powershell-no-profile-command-v1","powershell-no-profile-command-double-quoted-v1"]' | base64 | tr -d '\r\n')"
 probe_display_command="$(cat <<'EOF'
 "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '& '"'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File 'C:\\agent-bin\\isolation-probe.ps1' -ExpectedPayloadSha256 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'"
 EOF
@@ -121,19 +121,26 @@ probe_display_no_profile="$(cat <<'EOF'
 "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -Command '& '"'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File 'C:\\agent-bin\\isolation-probe.ps1' -ExpectedPayloadSha256 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'"
 EOF
 )"
+probe_display_double_quoted="$(cat <<'EOF'
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -Command "& 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' -NoProfile -ExecutionPolicy Bypass -File 'C:\\agent-bin\\isolation-probe.ps1' -ExpectedPayloadSha256 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'"
+EOF
+)"
 probe_display_command_b64="$(printf '%s' "$probe_display_command" | base64 | tr -d '\r\n')"
 probe_display_no_profile_b64="$(printf '%s' "$probe_display_no_profile" | base64 | tr -d '\r\n')"
+probe_display_double_quoted_b64="$(printf '%s' "$probe_display_double_quoted" | base64 | tr -d '\r\n')"
 if [ "$(python "$EVAL/validate-probe-command.py" --canonical powershell-command-v1 "$probe_inner_b64" "$probe_wrapper")" = "$probe_display_command" ] \
-  && [ "$(python "$EVAL/validate-probe-command.py" --canonical powershell-no-profile-command-v1 "$probe_inner_b64" "$probe_wrapper")" = "$probe_display_no_profile" ]; then
-  ok "probe command serializer matches both build-approved Codex 0.152.1 golden displays"
+  && [ "$(python "$EVAL/validate-probe-command.py" --canonical powershell-no-profile-command-v1 "$probe_inner_b64" "$probe_wrapper")" = "$probe_display_no_profile" ] \
+  && [ "$(python "$EVAL/validate-probe-command.py" --canonical powershell-no-profile-command-double-quoted-v1 "$probe_inner_b64" "$probe_wrapper")" = "$probe_display_double_quoted" ]; then
+  ok "probe command serializer matches all build-approved Codex 0.152.1 golden displays"
 else
-  bad "probe command serializer matches both build-approved Codex 0.152.1 golden displays"
+  bad "probe command serializer matches all build-approved Codex 0.152.1 golden displays"
 fi
 if [ "$(python "$EVAL/validate-probe-command.py" --identify "$probe_display_command_b64" "$probe_inner_b64" "$probe_wrapper" "$probe_variants_b64")" = powershell-command-v1 ] \
-  && [ "$(python "$EVAL/validate-probe-command.py" --identify "$probe_display_no_profile_b64" "$probe_inner_b64" "$probe_wrapper" "$probe_variants_b64")" = powershell-no-profile-command-v1 ]; then
-  ok "probe command validator identifies both exact build-approved wrapper argv variants"
+  && [ "$(python "$EVAL/validate-probe-command.py" --identify "$probe_display_no_profile_b64" "$probe_inner_b64" "$probe_wrapper" "$probe_variants_b64")" = powershell-no-profile-command-v1 ] \
+  && [ "$(python "$EVAL/validate-probe-command.py" --identify "$probe_display_double_quoted_b64" "$probe_inner_b64" "$probe_wrapper" "$probe_variants_b64")" = powershell-no-profile-command-double-quoted-v1 ]; then
+  ok "probe command validator identifies all exact build-approved wrapper argv variants"
 else
-  bad "probe command validator identifies both exact build-approved wrapper argv variants"
+  bad "probe command validator identifies all exact build-approved wrapper argv variants"
 fi
 command_only_variants_b64="$(printf '%s' '["powershell-command-v1"]' | base64 | tr -d '\r\n')"
 unknown_variants_b64="$(printf '%s' '["powershell-command-v1","unapproved-wrapper-v1"]' | base64 | tr -d '\r\n')"
@@ -144,6 +151,12 @@ if python "$EVAL/validate-probe-command.py" --identify "$probe_display_no_profil
   bad "probe command validator rejects unapproved, unknown, and duplicate serializer policies"
 else
   ok "probe command validator rejects unapproved, unknown, and duplicate serializer policies"
+fi
+probe_inner_expanding_b64="$(printf '%s' '\$env:BAD=1; %s' "$probe_inner" | base64 | tr -d '\r\n')"
+if python "$EVAL/validate-probe-command.py" --canonical powershell-no-profile-command-double-quoted-v1 "$probe_inner_expanding_b64" "$probe_wrapper" >/dev/null 2>&1; then
+  bad "double-quoted probe serializer rejects expansion-capable commands"
+else
+  ok "double-quoted probe serializer rejects expansion-capable commands"
 fi
 check "production probe derives the observed system wrapper" grep -Fq 'codex_shell_wrapper_win="$system_root_win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"' "$EVAL/run-eval.sh"
 check "production probe validator uses the observed system wrapper and build policy" bash -c 'grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1"' _ "$EVAL/run-eval.sh"

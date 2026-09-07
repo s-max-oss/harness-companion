@@ -161,6 +161,7 @@ fi
 check "production probe derives the observed system wrapper" grep -Fq 'codex_shell_wrapper_win="$system_root_win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"' "$EVAL/run-eval.sh"
 check "production probe validator uses the observed system wrapper and build policy" bash -c 'grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1"' _ "$EVAL/run-eval.sh"
 check "production inner probe stays profile-free and binds a guarded script plus payload hash" bash -c 'grep -Fq -- "-NoProfile -ExecutionPolicy Bypass -File" "$1" && grep -Fq -- "-ExpectedPayloadSha256" "$1" && grep -Fq "probe_script_guard_win" "$1"' _ "$EVAL/run-eval.sh"
+check "failed access-boundary probes emit only a path-free boolean summary" bash -c 'grep -Fq "nonce_match:" "$1" && grep -Fq "payload_sha_match:" "$1" && grep -Fq "offline_identity:" "$1" && grep -Fq "did not prove the required access boundary: \$probe_boundary_summary" "$1" && ! grep -Fq "did not prove the required access boundary: \$probe_result" "$1"' _ "$EVAL/run-eval.sh"
 check "all real Codex exec calls disable login shells" bash -c '[ "$(grep -c "allow_login_shell=false" "$1")" -eq 3 ]' _ "$EVAL/run-eval.sh"
 check "attester binds the exact serializer variant to the evidence and build policy" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1"' _ "$EVAL/attest-result.sh"
 check "result gate binds the exact serializer variant without a host PowerShell call" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1" && ! grep -Fq "windows_powershell()" "$1"' _ "$EVAL/check-results.sh"
@@ -270,6 +271,7 @@ check "ACL state captures and restores DACL only without SeSecurityPrivilege" ba
 check "ACL recovery skips only an explicit ItemNotFoundException" grep -Fq 'catch [System.Management.Automation.ItemNotFoundException]' "$EVAL/windows-isolation-acl.ps1"
 check "ACL recovery binds a stable Windows file identity" bash -c 'grep -Fq "GetFileInformationByHandle" "$1" && grep -Fq "expectedIdentity" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
 check "ACL reads and writes use verified open handles, not pathname ACL APIs" bash -c 'grep -Fq "GetKernelObjectSecurity" "$1" && grep -Fq "SetSecurityInfo" "$1" && ! grep -Eq "Get-Acl|^[[:space:]]*Set-Acl|[.]SetAccessControl[(]" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
+check "ACL helper directly denies and identity-binds the exact probed source file" bash -c 'grep -Fq "SourceFile is required" "$1" && grep -Fq "kind = '\''file'\''" "$1" && grep -Fq "FileSecurity" "$1" && grep -Fq "source_file_deny" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
 if command -v powershell.exe >/dev/null 2>&1; then
   check "Windows ACL helper round-trips DACL and retains failed recovery state" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-isolation-acl.ps1" -Helper "$EVAL/windows-isolation-acl.ps1"
   mkdir -p "$TMP/executable-guard-test"
@@ -631,6 +633,13 @@ jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n'
     {path:$controller_root,sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
     {path:$controller_root,sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true}
   ],
+  source_file_deny:{
+    path:"C:/workspace/SKILL.md",
+    checks:[
+      {sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
+      {sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true}
+    ]
+  },
   probe:{
     command_event:{type:"command_execution",command:$command,aggregated_output:$output,exit_code:0,status:"completed"},
     payload:$payload,
@@ -735,7 +744,7 @@ else
   sed 's/^/  wrong-variant: /' "$TMP/wrong-variant.log" >&2
   bad "attester rejects a forged probe serializer variant"
 fi
-for probe_tamper in script-path payload-hash; do
+for probe_tamper in script-path payload-hash source-deny-path source-deny-check; do
   tamper_candidates="$TMP/$probe_tamper-candidates"
   tamper_results="$TMP/$probe_tamper-results"
   mkdir -p "$tamper_candidates" "$tamper_results"
@@ -744,9 +753,15 @@ for probe_tamper in script-path payload-hash; do
   tamper_base="${tamper_candidate%.json}"
   if [ "$probe_tamper" = script-path ]; then
     jq '.probe.script.path="C:\\attacker\\isolation-probe.ps1"' "$tamper_base.isolation.json" > "$TMP/$probe_tamper-isolation.tmp"
-  else
+  elif [ "$probe_tamper" = payload-hash ]; then
     jq --arg bad '0000000000000000000000000000000000000000000000000000000000000000' \
       '.probe.result.payload_sha256=$bad | .probe.command_event.aggregated_output=((.probe.result | tojson) + "\n")' \
+      "$tamper_base.isolation.json" > "$TMP/$probe_tamper-isolation.tmp"
+  elif [ "$probe_tamper" = source-deny-path ]; then
+    jq '.source_file_deny.path="C:\\attacker\\SKILL.md"' \
+      "$tamper_base.isolation.json" > "$TMP/$probe_tamper-isolation.tmp"
+  else
+    jq '.source_file_deny.checks[0].sandbox_sid="S-1-5-21-1-2-3-1002"' \
       "$tamper_base.isolation.json" > "$TMP/$probe_tamper-isolation.tmp"
   fi
   mv "$TMP/$probe_tamper-isolation.tmp" "$tamper_base.isolation.json"
@@ -834,6 +849,29 @@ elif grep -Fq 'vague-goal@1(failed-stale-synthetic-unconfirmed-or-unbound)' "$TM
 else
   sed 's/^/  gate-forged-variant: /' "$TMP/gate-forged-variant.log" >&2
   bad "release gate rejects validly signed forged serializer-variant evidence"
+fi
+
+mkdir -p "$TMP/gate-forged-source-deny-results"
+for f in "$attested_base".*; do cp "$f" "$TMP/gate-forged-source-deny-results/"; done
+gate_forged_source_result="$TMP/gate-forged-source-deny-results/$(basename "$attested")"
+gate_forged_source_base="${gate_forged_source_result%.json}"
+jq '.source_file_deny.path="C:\\attacker\\SKILL.md"' "$gate_forged_source_base.isolation.json" > "$TMP/gate-forged-source-isolation.tmp"
+mv "$TMP/gate-forged-source-isolation.tmp" "$gate_forged_source_base.isolation.json"
+gate_forged_source_isolation_sha="$(sha256sum "$gate_forged_source_base.isolation.json" | cut -d ' ' -f 1)"
+jq --arg isolation_sha "$gate_forged_source_isolation_sha" '.artifact_hashes.isolation=$isolation_sha' "$gate_forged_source_result" > "$TMP/gate-forged-source-result.tmp"
+mv "$TMP/gate-forged-source-result.tmp" "$gate_forged_source_result"
+rm -f -- "$gate_forged_source_base.attestation.sig"
+ssh-keygen -Y sign -q -f "$TMP/test-signing-key" -n harness-eval "$gate_forged_source_result"
+mv "$gate_forged_source_result.sig" "$gate_forged_source_base.attestation.sig"
+if HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS="$TMP/test-release-signers" \
+  bash "$EVAL/check-results.sh" --cases-dir="$TMP/cases" --results-dir="$TMP/gate-forged-source-deny-results" \
+  > "$TMP/gate-forged-source-deny.log" 2>&1; then
+  bad "release gate rejects validly signed forged direct source-deny evidence"
+elif grep -Fq 'vague-goal@1(failed-stale-synthetic-unconfirmed-or-unbound)' "$TMP/gate-forged-source-deny.log"; then
+  ok "release gate rejects validly signed forged direct source-deny evidence"
+else
+  sed 's/^/  gate-forged-source-deny: /' "$TMP/gate-forged-source-deny.log" >&2
+  bad "release gate rejects validly signed forged direct source-deny evidence"
 fi
 
 # The release gate validates a private snapshot, then verifies that every

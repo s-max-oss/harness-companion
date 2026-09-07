@@ -12,6 +12,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$UserHome,
 
+    [string]$SourceFile,
+
     [Parameter(Mandatory = $true)]
     [string]$StateFile,
 
@@ -132,23 +134,27 @@ namespace HarnessEval {
             if (handle.IsInvalid) {
                 int error = Marshal.GetLastWin32Error();
                 handle.Dispose();
-                throw new Win32Exception(error, "unable to open protected directory: " + path);
+                throw new Win32Exception(error, "unable to open protected path: " + path);
             }
             return handle;
         }
 
-        private static string Describe(SafeFileHandle handle, string path) {
+        private static string Describe(SafeFileHandle handle, string path, bool expectDirectory) {
             BY_HANDLE_FILE_INFORMATION information;
             if (!GetFileInformationByHandle(handle, out information)) {
                 throw new Win32Exception(
                     Marshal.GetLastWin32Error(),
-                    "unable to identify protected directory: " + path);
+                    "unable to identify protected path: " + path);
             }
-            if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-                throw new InvalidOperationException("protected path is not a directory: " + path);
+            bool isDirectory = (information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            if (isDirectory != expectDirectory) {
+                throw new InvalidOperationException(
+                    expectDirectory
+                        ? "protected path is not a directory: " + path
+                        : "protected path is not a file: " + path);
             }
             if ((information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                throw new InvalidOperationException("protected directory is a reparse point: " + path);
+                throw new InvalidOperationException("protected path is a reparse point: " + path);
             }
             return String.Format(
                 System.Globalization.CultureInfo.InvariantCulture,
@@ -158,9 +164,9 @@ namespace HarnessEval {
                 information.FileIndexLow);
         }
 
-        public static DirectoryAclSnapshot GetSnapshot(string path) {
+        public static DirectoryAclSnapshot GetSnapshot(string path, bool expectDirectory) {
             using (SafeFileHandle handle = Open(path, READ_CONTROL)) {
-                string identity = Describe(handle, path);
+                string identity = Describe(handle, path, expectDirectory);
                 uint lengthNeeded;
                 bool initial = GetKernelObjectSecurity(
                     handle,
@@ -173,7 +179,7 @@ namespace HarnessEval {
                         initialError != ERROR_INSUFFICIENT_BUFFER) {
                     throw new Win32Exception(
                         initialError,
-                        "unable to size protected directory DACL: " + path);
+                        "unable to size protected path DACL: " + path);
                 }
                 byte[] securityDescriptor = new byte[lengthNeeded];
                 if (!GetKernelObjectSecurity(
@@ -184,7 +190,7 @@ namespace HarnessEval {
                         out lengthNeeded)) {
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
-                        "unable to read protected directory DACL: " + path);
+                        "unable to read protected path DACL: " + path);
                 }
                 RawSecurityDescriptor descriptor =
                     new RawSecurityDescriptor(securityDescriptor, 0);
@@ -197,12 +203,13 @@ namespace HarnessEval {
         public static void ApplyDacl(
             string path,
             string expectedIdentity,
-            byte[] securityDescriptor) {
+            byte[] securityDescriptor,
+            bool expectDirectory) {
             using (SafeFileHandle handle = Open(path, READ_CONTROL | WRITE_DAC)) {
-                string actualIdentity = Describe(handle, path);
+                string actualIdentity = Describe(handle, path, expectDirectory);
                 if (!String.Equals(actualIdentity, expectedIdentity, StringComparison.Ordinal)) {
                     throw new InvalidOperationException(
-                        "protected directory identity changed: " + path);
+                        "protected path identity changed: " + path);
                 }
                 RawSecurityDescriptor descriptor =
                     new RawSecurityDescriptor(securityDescriptor, 0);
@@ -227,7 +234,7 @@ namespace HarnessEval {
                             out daclDefaulted)) {
                         throw new Win32Exception(
                             Marshal.GetLastWin32Error(),
-                            "unable to read protected directory DACL: " + path);
+                            "unable to read protected path DACL: " + path);
                     }
                     if (!daclPresent) {
                         throw new InvalidOperationException(
@@ -251,13 +258,13 @@ namespace HarnessEval {
                     // so accidental or trusted-controller churn is still
                     // detected and leaves the recovery journal intact.
                     using (SafeFileHandle current = Open(path, READ_CONTROL)) {
-                        string currentIdentity = Describe(current, path);
+                        string currentIdentity = Describe(current, path, expectDirectory);
                         if (!String.Equals(
                                 currentIdentity,
                                 expectedIdentity,
                                 StringComparison.Ordinal)) {
                             throw new InvalidOperationException(
-                                "protected directory changed during DACL application: " + path);
+                                "protected path changed during DACL application: " + path);
                         }
                     }
                 } finally {
@@ -270,19 +277,21 @@ namespace HarnessEval {
 "@
 }
 
-function Get-DirectoryDaclSnapshot([string]$Path) {
-    return [HarnessEval.NativeDirectoryAcl]::GetSnapshot($Path)
+function Get-PathDaclSnapshot([string]$Path, [string]$Kind) {
+    return [HarnessEval.NativeDirectoryAcl]::GetSnapshot($Path, ($Kind -eq 'directory'))
 }
 
-function Set-DirectoryDacl(
+function Set-PathDacl(
     [string]$Path,
     [string]$ExpectedIdentity,
-    [System.Security.AccessControl.DirectorySecurity]$Security
+    [System.Security.AccessControl.FileSystemSecurity]$Security,
+    [string]$Kind
 ) {
     [HarnessEval.NativeDirectoryAcl]::ApplyDacl(
         $Path,
         $ExpectedIdentity,
-        $Security.GetSecurityDescriptorBinaryForm()
+        $Security.GetSecurityDescriptorBinaryForm(),
+        ($Kind -eq 'directory')
     )
 }
 
@@ -290,6 +299,14 @@ function Resolve-ExistingDirectory([string]$Path) {
     $item = Get-Item -LiteralPath $Path -Force
     if (-not $item.PSIsContainer) {
         throw "isolation path is not a directory: $Path"
+    }
+    return $item.FullName
+}
+
+function Resolve-ExistingFile([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer) {
+        throw "isolation path is not a file: $Path"
     }
     return $item.FullName
 }
@@ -360,32 +377,40 @@ if ($Mode -eq "Leave") {
         throw "ACL restoration state is missing: $StateFile"
     }
     $state = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
-    if ([int]$state.schema_version -ne 2) {
+    if ([int]$state.schema_version -notin @(2, 3)) {
         throw "unsupported ACL restoration state schema: $($state.schema_version)"
     }
     $restoreEntries = @($state.paths)
     [Array]::Reverse($restoreEntries)
     foreach ($entry in $restoreEntries) {
+        $kind = if ([int]$state.schema_version -eq 2) { 'directory' } else { [string]$entry.kind }
+        if ($kind -notin @('directory', 'file')) {
+            throw "ACL restoration entry has an invalid path kind: $($entry.path)"
+        }
         # A failed run may remove its private controller tree before a later
-        # recovery attempt. An absent directory has no ACL left to restore,
-        # but a replacement non-directory remains unsafe and must fail closed.
+        # recovery attempt. An absent path has no ACL left to restore, but a
+        # replacement of the wrong kind remains unsafe and must fail closed.
         try {
-            $directory = Get-Item -LiteralPath ([string]$entry.path) -Force -ErrorAction Stop
+            $item = Get-Item -LiteralPath ([string]$entry.path) -Force -ErrorAction Stop
         } catch [System.Management.Automation.ItemNotFoundException] {
             continue
         }
-        if (-not $directory.PSIsContainer) {
-            throw "ACL restoration path is no longer a directory: $($entry.path)"
+        if (($kind -eq 'directory') -ne [bool]$item.PSIsContainer) {
+            throw "ACL restoration path kind changed: $($entry.path)"
         }
         if ([string]::IsNullOrWhiteSpace([string]$entry.identity)) {
-            throw "ACL restoration entry is missing its directory identity: $($entry.path)"
+            throw "ACL restoration entry is missing its path identity: $($entry.path)"
         }
-        $security = New-Object System.Security.AccessControl.DirectorySecurity
+        $security = if ($kind -eq 'directory') {
+            New-Object System.Security.AccessControl.DirectorySecurity
+        } else {
+            New-Object System.Security.AccessControl.FileSecurity
+        }
         $security.SetSecurityDescriptorSddlForm(
             [string]$entry.sddl,
             [System.Security.AccessControl.AccessControlSections]::Access
         )
-        Set-DirectoryDacl ([string]$entry.path) ([string]$entry.identity) $security
+        Set-PathDacl ([string]$entry.path) ([string]$entry.identity) $security $kind
     }
     Remove-Item -LiteralPath $StateFile -Force
     exit 0
@@ -464,23 +489,38 @@ if (Test-Path -LiteralPath $StateFile) {
     throw "stale ACL restoration state exists; restore it before entering: $StateFile"
 }
 
+$workspacePath = Resolve-ExistingDirectory $WorkspaceRoot
 $paths = @(
-    Resolve-ExistingDirectory $WorkspaceRoot
+    $workspacePath
     Resolve-ExistingDirectory $UserHome
     Resolve-ExistingDirectory $ControllerRoot
 ) | Select-Object -Unique
 
-$saved = foreach ($path in $paths) {
-    $snapshot = Get-DirectoryDaclSnapshot $path
+if ([string]::IsNullOrWhiteSpace($SourceFile)) {
+    throw 'SourceFile is required when entering isolation'
+}
+$sourcePath = Resolve-ExistingFile $SourceFile
+$workspacePrefix = $workspacePath.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+if (-not $sourcePath.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "source file escapes the protected workspace: $sourcePath"
+}
+$protectedItems = @(
+    @($paths | ForEach-Object { [pscustomobject]@{ path = $_; kind = 'directory' } })
+    [pscustomobject]@{ path = $sourcePath; kind = 'file' }
+)
+
+$saved = foreach ($item in $protectedItems) {
+    $snapshot = Get-PathDaclSnapshot $item.path $item.kind
     [pscustomobject]@{
-        path     = $path
+        path     = $item.path
+        kind     = $item.kind
         identity = $snapshot.Identity
         sddl     = $snapshot.Sddl
     }
 }
 
 Write-JsonAtomic ([pscustomobject]@{
-    schema_version = 2
+    schema_version = 3
     created_at_utc = [DateTime]::UtcNow.ToString("o")
     paths = @($saved)
 }) $StateFile
@@ -502,43 +542,60 @@ if ($TestPauseAfterState) {
 }
 
 try {
-    foreach ($path in $paths) {
-        $savedEntry = @($saved | Where-Object { $_.path -eq $path })
+    foreach ($item in $protectedItems) {
+        $path = $item.path
+        $kind = $item.kind
+        $savedEntry = @($saved | Where-Object { $_.path -eq $path -and $_.kind -eq $kind })
         if ($savedEntry.Count -ne 1) {
-            throw "ACL state does not uniquely identify protected directory: $path"
+            throw "ACL state does not uniquely identify protected path: $path"
         }
         $expectedIdentity = [string]$savedEntry[0].identity
-        $snapshot = Get-DirectoryDaclSnapshot $path
+        $snapshot = Get-PathDaclSnapshot $path $kind
         if ($snapshot.Identity -ne $expectedIdentity) {
-            throw "protected directory changed before deny installation: $path"
+            throw "protected path changed before deny installation: $path"
         }
-        $acl = New-Object System.Security.AccessControl.DirectorySecurity
+        $acl = if ($kind -eq 'directory') {
+            New-Object System.Security.AccessControl.DirectorySecurity
+        } else {
+            New-Object System.Security.AccessControl.FileSecurity
+        }
         $acl.SetSecurityDescriptorSddlForm(
             $snapshot.Sddl,
             [System.Security.AccessControl.AccessControlSections]::Access
         )
         foreach ($account in $sandboxAccounts) {
+            $inheritance = if ($kind -eq 'directory') {
+                [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+            } else {
+                [System.Security.AccessControl.InheritanceFlags]::None
+            }
             $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
                 (New-Object System.Security.Principal.SecurityIdentifier($account.Sid)),
                 [System.Security.AccessControl.FileSystemRights]::ReadAndExecute,
-                ([System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
-                 [System.Security.AccessControl.InheritanceFlags]::ObjectInherit),
+                $inheritance,
                 [System.Security.AccessControl.PropagationFlags]::None,
                 [System.Security.AccessControl.AccessControlType]::Deny
             )
             [void]$acl.AddAccessRule($rule)
         }
-        Set-DirectoryDacl $path $expectedIdentity $acl
+        Set-PathDacl $path $expectedIdentity $acl $kind
     }
 
-    $checks = foreach ($path in $paths) {
-        $savedEntry = @($saved | Where-Object { $_.path -eq $path })
-        $snapshot = Get-DirectoryDaclSnapshot $path
+    $verifiedChecks = foreach ($item in $protectedItems) {
+        $path = $item.path
+        $kind = $item.kind
+        $savedEntry = @($saved | Where-Object { $_.path -eq $path -and $_.kind -eq $kind })
+        $snapshot = Get-PathDaclSnapshot $path $kind
         if ($savedEntry.Count -ne 1 -or
             $snapshot.Identity -ne [string]$savedEntry[0].identity) {
-            throw "protected directory changed before isolation verification: $path"
+            throw "protected path changed before isolation verification: $path"
         }
-        $acl = New-Object System.Security.AccessControl.DirectorySecurity
+        $acl = if ($kind -eq 'directory') {
+            New-Object System.Security.AccessControl.DirectorySecurity
+        } else {
+            New-Object System.Security.AccessControl.FileSecurity
+        }
         $acl.SetSecurityDescriptorSddlForm(
             $snapshot.Sddl,
             [System.Security.AccessControl.AccessControlSections]::Access
@@ -554,12 +611,15 @@ try {
             }
             [pscustomobject]@{
                 path = $path
+                kind = $kind
                 sandbox_account = $account.Name
                 sandbox_sid = $account.Sid
                 read_execute_denied = $true
             }
         }
     }
+    $checks = @($verifiedChecks | Where-Object { $_.kind -eq 'directory' } | Select-Object -Property path, sandbox_account, sandbox_sid, read_execute_denied)
+    $sourceChecks = @($verifiedChecks | Where-Object { $_.kind -eq 'file' } | Select-Object -Property sandbox_account, sandbox_sid, read_execute_denied)
 
     if ($EvidenceFile) {
         Write-JsonAtomic ([pscustomobject]@{
@@ -568,6 +628,7 @@ try {
             sandbox_accounts = @($sandboxAccounts)
             denied_roots = @($paths)
             checks = @($checks)
+            source_file_deny = [pscustomobject]@{ path = $sourcePath; checks = @($sourceChecks) }
             network = "codex-workspace-write-offline"
             controller_visible_to_agent = $false
             source_workspace_visible_to_agent = $false

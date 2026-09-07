@@ -448,6 +448,21 @@ while IFS= read -r case_file; do
         and .read_execute_denied == true
       )] | length) == 1)
     ] | length == 6 and all)
+    and ($e.source_file_deny | type == "object" and (keys | sort) == ["checks","path"])
+    and (($e.source_file_deny.path | norm) == $source)
+    and ($e.source_file_deny.checks | type == "array" and length == 2
+      and all(.[];
+        type == "object"
+        and (keys | sort) == ["read_execute_denied","sandbox_account","sandbox_sid"]
+        and .read_execute_denied == true))
+    and ([
+      $e.sandbox_accounts[] as $account
+      | (([$e.source_file_deny.checks[] | select(
+        .sandbox_account == $account.Name
+        and .sandbox_sid == $account.Sid
+        and .read_execute_denied == true
+      )] | length) == 1)
+    ] | length == 2 and all)
     and $e.probe.command_event.type == "command_execution"
     and $e.probe.command_event.status == "completed"
     and $e.probe.command_event.exit_code == 0

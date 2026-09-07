@@ -1209,7 +1209,8 @@ if [ "$SYNTHETIC" = 0 ]; then
   update_recovery_journal isolation_entering || die "could not record ACL Enter lifecycle"
   acl_enter_args=(-NoProfile -ExecutionPolicy Bypass -File "$ACL_HELPER" -Mode Enter \
     -WorkspaceRoot "$workspace_root" -ControllerRoot "$controller" \
-    -UserHome "$real_user_home" -StateFile "$acl_state" -EvidenceFile "$isolation_evidence" \
+    -UserHome "$real_user_home" -SourceFile "$ROOT/SKILL.md" \
+    -StateFile "$acl_state" -EvidenceFile "$isolation_evidence" \
     -ProcessStateFile "$acl_helper_state" -ProcessStateStageFile "$acl_helper_state_stage" \
     -ProcessContinueFile "$acl_helper_continue" \
     -ProcessAbortFile "$acl_helper_abort" -ProcessRecoveryFile "$acl_helper_recovery" \
@@ -1345,7 +1346,7 @@ if [ "$SYNTHETIC" = 0 ]; then
     | fromjson
   ' <<< "$probe_event" 2>/dev/null)" \
     || die "effective isolation probe returned invalid JSON"
-  jq -e --arg nonce "$probe_nonce" --arg payload_sha "$probe_payload_sha" '
+  if ! jq -e --arg nonce "$probe_nonce" --arg payload_sha "$probe_payload_sha" '
     .nonce == $nonce
     and .payload_sha256 == $payload_sha
     and (.identity | ascii_downcase | endswith("\\codexsandboxoffline"))
@@ -1354,7 +1355,21 @@ if [ "$SYNTHETIC" = 0 ]; then
     and .source_workspace_readable == false
     and .controller_readable == false
     and .user_home_readable == false
-  ' <<< "$probe_result" >/dev/null 2>&1 || die "effective isolation probe did not prove the required access boundary"
+  ' <<< "$probe_result" >/dev/null 2>&1; then
+    probe_boundary_summary="$(jq -c --arg nonce "$probe_nonce" --arg payload_sha "$probe_payload_sha" '
+      {
+        nonce_match:(.nonce == $nonce),
+        payload_sha_match:(.payload_sha256 == $payload_sha),
+        offline_identity:(.identity | type == "string" and (ascii_downcase | endswith("\\codexsandboxoffline"))),
+        target_file_readable:.target_file_readable,
+        target_writeable:.target_writeable,
+        source_workspace_readable:.source_workspace_readable,
+        controller_readable:.controller_readable,
+        user_home_readable:.user_home_readable
+      }
+    ' <<< "$probe_result" 2>/dev/null || printf '{"summary_unavailable":true}')"
+    die "effective isolation probe did not prove the required access boundary: $probe_boundary_summary"
+  fi
   [ "$(sha "$probe_target")" = "$probe_target_sha" ] || die "effective isolation probe target changed during execution"
   rm -f -- "$probe_target"
   [ ! -e "$probe_target" ] && [ ! -L "$probe_target" ] || die "effective isolation probe target cleanup failed"

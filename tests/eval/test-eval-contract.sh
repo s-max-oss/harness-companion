@@ -157,6 +157,25 @@ if python "$EVAL/validate-probe-command.py" --same-windows-path 'C:\Windowſ\Sys
 else
   ok "evidence-bound wrapper comparison rejects Unicode case-fold lookalikes"
 fi
+probe_path_nonce='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+probe_controller_path="C:\\Users\\Public\\harness-companion-eval\\runs\\run.$probe_path_nonce\\controller\\runtime.manifest"
+probe_script_path="C:\\Users\\Public\\harness-companion-eval\\runs\\run.$probe_path_nonce\\agent-bin\\isolation-probe.ps1"
+check "probe path validator accepts only the exact canonical run siblings" python "$EVAL/validate-probe-command.py" --probe-script-path "$probe_controller_path" "$probe_script_path"
+for path_pair in \
+  "${probe_controller_path/\\controller\\runtime.manifest/\\controller\\..\\controller\\runtime.manifest}|$probe_script_path" \
+  "$probe_controller_path|${probe_script_path/\\agent-bin\\isolation-probe.ps1/\\agent-bin\\.\\isolation-probe.ps1}" \
+  "${probe_controller_path/Public/Public\'}|${probe_script_path/Public/Public\'}" \
+  "${probe_controller_path/Users\\Public/Temp}|${probe_script_path/Users\\Public/Temp}" \
+  "${probe_controller_path/$probe_path_nonce/short}|${probe_script_path/$probe_path_nonce/short}" \
+  "$probe_controller_path|${probe_script_path/$probe_path_nonce/abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd}"; do
+  controller_under_test="${path_pair%%|*}"
+  script_under_test="${path_pair#*|}"
+  if python "$EVAL/validate-probe-command.py" --probe-script-path "$controller_under_test" "$script_under_test" >/dev/null 2>&1; then
+    bad "probe path validator rejects aliases, metacharacters, alternate roots, and mismatched runs"
+  else
+    ok "probe path validator rejects aliases, metacharacters, alternate roots, and mismatched runs"
+  fi
+done
 if python "$EVAL/validate-probe-command.py" --identify "$probe_display_command_b64" "$(printf '%s' "$probe_inner extra" | base64 | tr -d '\r\n')" "$probe_wrapper" "$probe_variants_b64" >/dev/null 2>&1; then
   bad "probe command validator rejects inner-command drift"
 else
@@ -561,9 +580,12 @@ test_powershell_win="$(cygpath -w "$test_powershell_posix")"
 test_whoami_win="$(cygpath -w "$test_whoami_posix")"
 test_powershell_sha="$(sha256sum "$test_powershell_posix" | cut -d ' ' -f 1)"
 test_whoami_sha="$(sha256sum "$test_whoami_posix" | cut -d ' ' -f 1)"
-test_probe_payload="$(jq -cnS --arg whoami "$test_whoami_win" '{nonce:"test-nonce",target_file:"C:\\target\\.harness-eval-isolation-sentinel",source_file:"C:\\workspace\\SKILL.md",controller_file:"C:\\controller\\runtime.manifest",user_home:"C:\\home",whoami_file:$whoami}')"
+test_probe_run_token='0000000000000000000000000000000000000000000000000000000000000000'
+test_probe_run_root_win="C:\\Users\\Public\\harness-companion-eval\\runs\\run.$test_probe_run_token"
+test_probe_controller_root="C:/Users/Public/harness-companion-eval/runs/run.$test_probe_run_token/controller"
+test_probe_payload="$(jq -cnS --arg whoami "$test_whoami_win" --arg controller_file "$test_probe_run_root_win\\controller\\runtime.manifest" '{nonce:"test-nonce",target_file:"C:\\target\\.harness-eval-isolation-sentinel",source_file:"C:\\workspace\\SKILL.md",controller_file:$controller_file,user_home:"C:\\home",whoami_file:$whoami}')"
 test_probe_payload_sha="$(printf '%s' "$test_probe_payload" | sha256sum | cut -d ' ' -f 1)"
-test_probe_script_win='C:\agent-bin\isolation-probe.ps1'
+test_probe_script_win="$test_probe_run_root_win\\agent-bin\\isolation-probe.ps1"
 test_probe_script_sha="$(sha256sum "$EVAL/windows-isolation-probe.ps1" | cut -d ' ' -f 1)"
 test_probe_command="& '$test_powershell_win' -NoProfile -ExecutionPolicy Bypass -File '$test_probe_script_win' -ExpectedPayloadSha256 '$test_probe_payload_sha'"
 test_codex_powershell_suffix="$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix' "$EVAL/trust/agent-publishers.json")"
@@ -576,7 +598,7 @@ test_probe_wrapper_win="$(env -u PSModulePath powershell.exe -NoProfile -Command
 test_probe_variant="powershell-no-profile-command-v1"
 test_probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_variant" "$test_probe_command_b64" "$test_probe_wrapper_win")"
 test_probe_result="$(jq -cn --arg payload_sha "$test_probe_payload_sha" '{nonce:"test-nonce",payload_sha256:$payload_sha,identity:"test-host\\codexsandboxoffline",target_file_readable:true,target_writeable:true,source_workspace_readable:false,controller_readable:false,user_home_readable:false}')"
-jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg shell_wrapper_path "$test_probe_wrapper_win" --arg shell_wrapper_argv_variant "$test_probe_variant" --arg probe_script_path "$test_probe_script_win" --arg probe_script_sha "$test_probe_script_sha" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" '{
+jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg controller_root "$test_probe_controller_root" --arg shell_wrapper_path "$test_probe_wrapper_win" --arg shell_wrapper_argv_variant "$test_probe_variant" --arg probe_script_path "$test_probe_script_win" --arg probe_script_sha "$test_probe_script_sha" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" '{
   schema_version:2,
   isolation:"windows-native-elevated-acl",
   controller_visible_to_agent:false,
@@ -587,14 +609,14 @@ jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n'
     {Name:"CodexSandboxOffline",Sid:"S-1-5-21-1-2-3-1001"},
     {Name:"CodexSandboxOnline",Sid:"S-1-5-21-1-2-3-1002"}
   ],
-  denied_roots:["C:/workspace","C:/home","C:/controller"],
+  denied_roots:["C:/workspace","C:/home",$controller_root],
   checks:[
     {path:"C:/workspace",sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
     {path:"C:/workspace",sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true},
     {path:"C:/home",sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
     {path:"C:/home",sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true},
-    {path:"C:/controller",sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
-    {path:"C:/controller",sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true}
+    {path:$controller_root,sandbox_account:"CodexSandboxOffline",sandbox_sid:"S-1-5-21-1-2-3-1001",read_execute_denied:true},
+    {path:$controller_root,sandbox_account:"CodexSandboxOnline",sandbox_sid:"S-1-5-21-1-2-3-1002",read_execute_denied:true}
   ],
   probe:{
     command_event:{type:"command_execution",command:$command,aggregated_output:$output,exit_code:0,status:"completed"},

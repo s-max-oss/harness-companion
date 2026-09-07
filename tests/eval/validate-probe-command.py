@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import sys
 
 
@@ -92,11 +93,40 @@ def canonical_windows_path(value: str, label: str) -> str:
     return value.replace("\\", "/").rstrip("/").translate(ascii_lower)
 
 
+def validate_probe_script_path(controller_file: str, script_path: str) -> None:
+    """Accept only the controller-created canonical run root and exact sibling probe."""
+    for value, label in ((controller_file, "controller path"), (script_path, "probe script path")):
+        if not value.isascii():
+            fail(f"{label} must be ASCII")
+        if any(ch in value for ch in "\x00\r\n'\"`$"):
+            fail(f"{label} contains a forbidden byte")
+
+    controller_match = re.fullmatch(
+        r"C:\\Users\\Public\\harness-companion-eval\\runs\\run\.([0-9a-f]{64})"
+        r"\\controller\\runtime\.manifest",
+        controller_file,
+    )
+    if controller_match is None:
+        fail("controller path is outside the canonical isolated-run grammar")
+
+    expected_script = (
+        "C:\\Users\\Public\\harness-companion-eval\\runs\\run."
+        f"{controller_match.group(1)}\\agent-bin\\isolation-probe.ps1"
+    )
+    if script_path != expected_script:
+        fail("probe script is not the exact canonical sibling of the controller")
+
+
 if len(sys.argv) == 4 and sys.argv[1] == "--same-windows-path":
     left = canonical_windows_path(sys.argv[2], "left path")
     right = canonical_windows_path(sys.argv[3], "right path")
     if left != right:
         fail("Windows paths do not identify the same canonical path")
+    raise SystemExit(0)
+
+
+if len(sys.argv) == 4 and sys.argv[1] == "--probe-script-path":
+    validate_probe_script_path(sys.argv[2], sys.argv[3])
     raise SystemExit(0)
 
 
@@ -108,7 +138,7 @@ if len(sys.argv) == 5 and sys.argv[1] == "--canonical":
     raise SystemExit(0)
 
 if len(sys.argv) != 6 or sys.argv[1] != "--identify":
-    fail("expected --identify RECORDED_B64 EXPECTED_B64 WRAPPER ALLOWED_VARIANTS_B64")
+    fail("expected a supported probe-command validation mode")
 
 recorded_b64, expected_b64, wrapper, variants_b64 = sys.argv[2:]
 if not recorded_b64 or not expected_b64 or not wrapper or not variants_b64:

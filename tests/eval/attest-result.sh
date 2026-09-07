@@ -334,6 +334,7 @@ expected_probe_command() {
   recorded_script_path="$(jq -r '.probe.script.path // empty' "$evidence")" || return 1
   recorded_script_sha="$(jq -r '.probe.script.sha256 // empty | ascii_downcase' "$evidence")" || return 1
   [ "$recorded_script_path" = "$script_path" ] || return 1
+  python "$PROBE_COMMAND_VALIDATOR" --probe-script-path "$controller_file" "$recorded_script_path" >/dev/null 2>&1 || return 1
   [ "$recorded_script_sha" = "$(sha "$ISOLATION_PROBE")" ] || return 1
   printf '& '"'"'%s'"'"' -NoProfile -ExecutionPolicy Bypass -File '"'"'%s'"'"' -ExpectedPayloadSha256 '"'"'%s'"'"'\n' \
     "$powershell_path" "$script_path" "$payload_sha"

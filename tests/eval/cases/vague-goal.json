@@ -55,10 +55,15 @@
   "expected_brief_semantics": {
     "goal_required_regexes": ["web app", "team.*task|task.*team"],
     "success_criteria_required_regexes": [
-      "create.*task",
-      "assign.*task",
-      "complet.*task",
-      "(test|pytest).*pass"
+      "create.*task|task.*creat",
+      "assign.*task|task.*assign",
+      "complet.*task|task.*complet",
+      "(test|pytest).*pass|pass.*(test|pytest)"
+    ],
+    "success_criteria_forbidden_regexes": [
+      "(cannot|can not|can't|must not|mustn't|never|do not|don't|does not|doesn't|not allowed to).*(creat|assign|complet|pass)",
+      "(creat|assign|complet).*(cannot|can not|can't|must not|mustn't|never|not allowed)",
+      "(test|pytest).*(fail|failing|failed|not pass)"
     ]
   },
   "objective_dialog_rules": {

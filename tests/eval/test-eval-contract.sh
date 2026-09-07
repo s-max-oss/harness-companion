@@ -68,6 +68,7 @@ for c in "${cases[@]}"; do
     and ((.expected_brief_semantics // {}) | type == "object")
     and ((.expected_brief_semantics.goal_required_regexes // []) | type == "array" and all(.[]; type == "string" and length > 0))
     and ((.expected_brief_semantics.success_criteria_required_regexes // []) | type == "array" and all(.[]; type == "string" and length > 0))
+    and ((.expected_brief_semantics.success_criteria_forbidden_regexes // []) | type == "array" and all(.[]; type == "string" and length > 0))
     and ((.objective_dialog_rules // {}) | type == "object")
     and ((.objective_dialog_rules.forbidden_phrases // []) | type == "array" and all(.[]; type == "string" and length > 0))
     and ((.objective_dialog_rules.final_response_required_regexes // []) | type == "array" and all(.[]; type == "string" and length > 0))

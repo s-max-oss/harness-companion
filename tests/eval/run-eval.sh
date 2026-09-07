@@ -676,7 +676,11 @@ done
 jq -e '.schema_version == 1 and (.agents.codex.publisher_thumbprints | length > 0)
   and (.agents.codex.approved_builds | type == "array" and length > 0
     and all(.[]; (.cli_version | type == "string" and length > 0)
-      and (.sha256 | type == "string" and test("^[0-9a-fA-F]{64}$"))))' "$AGENT_PUBLISHERS" >/dev/null \
+      and (.sha256 | type == "string" and test("^[0-9a-fA-F]{64}$"))
+      and (.shell_wrapper_argv_variants == [
+        "powershell-command-v1",
+        "powershell-no-profile-command-v1"
+      ])))' "$AGENT_PUBLISHERS" >/dev/null \
   || die "Agent publisher trust policy is invalid"
 real_user_home=""
 real_user_home_win=""
@@ -993,6 +997,16 @@ if [ "$SYNTHETIC" = 0 ]; then
   official_agent_build "$REVIEWER" "$reviewer_version" "$reviewer_executable_sha" || die "reviewer executable is not an approved $REVIEWER build"
   [ "$AGENT" = codex ] && [ "$REVIEWER" = codex ] && [ "$subject_version" = "$reviewer_version" ] \
     || die "real eval requires one exact Codex runtime bundle"
+  probe_shell_variants_b64="$(jq -r --arg agent "$AGENT" --arg version "$subject_version" --arg sha "$subject_executable_sha" '
+    [.agents[$agent].approved_builds[]? | select(
+      .cli_version == $version and (.sha256 | ascii_downcase) == ($sha | ascii_downcase)
+    )] as $builds
+    | if ($builds | length) == 1
+      then ($builds[0].shell_wrapper_argv_variants | tojson | @base64)
+      else empty
+      end
+  ' "$AGENT_PUBLISHERS")"
+  [ -n "$probe_shell_variants_b64" ] || die "approved Codex probe serializer policy is missing or ambiguous"
   subject_install_dir="$(cd "$(dirname "$subject_executable")" && pwd -P)" || die "could not resolve subject install directory"
   reviewer_install_dir="$(cd "$(dirname "$reviewer_executable")" && pwd -P)" || die "could not resolve reviewer install directory"
   [ "$(host_path "$subject_install_dir")" = "$(host_path "$reviewer_install_dir")" ] \
@@ -1305,8 +1319,11 @@ if [ "$SYNTHETIC" = 0 ]; then
   recorded_probe_command_b64="$(jq -r '.command | @base64' <<< "$probe_event")" \
     || die "effective isolation probe command event was invalid"
   expected_probe_command_b64="$(printf '%s' "$probe_command" | base64 | tr -d '\r\n')"
-  python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_command_b64" "$expected_probe_command_b64" "$codex_shell_wrapper_win" >/dev/null 2>&1 \
-    || die "effective isolation probe command did not match the exact controller argv"
+  probe_shell_variant="$(python "$PROBE_COMMAND_VALIDATOR" --identify \
+    "$recorded_probe_command_b64" "$expected_probe_command_b64" \
+    "$codex_shell_wrapper_win" "$probe_shell_variants_b64" 2>/dev/null)" \
+    || die "effective isolation probe command did not match an exact build-approved controller argv"
+  [ -n "$probe_shell_variant" ] || die "effective isolation probe serializer variant was empty"
   probe_result="$(jq -c '
     .aggregated_output
     | if contains("\u0000") then error("invalid NUL") else . end
@@ -1331,13 +1348,13 @@ if [ "$SYNTHETIC" = 0 ]; then
   rm -f -- "$probe_target"
   [ ! -e "$probe_target" ] && [ ! -L "$probe_target" ] || die "effective isolation probe target cleanup failed"
   jq --argjson command_event "$probe_event" --argjson result "$probe_result" --argjson payload "$probe_payload" --arg path "$sandbox_path" \
-    --arg shell_wrapper_path "$codex_shell_wrapper_win" \
+    --arg shell_wrapper_path "$codex_shell_wrapper_win" --arg shell_wrapper_argv_variant "$probe_shell_variant" \
     --arg powershell_path "$system_powershell_win" --arg powershell_sha256 "$system_powershell_sha" \
     --arg whoami_path "$system_whoami_win" --arg whoami_sha256 "$system_whoami_sha" \
     --arg codex_powershell_path "$codex_powershell_win" --arg codex_powershell_sha256 "$codex_powershell_sha" \
     --argjson codex_powershell_authenticode "$codex_powershell_authenticode" '
     .schema_version = 2
-    | .probe = {command_event:$command_event,result:$result,payload:$payload,shell_wrapper_path:$shell_wrapper_path,sanitized_path:($path | split(":")),executables:{powershell:{path:$powershell_path,sha256:$powershell_sha256},whoami:{path:$whoami_path,sha256:$whoami_sha256},codex_powershell:{path:$codex_powershell_path,sha256:$codex_powershell_sha256,authenticode:$codex_powershell_authenticode}}}
+    | .probe = {command_event:$command_event,result:$result,payload:$payload,shell_wrapper_path:$shell_wrapper_path,shell_wrapper_argv_variant:$shell_wrapper_argv_variant,sanitized_path:($path | split(":")),executables:{powershell:{path:$powershell_path,sha256:$powershell_sha256},whoami:{path:$whoami_path,sha256:$whoami_sha256},codex_powershell:{path:$codex_powershell_path,sha256:$codex_powershell_sha256,authenticode:$codex_powershell_authenticode}}}
   ' "$isolation_evidence" > "$controller/isolation.with-probe.json"
   mv "$controller/isolation.with-probe.json" "$isolation_evidence"
 else

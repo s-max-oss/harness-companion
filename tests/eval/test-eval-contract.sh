@@ -108,54 +108,76 @@ check "real eval records an effective Offline-sandbox access probe" bash -c 'gre
 check "all real eval output directories share one ACL transition lock" grep -Fq 'acl_lock="$ROOT/.harness/eval-acl.lock"' "$EVAL/run-eval.sh"
 check "crashed eval state has identity-bound lifecycle recovery" bash -c 'grep -Fq "eval-recovery-journal.json" "$1" && grep -Fq "windows_process_status" "$1" && grep -Fq "lifecycle recovery complete" "$1"' _ "$EVAL/recover-windows-isolation.sh"
 check "real eval binds the token-resolved user profile instead of caller USERPROFILE" bash -c 'grep -Fq "GetFolderPath([Environment+SpecialFolder]::UserProfile)" "$1" && ! grep -Fq "\${USERPROFILE:-\$HOME}" "$1"' _ "$EVAL/run-eval.sh"
-check "real Agent identity and Windows runtime tools are versioned trust anchors" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin" and (.agents.codex.approved_builds | length > 0 and all(.[]; (.cli_version | length > 0) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_system_tools | keys | sort == ["powershell","whoami"]) and (all(.windows_system_tools[]; (.path | startswith("C:\\Windows\\System32\\")) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_runtime_tools | keys == ["codex_powershell"]) and (.windows_runtime_tools.codex_powershell.user_profile_suffix | endswith("\\pwsh.exe")) and (.windows_runtime_tools.codex_powershell.publisher_subject | startswith("CN=Microsoft Corporation")) and (.windows_runtime_tools.codex_powershell.publisher_thumbprints | length > 0) and (.windows_runtime_tools.codex_powershell.approved_sha256 | length > 0 and all(.[]; test("^[0-9a-f]{64}$")))' "$EVAL/trust/agent-publishers.json"
+check "real Agent identity and Windows runtime tools are versioned trust anchors" jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | startswith("CN=\"OpenAI OpCo, LLC\"")) and (.agents.codex.publisher_thumbprints | length > 0) and .agents.codex.install_subpath == "AppData/Local/OpenAI/Codex/bin" and (.agents.codex.approved_builds | length > 0 and all(.[]; (.cli_version | length > 0) and (.sha256 | test("^[0-9a-f]{64}$")) and .shell_wrapper_argv_variants == ["powershell-command-v1","powershell-no-profile-command-v1"])) and (.windows_system_tools | keys | sort == ["powershell","whoami"]) and (all(.windows_system_tools[]; (.path | startswith("C:\\Windows\\System32\\")) and (.sha256 | test("^[0-9a-f]{64}$")))) and (.windows_runtime_tools | keys == ["codex_powershell"]) and (.windows_runtime_tools.codex_powershell.user_profile_suffix | endswith("\\pwsh.exe")) and (.windows_runtime_tools.codex_powershell.publisher_subject | startswith("CN=Microsoft Corporation")) and (.windows_runtime_tools.codex_powershell.publisher_thumbprints | length > 0) and (.windows_runtime_tools.codex_powershell.approved_sha256 | length > 0 and all(.[]; test("^[0-9a-f]{64}$")))' "$EVAL/trust/agent-publishers.json"
 probe_wrapper='C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe'
 probe_inner='$env:HARNESS_EVAL_PROBE_PAYLOAD='"'"'ZGVidWc='"'"'; Write-Output ok'
 probe_inner_b64="$(printf '%s' "$probe_inner" | base64 | tr -d '\r\n')"
-probe_display="$(cat <<'EOF'
+probe_variants_b64="$(printf '%s' '["powershell-command-v1","powershell-no-profile-command-v1"]' | base64 | tr -d '\r\n')"
+probe_display_command="$(cat <<'EOF'
 "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'ZGVidWc='; Write-Output ok"
 EOF
 )"
-probe_display_b64="$(printf '%s' "$probe_display" | base64 | tr -d '\r\n')"
-if [ "$(python "$EVAL/validate-probe-command.py" --canonical "$probe_inner_b64" "$probe_wrapper")" = "$probe_display" ]; then
-  ok "probe command serializer matches the approved Codex 0.152.1 golden display"
+probe_display_no_profile="$(cat <<'EOF'
+"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -Command '$env:HARNESS_EVAL_PROBE_PAYLOAD='"'ZGVidWc='; Write-Output ok"
+EOF
+)"
+probe_display_command_b64="$(printf '%s' "$probe_display_command" | base64 | tr -d '\r\n')"
+probe_display_no_profile_b64="$(printf '%s' "$probe_display_no_profile" | base64 | tr -d '\r\n')"
+if [ "$(python "$EVAL/validate-probe-command.py" --canonical powershell-command-v1 "$probe_inner_b64" "$probe_wrapper")" = "$probe_display_command" ] \
+  && [ "$(python "$EVAL/validate-probe-command.py" --canonical powershell-no-profile-command-v1 "$probe_inner_b64" "$probe_wrapper")" = "$probe_display_no_profile" ]; then
+  ok "probe command serializer matches both build-approved Codex 0.152.1 golden displays"
 else
-  bad "probe command serializer matches the approved Codex 0.152.1 golden display"
+  bad "probe command serializer matches both build-approved Codex 0.152.1 golden displays"
 fi
-check "probe command validator accepts the exact canonical non-login wrapper argv" python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$probe_inner_b64" "$probe_wrapper"
+if [ "$(python "$EVAL/validate-probe-command.py" --identify "$probe_display_command_b64" "$probe_inner_b64" "$probe_wrapper" "$probe_variants_b64")" = powershell-command-v1 ] \
+  && [ "$(python "$EVAL/validate-probe-command.py" --identify "$probe_display_no_profile_b64" "$probe_inner_b64" "$probe_wrapper" "$probe_variants_b64")" = powershell-no-profile-command-v1 ]; then
+  ok "probe command validator identifies both exact build-approved wrapper argv variants"
+else
+  bad "probe command validator identifies both exact build-approved wrapper argv variants"
+fi
+command_only_variants_b64="$(printf '%s' '["powershell-command-v1"]' | base64 | tr -d '\r\n')"
+unknown_variants_b64="$(printf '%s' '["powershell-command-v1","unapproved-wrapper-v1"]' | base64 | tr -d '\r\n')"
+duplicate_variants_b64="$(printf '%s' '["powershell-command-v1","powershell-command-v1"]' | base64 | tr -d '\r\n')"
+if python "$EVAL/validate-probe-command.py" --identify "$probe_display_no_profile_b64" "$probe_inner_b64" "$probe_wrapper" "$command_only_variants_b64" >/dev/null 2>&1 \
+  || python "$EVAL/validate-probe-command.py" --identify "$probe_display_command_b64" "$probe_inner_b64" "$probe_wrapper" "$unknown_variants_b64" >/dev/null 2>&1 \
+  || python "$EVAL/validate-probe-command.py" --identify "$probe_display_command_b64" "$probe_inner_b64" "$probe_wrapper" "$duplicate_variants_b64" >/dev/null 2>&1; then
+  bad "probe command validator rejects unapproved, unknown, and duplicate serializer policies"
+else
+  ok "probe command validator rejects unapproved, unknown, and duplicate serializer policies"
+fi
 check "production probe derives the observed system wrapper" grep -Fq 'codex_shell_wrapper_win="$system_root_win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"' "$EVAL/run-eval.sh"
-check "production probe validator uses the observed system wrapper" grep -Fq '$expected_probe_command_b64" "$codex_shell_wrapper_win"' "$EVAL/run-eval.sh"
+check "production probe validator uses the observed system wrapper and build policy" bash -c 'grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1"' _ "$EVAL/run-eval.sh"
 check "production inner probe stays profile-free" grep -Fq -- "-NoProfile -ExecutionPolicy Bypass -EncodedCommand" "$EVAL/run-eval.sh"
 check "all real Codex exec calls disable login shells" bash -c '[ "$(grep -c "allow_login_shell=false" "$1")" -eq 3 ]' _ "$EVAL/run-eval.sh"
-check "attester uses the evidence-bound system wrapper" bash -c 'grep -Fq ".probe.shell_wrapper_path" "$1" && grep -Fq -- "--same-windows-path" "$1" && grep -Eq "python .*PROBE_COMMAND_VALIDATOR.*recorded_probe_b64.*expected_probe_b64.*probe_wrapper_path" "$1" && ! grep -Fq "observed_probe_wrapper" "$1"' _ "$EVAL/attest-result.sh"
-check "result gate uses the evidence-bound system wrapper without a host PowerShell call" bash -c 'grep -Fq ".probe.shell_wrapper_path" "$1" && grep -Fq -- "--same-windows-path" "$1" && grep -Eq "python .*PROBE_COMMAND_VALIDATOR.*recorded_probe_b64.*expected_probe_b64.*probe_wrapper_path" "$1" && ! grep -Fq "observed_probe_wrapper" "$1" && ! grep -Fq "windows_powershell()" "$1"' _ "$EVAL/check-results.sh"
+check "attester binds the exact serializer variant to the evidence and build policy" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1"' _ "$EVAL/attest-result.sh"
+check "result gate binds the exact serializer variant without a host PowerShell call" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1" && ! grep -Fq "windows_powershell()" "$1"' _ "$EVAL/check-results.sh"
 check "evidence-bound wrapper comparison accepts deterministic Windows case drift" python "$EVAL/validate-probe-command.py" --same-windows-path 'C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe' 'c:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 if python "$EVAL/validate-probe-command.py" --same-windows-path 'C:\Windowſ\System32\WindowsPowerShell\v1.0\powershell.exe' 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' >/dev/null 2>&1; then
   bad "evidence-bound wrapper comparison rejects Unicode case-fold lookalikes"
 else
   ok "evidence-bound wrapper comparison rejects Unicode case-fold lookalikes"
 fi
-if python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$(printf '%s' "$probe_inner extra" | base64 | tr -d '\r\n')" "$probe_wrapper" >/dev/null 2>&1; then
+if python "$EVAL/validate-probe-command.py" --identify "$probe_display_command_b64" "$(printf '%s' "$probe_inner extra" | base64 | tr -d '\r\n')" "$probe_wrapper" "$probe_variants_b64" >/dev/null 2>&1; then
   bad "probe command validator rejects inner-command drift"
 else
   ok "probe command validator rejects inner-command drift"
 fi
 for mutation in \
-  "${probe_display/ -Command/}" \
-  " ${probe_display}" \
-  "${probe_display} " \
-  "${probe_display/ -Command/  -Command}" \
-  "${probe_display/ -Command/ -Command -Command}" \
-  "${probe_display/ -Command/ -NoProfile -Command}" \
-  "${probe_display/ -Command/ -NonInteractive -Command}" \
-  "${probe_display/ -Command/ -Command -NoProfile}"; do
-  if python "$EVAL/validate-probe-command.py" "$(printf '%s' "$mutation" | base64 | tr -d '\r\n')" "$probe_inner_b64" "$probe_wrapper" >/dev/null 2>&1; then
+  "${probe_display_command/ -Command/}" \
+  " ${probe_display_command}" \
+  "${probe_display_command} " \
+  "${probe_display_command/ -Command/  -Command}" \
+  "${probe_display_command/ -Command/ -Command -Command}" \
+  "${probe_display_command/ -Command/ -NonInteractive -Command}" \
+  "${probe_display_no_profile/ -NoProfile/ -NoProfile -NoProfile}" \
+  "${probe_display_no_profile/ -Command/ -Command -NoProfile}"; do
+  if python "$EVAL/validate-probe-command.py" --identify "$(printf '%s' "$mutation" | base64 | tr -d '\r\n')" "$probe_inner_b64" "$probe_wrapper" "$probe_variants_b64" >/dev/null 2>&1; then
     bad "probe command validator rejects noncanonical wrapper argv serialization"
   else
     ok "probe command validator rejects noncanonical wrapper argv serialization"
   fi
 done
-if python "$EVAL/validate-probe-command.py" "$(printf '%s\r' "$probe_display" | base64 | tr -d '\r\n')" "$probe_inner_b64" "$probe_wrapper" >/dev/null 2>&1; then
+if python "$EVAL/validate-probe-command.py" --identify "$(printf '%s\r' "$probe_display_command" | base64 | tr -d '\r\n')" "$probe_inner_b64" "$probe_wrapper" "$probe_variants_b64" >/dev/null 2>&1; then
   bad "probe command validator rejects forbidden control bytes"
 else
   ok "probe command validator rejects forbidden control bytes"
@@ -550,9 +572,10 @@ test_codex_powershell_subject="$(jq -r '.windows_runtime_tools.codex_powershell.
 test_codex_powershell_thumbprint="$(jq -r '.windows_runtime_tools.codex_powershell.publisher_thumbprints[0]' "$EVAL/trust/agent-publishers.json")"
 test_probe_command_b64="$(printf '%s' "$test_probe_command" | base64 | tr -d '\r\n')"
 test_probe_wrapper_win="$(env -u PSModulePath powershell.exe -NoProfile -Command '$env:SystemRoot + "\System32\WindowsPowerShell\v1.0\powershell.exe"' | tr -d '\r')"
-test_probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_command_b64" "$test_probe_wrapper_win")"
+test_probe_variant="powershell-no-profile-command-v1"
+test_probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_variant" "$test_probe_command_b64" "$test_probe_wrapper_win")"
 test_probe_result="$(jq -cn '{nonce:"test-nonce",identity:"test-host\\codexsandboxoffline",target_file_readable:true,target_writeable:true,source_workspace_readable:false,controller_readable:false,user_home_readable:false}')"
-jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg shell_wrapper_path "$test_probe_wrapper_win" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" '{
+jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg shell_wrapper_path "$test_probe_wrapper_win" --arg shell_wrapper_argv_variant "$test_probe_variant" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" '{
   schema_version:2,
   isolation:"windows-native-elevated-acl",
   controller_visible_to_agent:false,
@@ -577,6 +600,7 @@ jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n'
     payload:$payload,
     result:$result,
     shell_wrapper_path:$shell_wrapper_path,
+    shell_wrapper_argv_variant:$shell_wrapper_argv_variant,
     executables:{powershell:{path:$powershell_path,sha256:$powershell_sha},whoami:{path:$whoami_path,sha256:$whoami_sha},codex_powershell:{path:$codex_powershell_path,sha256:$codex_powershell_sha,authenticode:{status:"Valid",subject:$codex_powershell_subject,thumbprint:$codex_powershell_thumbprint}}},
     sanitized_path:["/c/Windows/System32/WindowsPowerShell/v1.0","/c/Windows/System32","/c/Windows","/c/Program Files/Git/bin","/c/Program Files/Git/usr/bin"]
   }
@@ -654,6 +678,26 @@ else
   sed 's/^/  wrong-wrapper: /' "$TMP/wrong-wrapper.log" >&2
   bad "attester rejects a forged evidence-bound shell wrapper"
 fi
+mkdir -p "$TMP/wrong-variant-candidates" "$TMP/wrong-variant-results"
+for f in "$attest_base".*; do cp "$f" "$TMP/wrong-variant-candidates/"; done
+wrong_variant_candidate="$TMP/wrong-variant-candidates/$(basename "$attest_candidate")"
+wrong_variant_base="${wrong_variant_candidate%.json}"
+jq '.probe.shell_wrapper_argv_variant="powershell-command-v1"' "$wrong_variant_base.isolation.json" > "$TMP/wrong-variant-isolation.tmp"
+mv "$TMP/wrong-variant-isolation.tmp" "$wrong_variant_base.isolation.json"
+wrong_variant_sha="$(sha256sum "$wrong_variant_base.isolation.json" | cut -d ' ' -f 1)"
+jq --arg isolation_sha "$wrong_variant_sha" '.artifact_hashes.isolation=$isolation_sha' "$wrong_variant_candidate" > "$TMP/wrong-variant-candidate.tmp"
+mv "$TMP/wrong-variant-candidate.tmp" "$wrong_variant_candidate"
+if bash "$EVAL/attest-result.sh" "$wrong_variant_candidate" \
+  --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/wrong-variant-candidates" \
+  --results-dir="$TMP/wrong-variant-results" --allowed-signers="$TMP/test-release-signers" \
+  > "$TMP/wrong-variant.log" 2>&1; then
+  bad "attester rejects a forged probe serializer variant"
+elif grep -Fq 'serializer variant was not evidence-bound' "$TMP/wrong-variant.log"; then
+  ok "attester rejects a forged probe serializer variant"
+else
+  sed 's/^/  wrong-variant: /' "$TMP/wrong-variant.log" >&2
+  bad "attester rejects a forged probe serializer variant"
+fi
 if bash "$EVAL/attest-result.sh" "$attest_candidate" \
   --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/attest-candidates" \
   --results-dir="$TMP/attested-results" --allowed-signers="$TMP/test-release-signers" \
@@ -703,6 +747,29 @@ elif grep -Fq 'vague-goal@1(failed-stale-synthetic-unconfirmed-or-unbound)' "$TM
 else
   sed 's/^/  gate-forged-wrapper: /' "$TMP/gate-forged-wrapper.log" >&2
   bad "release gate rejects validly signed forged-wrapper evidence"
+fi
+
+mkdir -p "$TMP/gate-forged-variant-results"
+for f in "$attested_base".*; do cp "$f" "$TMP/gate-forged-variant-results/"; done
+gate_forged_variant_result="$TMP/gate-forged-variant-results/$(basename "$attested")"
+gate_forged_variant_base="${gate_forged_variant_result%.json}"
+jq '.probe.shell_wrapper_argv_variant="powershell-command-v1"' "$gate_forged_variant_base.isolation.json" > "$TMP/gate-forged-variant-isolation.tmp"
+mv "$TMP/gate-forged-variant-isolation.tmp" "$gate_forged_variant_base.isolation.json"
+gate_forged_variant_isolation_sha="$(sha256sum "$gate_forged_variant_base.isolation.json" | cut -d ' ' -f 1)"
+jq --arg isolation_sha "$gate_forged_variant_isolation_sha" '.artifact_hashes.isolation=$isolation_sha' "$gate_forged_variant_result" > "$TMP/gate-forged-variant-result.tmp"
+mv "$TMP/gate-forged-variant-result.tmp" "$gate_forged_variant_result"
+rm -f -- "$gate_forged_variant_base.attestation.sig"
+ssh-keygen -Y sign -q -f "$TMP/test-signing-key" -n harness-eval "$gate_forged_variant_result"
+mv "$gate_forged_variant_result.sig" "$gate_forged_variant_base.attestation.sig"
+if HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS="$TMP/test-release-signers" \
+  bash "$EVAL/check-results.sh" --cases-dir="$TMP/cases" --results-dir="$TMP/gate-forged-variant-results" \
+  > "$TMP/gate-forged-variant.log" 2>&1; then
+  bad "release gate rejects validly signed forged serializer-variant evidence"
+elif grep -Fq 'vague-goal@1(failed-stale-synthetic-unconfirmed-or-unbound)' "$TMP/gate-forged-variant.log"; then
+  ok "release gate rejects validly signed forged serializer-variant evidence"
+else
+  sed 's/^/  gate-forged-variant: /' "$TMP/gate-forged-variant.log" >&2
+  bad "release gate rejects validly signed forged serializer-variant evidence"
 fi
 
 # The release gate validates a private snapshot, then verifies that every

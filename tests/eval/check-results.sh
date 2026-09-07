@@ -385,10 +385,28 @@ while IFS= read -r case_file; do
   codex_powershell_path="$(jq -r '.probe.executables.codex_powershell.path // empty' "$base.isolation.json" 2>/dev/null || true)"
   powershell_path="$(jq -r '.probe.executables.powershell.path // empty' "$base.isolation.json" 2>/dev/null || true)"
   probe_wrapper_path="$(jq -r '.probe.shell_wrapper_path // empty' "$base.isolation.json" 2>/dev/null || true)"
+  recorded_probe_variant="$(jq -r '.probe.shell_wrapper_argv_variant // empty' "$base.isolation.json" 2>/dev/null || true)"
+  probe_subject_name="$(jq -r '.subject.name // empty' "$latest" 2>/dev/null || true)"
+  probe_subject_version="$(jq -r '.subject.cli_version // empty' "$latest" 2>/dev/null || true)"
+  probe_subject_sha="$(jq -r '.subject.executable_sha256 // empty' "$latest" 2>/dev/null || true)"
+  probe_shell_variants_b64="$(jq -r \
+    --arg agent "$probe_subject_name" --arg version "$probe_subject_version" --arg sha "$probe_subject_sha" '
+    [.agents[$agent].approved_builds[]? | select(
+      .cli_version == $version and (.sha256 | ascii_downcase) == ($sha | ascii_downcase)
+    )] as $builds
+    | if ($builds | length) == 1
+      then ($builds[0].shell_wrapper_argv_variants | tojson | @base64)
+      else empty
+      end
+  ' "$AGENT_PUBLISHERS" 2>/dev/null || true)"
+  identified_probe_variant="$(python "$PROBE_COMMAND_VALIDATOR" --identify \
+    "$recorded_probe_b64" "$expected_probe_b64" "$probe_wrapper_path" \
+    "$probe_shell_variants_b64" 2>/dev/null || true)"
   if [ -n "$expected_probe" ] \
     && [ -n "$probe_wrapper_path" ] \
+    && [ -n "$recorded_probe_variant" ] \
+    && [ "$identified_probe_variant" = "$recorded_probe_variant" ] \
     && python "$PROBE_COMMAND_VALIDATOR" --same-windows-path "$probe_wrapper_path" "$powershell_path" >/dev/null 2>&1 \
-    && python "$PROBE_COMMAND_VALIDATOR" "$recorded_probe_b64" "$expected_probe_b64" "$probe_wrapper_path" >/dev/null 2>&1 \
     && jq -e \
       --arg wrapper_suffix "$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")" \
       --arg wrapper_subject "$(jq -r '.windows_runtime_tools.codex_powershell.publisher_subject // empty' "$AGENT_PUBLISHERS")" \
@@ -423,6 +441,7 @@ while IFS= read -r case_file; do
     and $e.probe.command_event.type == "command_execution"
     and $e.probe.command_event.status == "completed"
     and $e.probe.command_event.exit_code == 0
+    and ($e.probe.shell_wrapper_argv_variant | type == "string" and length > 0)
     and (($e.probe.command_event.aggregated_output
       | if contains("\u0000") then error("invalid NUL") else . end
       | gsub("\r\n"; "\n")

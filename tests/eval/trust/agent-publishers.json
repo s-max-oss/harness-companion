@@ -32,6 +32,10 @@
         {
           "cli_version": "codex-cli 0.152.1",
           "sha256": "0d916cde6e0f5231b24f4d861c7a6c591bbed67925d8a26e1335c18a15e31819",
+          "shell_wrapper_argv_variants": [
+            "powershell-command-v1",
+            "powershell-no-profile-command-v1"
+          ],
           "components": {
             "codex-code-mode-host.exe": {
               "sha256": "e9c629663b687dbaba3b924cde883d419cae4dbe7626bb95ce351ddd266f3b76"

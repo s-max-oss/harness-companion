@@ -130,6 +130,11 @@ check "all real Codex exec calls disable login shells" bash -c '[ "$(grep -c "al
 check "attester uses the evidence-bound system wrapper" bash -c 'grep -Fq ".probe.shell_wrapper_path" "$1" && grep -Fq -- "--same-windows-path" "$1" && grep -Eq "python .*PROBE_COMMAND_VALIDATOR.*recorded_probe_b64.*expected_probe_b64.*probe_wrapper_path" "$1" && ! grep -Fq "observed_probe_wrapper" "$1"' _ "$EVAL/attest-result.sh"
 check "result gate uses the evidence-bound system wrapper without a host PowerShell call" bash -c 'grep -Fq ".probe.shell_wrapper_path" "$1" && grep -Fq -- "--same-windows-path" "$1" && grep -Eq "python .*PROBE_COMMAND_VALIDATOR.*recorded_probe_b64.*expected_probe_b64.*probe_wrapper_path" "$1" && ! grep -Fq "observed_probe_wrapper" "$1" && ! grep -Fq "windows_powershell()" "$1"' _ "$EVAL/check-results.sh"
 check "evidence-bound wrapper comparison accepts deterministic Windows case drift" python "$EVAL/validate-probe-command.py" --same-windows-path 'C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe' 'c:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+if python "$EVAL/validate-probe-command.py" --same-windows-path 'C:\Windowſ\System32\WindowsPowerShell\v1.0\powershell.exe' 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' >/dev/null 2>&1; then
+  bad "evidence-bound wrapper comparison rejects Unicode case-fold lookalikes"
+else
+  ok "evidence-bound wrapper comparison rejects Unicode case-fold lookalikes"
+fi
 if python "$EVAL/validate-probe-command.py" "$probe_display_b64" "$(printf '%s' "$probe_inner extra" | base64 | tr -d '\r\n')" "$probe_wrapper" >/dev/null 2>&1; then
   bad "probe command validator rejects inner-command drift"
 else
@@ -494,6 +499,19 @@ elif grep -Fq 'custom signer anchor is test-only' "$TMP/canonical-custom-anchor.
   ok "release gate confines custom signer anchors to noncanonical test directories"
 else
   bad "release gate confines custom signer anchors to noncanonical test directories"
+fi
+if [ -d "$EVAL/CASES" ] && [ -d "$EVAL/RESULTS" ]; then
+  if HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS="$TMP/test-allowed-signers" \
+    bash "$EVAL/check-results.sh" --cases-dir="$EVAL/CASES" --results-dir="$EVAL/RESULTS" \
+    > "$TMP/canonical-case-alias-anchor.log" 2>&1; then
+    bad "release gate rejects Windows case aliases for canonical signer override"
+  elif grep -Fq 'custom signer anchor is test-only' "$TMP/canonical-case-alias-anchor.log"; then
+    ok "release gate rejects Windows case aliases for canonical signer override"
+  else
+    bad "release gate rejects Windows case aliases for canonical signer override"
+  fi
+else
+  ok "release gate rejects Windows case aliases for canonical signer override (Windows-only)"
 fi
 
 printf 'source\n' > "$TMP/no-replace-source"

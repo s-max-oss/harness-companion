@@ -27,21 +27,6 @@ for arg in "$@"; do
 done
 
 for cmd in jq sha256sum find python ssh-keygen iconv base64 tr; do command -v "$cmd" >/dev/null 2>&1 || { echo "eval-gate: $cmd is required" >&2; exit 2; }; done
-[ -d "$CASES_DIR" ] && [ ! -L "$CASES_DIR" ] || { echo "eval-gate: cases directory missing or unsafe" >&2; exit 2; }
-[ -d "$RESULTS_DIR" ] && [ ! -L "$RESULTS_DIR" ] || { echo "eval-gate: results directory missing or unsafe" >&2; exit 1; }
-if [ -n "${HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS:-}" ]; then
-  cases_abs="$(cd "$CASES_DIR" && pwd -P)"
-  results_abs="$(cd "$RESULTS_DIR" && pwd -P)"
-  canonical_cases_abs="$(cd "$SCRIPT_DIR/cases" && pwd -P)"
-  canonical_results_abs="$(cd "$SCRIPT_DIR/results" && pwd -P)"
-  [ "$cases_abs" != "$canonical_cases_abs" ] && [ "$results_abs" != "$canonical_results_abs" ] \
-    || { echo "eval-gate: custom signer anchor is test-only" >&2; exit 2; }
-  ALLOWED_SIGNERS="$HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS"
-fi
-[ -f "$ALLOWED_SIGNERS" ] && [ ! -L "$ALLOWED_SIGNERS" ] || { echo "eval-gate: trusted signer anchor missing or unsafe" >&2; exit 2; }
-for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
-
-sha() { sha256sum "$1" | awk '{print $1}'; }
 host_path() {
   local path="$1"
   if command -v cygpath >/dev/null 2>&1; then path="$(cygpath -aw "$path")" || return 1; fi
@@ -50,6 +35,21 @@ import os, sys
 print(os.path.normcase(os.path.realpath(sys.argv[1])).replace(os.sep, "/"))
 PY
 }
+[ -d "$CASES_DIR" ] && [ ! -L "$CASES_DIR" ] || { echo "eval-gate: cases directory missing or unsafe" >&2; exit 2; }
+[ -d "$RESULTS_DIR" ] && [ ! -L "$RESULTS_DIR" ] || { echo "eval-gate: results directory missing or unsafe" >&2; exit 1; }
+if [ -n "${HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS:-}" ]; then
+  cases_host="$(host_path "$CASES_DIR")"
+  results_host="$(host_path "$RESULTS_DIR")"
+  canonical_cases_host="$(host_path "$SCRIPT_DIR/cases")"
+  canonical_results_host="$(host_path "$SCRIPT_DIR/results")"
+  [ "$cases_host" != "$canonical_cases_host" ] && [ "$results_host" != "$canonical_results_host" ] \
+    || { echo "eval-gate: custom signer anchor is test-only" >&2; exit 2; }
+  ALLOWED_SIGNERS="$HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS"
+fi
+[ -f "$ALLOWED_SIGNERS" ] && [ ! -L "$ALLOWED_SIGNERS" ] || { echo "eval-gate: trusted signer anchor missing or unsafe" >&2; exit 2; }
+for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
+
+sha() { sha256sum "$1" | awk '{print $1}'; }
 runtime_file_manifest() {
   python - "$1" "$2" <<'PY'
 import hashlib, json, os, stat, sys

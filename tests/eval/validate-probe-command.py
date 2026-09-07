@@ -59,9 +59,12 @@ def canonical_display(wrapper: str, expected: str) -> str:
 def canonical_windows_path(value: str, label: str) -> str:
     if any(ch in value for ch in "\x00\r\n\""):
         fail(f"{label} contains a forbidden byte")
+    if not value.isascii():
+        fail(f"{label} must be ASCII")
     if len(value) < 3 or value[1:3] != ":\\":
         fail(f"{label} is not an absolute Windows drive path")
-    return value.replace("\\", "/").rstrip("/").casefold()
+    ascii_lower = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+    return value.replace("\\", "/").rstrip("/").translate(ascii_lower)
 
 
 if len(sys.argv) == 4 and sys.argv[1] == "--same-windows-path":

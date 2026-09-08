@@ -32,7 +32,13 @@ while IFS= read -r test_file; do
     ISO1_BAD="$ISO1_BAD ${test_file#"$ROOT/"}"
   fi
 done < <(
-  grep -RIlE '(~|\$\{?HOME\}?)/(\.claude|\.agents)/' "$ROOT/tests" \
+  # Candidate/result trees contain captured Agent output, not executable test
+  # sources.  Scanning those append-only runtime artifacts makes a completed
+  # real eval retroactively fail this source-isolation gate.
+  find "$ROOT/tests" -type f \
+    ! -path "$ROOT/tests/eval/candidates/*" \
+    ! -path "$ROOT/tests/eval/results/*" \
+    -exec grep -IlE '(~|\$\{?HOME\}?)/(\.claude|\.agents)/' {} + \
     | while IFS= read -r candidate; do
         grep -nE '(~|\$\{?HOME\}?)/(\.claude|\.agents)/' "$candidate" \
           | grep -vE '^[0-9]+:[[:space:]]*#' >/dev/null && printf '%s\n' "$candidate"

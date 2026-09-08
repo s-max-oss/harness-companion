@@ -14,6 +14,12 @@ param(
 
     [string]$SourceFile,
 
+    [string]$ContextFile,
+
+    [string]$UserExecutableFile,
+
+    [string]$HostTempRoot,
+
     [Parameter(Mandatory = $true)]
     [string]$StateFile,
 
@@ -377,7 +383,7 @@ if ($Mode -eq "Leave") {
         throw "ACL restoration state is missing: $StateFile"
     }
     $state = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
-    if ([int]$state.schema_version -notin @(2, 3)) {
+    if ([int]$state.schema_version -notin @(2, 3, 4)) {
         throw "unsupported ACL restoration state schema: $($state.schema_version)"
     }
     $restoreEntries = @($state.paths)
@@ -499,14 +505,29 @@ $paths = @(
 if ([string]::IsNullOrWhiteSpace($SourceFile)) {
     throw 'SourceFile is required when entering isolation'
 }
+if ([string]::IsNullOrWhiteSpace($ContextFile)) {
+    throw 'ContextFile is required when entering isolation'
+}
+if ([string]::IsNullOrWhiteSpace($UserExecutableFile)) {
+    throw 'UserExecutableFile is required when entering isolation'
+}
+if ([string]::IsNullOrWhiteSpace($HostTempRoot)) {
+    throw 'HostTempRoot is required when entering isolation'
+}
 $sourcePath = Resolve-ExistingFile $SourceFile
+$contextPath = Resolve-ExistingFile $ContextFile
+$userExecutablePath = Resolve-ExistingFile $UserExecutableFile
+$hostTempPath = Resolve-ExistingDirectory $HostTempRoot
 $workspacePrefix = $workspacePath.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 if (-not $sourcePath.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)) {
     throw "source file escapes the protected workspace: $sourcePath"
 }
 $protectedItems = @(
-    @($paths | ForEach-Object { [pscustomobject]@{ path = $_; kind = 'directory' } })
-    [pscustomobject]@{ path = $sourcePath; kind = 'file' }
+    @($paths | ForEach-Object { [pscustomobject]@{ path = $_; kind = 'directory'; rights = 'ReadAndExecute'; role = 'denied_root' } })
+    [pscustomobject]@{ path = $hostTempPath; kind = 'directory'; rights = 'Modify'; role = 'host_temp' }
+    [pscustomobject]@{ path = $sourcePath; kind = 'file'; rights = 'ReadAndExecute'; role = 'source_file' }
+    [pscustomobject]@{ path = $contextPath; kind = 'file'; rights = 'ReadAndExecute'; role = 'context_file' }
+    [pscustomobject]@{ path = $userExecutablePath; kind = 'file'; rights = 'ReadAndExecute'; role = 'user_executable' }
 )
 
 $saved = foreach ($item in $protectedItems) {
@@ -514,13 +535,15 @@ $saved = foreach ($item in $protectedItems) {
     [pscustomobject]@{
         path     = $item.path
         kind     = $item.kind
+        rights   = $item.rights
+        role     = $item.role
         identity = $snapshot.Identity
         sddl     = $snapshot.Sddl
     }
 }
 
 Write-JsonAtomic ([pscustomobject]@{
-    schema_version = 3
+    schema_version = 4
     created_at_utc = [DateTime]::UtcNow.ToString("o")
     paths = @($saved)
 }) $StateFile
@@ -545,6 +568,10 @@ try {
     foreach ($item in $protectedItems) {
         $path = $item.path
         $kind = $item.kind
+        $rights = [System.Enum]::Parse(
+            [System.Security.AccessControl.FileSystemRights],
+            [string]$item.rights
+        )
         $savedEntry = @($saved | Where-Object { $_.path -eq $path -and $_.kind -eq $kind })
         if ($savedEntry.Count -ne 1) {
             throw "ACL state does not uniquely identify protected path: $path"
@@ -572,7 +599,7 @@ try {
             }
             $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
                 (New-Object System.Security.Principal.SecurityIdentifier($account.Sid)),
-                [System.Security.AccessControl.FileSystemRights]::ReadAndExecute,
+                $rights,
                 $inheritance,
                 [System.Security.AccessControl.PropagationFlags]::None,
                 [System.Security.AccessControl.AccessControlType]::Deny
@@ -585,6 +612,11 @@ try {
     $verifiedChecks = foreach ($item in $protectedItems) {
         $path = $item.path
         $kind = $item.kind
+        $rightsName = [string]$item.rights
+        $rights = [System.Enum]::Parse(
+            [System.Security.AccessControl.FileSystemRights],
+            $rightsName
+        )
         $savedEntry = @($saved | Where-Object { $_.path -eq $path -and $_.kind -eq $kind })
         $snapshot = Get-PathDaclSnapshot $path $kind
         if ($savedEntry.Count -ne 1 -or
@@ -605,7 +637,7 @@ try {
                 $identityAndRightsMatch =
                     $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny -and
                     ($_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $account.Sid) -and
-                    (($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::ReadAndExecute) -ne 0) -and
+                    (($_.FileSystemRights -band $rights) -eq $rights) -and
                     -not $_.IsInherited -and
                     $_.PropagationFlags -eq [System.Security.AccessControl.PropagationFlags]::None
                 $shapeMatches = if ($kind -eq 'file') {
@@ -624,25 +656,36 @@ try {
                 kind = $kind
                 sandbox_account = $account.Name
                 sandbox_sid = $account.Sid
-                read_execute_denied = $true
+                rights = $rightsName
+                denied = $true
+                role = [string]$item.role
             }
         }
     }
-    $checks = @($verifiedChecks | Where-Object { $_.kind -eq 'directory' } | Select-Object -Property path, sandbox_account, sandbox_sid, read_execute_denied)
-    $sourceChecks = @($verifiedChecks | Where-Object { $_.kind -eq 'file' } | Select-Object -Property sandbox_account, sandbox_sid, read_execute_denied)
+    $checks = @($verifiedChecks | Where-Object { $_.role -eq 'denied_root' } | Select-Object -Property path, sandbox_account, sandbox_sid, rights, denied)
+    $sourceChecks = @($verifiedChecks | Where-Object { $_.role -eq 'source_file' } | Select-Object -Property sandbox_account, sandbox_sid, rights, denied)
+    $contextChecks = @($verifiedChecks | Where-Object { $_.role -eq 'context_file' } | Select-Object -Property sandbox_account, sandbox_sid, rights, denied)
+    $userExecutableChecks = @($verifiedChecks | Where-Object { $_.role -eq 'user_executable' } | Select-Object -Property sandbox_account, sandbox_sid, rights, denied)
+    $hostTempChecks = @($verifiedChecks | Where-Object { $_.role -eq 'host_temp' } | Select-Object -Property sandbox_account, sandbox_sid, rights, denied)
 
     if ($EvidenceFile) {
         Write-JsonAtomic ([pscustomobject]@{
-            schema_version = 1
+            schema_version = 3
             isolation = "windows-native-elevated-acl"
             sandbox_accounts = @($sandboxAccounts)
             denied_roots = @($paths)
             checks = @($checks)
             source_file_deny = [pscustomobject]@{ path = $sourcePath; checks = @($sourceChecks) }
+            context_file_deny = [pscustomobject]@{ path = $contextPath; checks = @($contextChecks) }
+            user_executable_deny = [pscustomobject]@{ path = $userExecutablePath; checks = @($userExecutableChecks) }
+            host_temp_write_deny = [pscustomobject]@{ path = $hostTempPath; checks = @($hostTempChecks) }
             network = "codex-workspace-write-offline"
             controller_visible_to_agent = $false
             source_workspace_visible_to_agent = $false
-            user_home_visible_to_agent = $false
+            user_home_root_listable_to_agent = $false
+            context_authority_visible_to_agent = $false
+            user_executable_visible_to_agent = $false
+            host_temp_writeable_to_agent = $false
         }) $EvidenceFile
     }
 } catch {

@@ -25,8 +25,14 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATES_DIR="$ROOT_DIR/templates"
+BRIEF_VALIDATOR="$SCRIPT_DIR/validate-project-brief.sh"
 VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION" 2>/dev/null || echo "0.0.0")"
 GENERATED_BY="harness-companion v$VERSION"
+
+[ -f "$BRIEF_VALIDATOR" ] && [ -x "$BRIEF_VALIDATOR" ] && [ ! -L "$BRIEF_VALIDATOR" ] || {
+  echo "error: canonical PROJECT_BRIEF validator is missing or unsafe" >&2
+  exit 2
+}
 
 # shellcheck source=../core/lib/project-detect.sh
 source "$ROOT_DIR/core/lib/project-detect.sh"
@@ -589,6 +595,7 @@ $k|source=$src|desired=$desired|snapshot=$sha_snap|current=${sha_now:-missing}|t
     brief_out="$STAGE_DIR/.harness/PROJECT_BRIEF.json"; md_out="$STAGE_DIR/.harness/PROJECT_BRIEF.md"
     mkdir -p "$(dirname "$brief_out")" || { rm -rf "$STAGE_DIR"; return 1; }
     build_brief "$digest" > "$brief_out" || { rm -rf "$STAGE_DIR"; return 1; }
+    bash "$BRIEF_VALIDATOR" "$brief_out" --expected-version="$VERSION" || { rm -rf "$STAGE_DIR"; return 2; }
     render_brief_md "$brief_out" "$md_out" || { rm -rf "$STAGE_DIR"; return 1; }
     if [ -n "$EXISTING_BRIEF_SHA" ]; then expect_classified_target ".harness/PROJECT_BRIEF.json" "$EXISTING_BRIEF_SHA"; else expect_target_unchanged ".harness/PROJECT_BRIEF.json"; fi
     expect_target_unchanged ".harness/PROJECT_BRIEF.md"
@@ -600,6 +607,7 @@ $k|source=$src|desired=$desired|snapshot=$sha_snap|current=${sha_now:-missing}|t
     brief_base_sha="$(sha256_file "$TARGET/.harness/PROJECT_BRIEF.json")"
     [ -n "$brief_base_sha" ] || { rm -rf "$STAGE_DIR"; return 1; }
     jq -S --arg d "$digest" '.template_manifest_digest = $d' "$TARGET/.harness/PROJECT_BRIEF.json" > "$brief_out" || { rm -rf "$STAGE_DIR"; return 1; }
+    bash "$BRIEF_VALIDATOR" "$brief_out" --expected-version="$VERSION" || { rm -rf "$STAGE_DIR"; return 2; }
     render_brief_md "$brief_out" "$md_out" || { rm -rf "$STAGE_DIR"; return 1; }
     expect_classified_target ".harness/PROJECT_BRIEF.json" "$brief_base_sha"; expect_target_unchanged ".harness/PROJECT_BRIEF.md"
     stage_mark ".harness/PROJECT_BRIEF.json"; stage_mark ".harness/PROJECT_BRIEF.md"
@@ -811,6 +819,7 @@ fi
 # ---- mode dispatch ----------------------------------------------------------
 
 if [ "$RENDER_BRIEF" = "true" ]; then
+  bash "$BRIEF_VALIDATOR" "$TARGET/.harness/PROJECT_BRIEF.json" --expected-version="$VERSION" || exit 2
   stage_begin || exit 1
   mkdir -p "$STAGE_DIR/.harness" || { rm -rf "$STAGE_DIR"; exit 1; }
   render_source_sha="$(sha256_file "$TARGET/.harness/PROJECT_BRIEF.json")"
@@ -918,6 +927,11 @@ SNAPSHOT_DIGEST="$(sha256_file "$STAGE_DIR/.harness/.template-snapshot.json")"
 
 mkdir -p "$STAGE_DIR/.harness"
 build_brief "$SNAPSHOT_DIGEST" > "$STAGE_DIR/.harness/PROJECT_BRIEF.json" || { rm -rf "$STAGE_DIR"; exit 1; }
+if ! bash "$BRIEF_VALIDATOR" "$STAGE_DIR/.harness/PROJECT_BRIEF.json" --expected-version="$VERSION"; then
+  echo "error: generated PROJECT_BRIEF.json does not satisfy the canonical contract" >&2
+  rm -rf "$STAGE_DIR"
+  exit 2
+fi
 render_brief_md "$STAGE_DIR/.harness/PROJECT_BRIEF.json" "$STAGE_DIR/.harness/PROJECT_BRIEF.md" || { rm -rf "$STAGE_DIR"; exit 1; }
 expect_target_unchanged ".harness/PROJECT_BRIEF.json"; expect_target_unchanged ".harness/PROJECT_BRIEF.md"
 stage_mark ".harness/PROJECT_BRIEF.json"; stage_mark ".harness/PROJECT_BRIEF.md"

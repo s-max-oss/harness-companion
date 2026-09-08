@@ -3,6 +3,42 @@
 All notable changes to harness-companion are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0-rc.3] — 2026-09-09 — Guided Conversational Initialization
+
+Third release candidate. Adds a user-visible conversational `/harness:init`
+workflow backed by a deterministic, fail-atomic executor and release-blocking
+real-Agent evaluation.
+
+### Added
+
+- Guided project discovery, conflict resolution, complete Brief presentation,
+  explicit approval/cancel handling, and a concise post-init explanation.
+- Canonical `PROJECT_BRIEF.json` validation, provenance/default tracking, and
+  type-matched templates for Node, Python, Rust, Go, shell, Electron, docs,
+  mixed, and unknown projects.
+- Fourteen versioned forward-evaluation scenarios with transcript, tree,
+  objective-check, Reviewer, runtime-identity, and signed-result evidence.
+
+### Hardened
+
+- Fail-atomic init/update/resume behavior preserves user modifications and
+  accepts mutations only through the approved initialization boundary.
+- Real-Agent evaluation uses a zero-inheritance shell environment, immutable
+  executable snapshots, exact ACL evidence for context and user tools, and a
+  separately validated host-temp boundary.
+- Eval candidate/result artifacts are canonical-name and byte-bound in the
+  Git-anchored runtime registry; historical artifacts remain append-only.
+- The forward-eval release signer was rotated for rc.3; only its public trust
+  anchor is versioned, while the private key remains outside the repository.
+
+### Validation
+
+- Guided-init executor contract: 107 / 107 PASS.
+- Forward-eval contract and Windows ACL recovery suites: PASS.
+- Full repository suite and all 14 fresh real-Agent cases are release gates;
+  their final run identifiers and hashes are captured in the rc.3 acceptance
+  package.
+
 ## [2.0.0-rc.2] — 2026-08-04 — Distribution Hardening
 
 Second release candidate. Focuses on distribution hardening — safe install/uninstall

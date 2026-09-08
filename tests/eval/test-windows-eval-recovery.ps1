@@ -75,7 +75,14 @@ function Invoke-ProductionCrash {
         $process = Start-Process -FilePath $Bash -WindowStyle Hidden -PassThru `
             -WorkingDirectory $RepoRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
             -ArgumentList $arguments
-        $holdTimeoutSeconds = if ($Stage -like 'isolation_*') { 240 } else { 60 }
+        # Post-agent publication holds still traverse executable discovery,
+        # Authenticode verification, and guard acquisition before the requested
+        # stage.  Those operations can exceed one minute on a loaded Windows
+        # host even though the controller remains healthy.
+        $holdTimeoutSeconds = if (
+            $Stage -like 'isolation_*' -or
+            $Stage -in @('publication_paths_reserved', 'publication_staged', 'run_tree_removed')
+        ) { 240 } else { 60 }
         $deadline = [DateTime]::UtcNow.AddSeconds($holdTimeoutSeconds)
         $observed = $false
         while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {

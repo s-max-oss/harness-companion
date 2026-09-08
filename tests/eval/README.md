@@ -23,7 +23,11 @@ The command writes under `tests/eval/candidates/`. Do not provide
 `HARNESS_EVAL_SIGNING_KEY`; the runner fails closed if signing material is
 present. A real release-eligible run currently requires Codex in its native
 Windows elevated sandbox. ACLs deny both Codex sandbox accounts access to the
-source workspace, user profile, and controller evidence while the Agent runs.
+source workspace, controller evidence, the installed Skill authority, and
+user-profile executable probes while the Agent runs. Shell commands inherit no
+host profile environment; HOME, USERPROFILE, TEMP, TMP, APPDATA, and
+LOCALAPPDATA point at the disposable run scratch, and the real host temp root
+is explicitly write-denied to both Codex sandbox identities.
 Only a minimal Skill copy and disposable target are visible. A real Claude run
 is refused until an equivalent external OS/container boundary is available.
 
@@ -38,8 +42,9 @@ bash tests/eval/attest-result.sh \
 The public half of that local Ed25519 key must be authorized by
 `tests/eval/trust/release-allowed-signers`; the private key must never be
 committed or exposed to an Agent process. With the production trust anchor the
-attester accepts keys only below the source-workspace or user-home roots that
-the eval ACL denies to sandbox accounts. The attester revalidates every
+attester accepts keys only below the protected source workspace and outside
+the product repository; the eval ACL denies that workspace to sandbox
+accounts. The attester revalidates every
 authority and evidence hash, promotes the result, then signs it in the
 `harness-eval` SSH signature namespace. The gate verifies that detached
 attestation against the checked-in public anchor, so self-reported booleans and

@@ -17,6 +17,9 @@ SCHEMA="$SCRIPT_DIR/reviewer-output.schema.json"
 ACL_HELPER="$SCRIPT_DIR/windows-isolation-acl.ps1"
 ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
+BRIEF_VALIDATOR="$ROOT/scripts/validate-project-brief.sh"
+SUBJECT_EVENT_VALIDATOR="$SCRIPT_DIR/validate-subject-events.py"
+ISOLATION_VALIDATOR="$SCRIPT_DIR/validate-isolation-evidence.sh"
 PROBE_COMMAND_VALIDATOR="$SCRIPT_DIR/validate-probe-command.py"
 EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
 AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
@@ -29,6 +32,26 @@ TRUSTED_WINDOWS_ENV="/c/Program Files/Git/usr/bin/env.exe"
 die() { echo "eval-attest: $*" >&2; exit 2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 sha() { sha256sum "$1" | awk '{print $1}'; }
+
+# Production attestations are immutable runtime evidence.  Bind every
+# published companion, detached signature, and authoritative result before
+# releasing the publication lock.  Custom test directories never register.
+# shellcheck source=../../core/lib/lock-registry.sh
+. "$ROOT/core/lib/lock-registry.sh" || die "runtime lock support is unavailable"
+# shellcheck source=../../core/lib/runtime-manifest.sh
+. "$ROOT/core/lib/runtime-manifest.sh" || die "runtime manifest support is unavailable"
+
+register_result_bundle() {
+  local base_name="$1" suffix rel
+  [ "$candidates_host" = "$canonical_candidates_host" ] \
+    && [ "$results_host" = "$canonical_results_host" ] \
+    && [ "$allowed_signers_host" = "$canonical_allowed_signers_host" ] || return 0
+  for suffix in transcript.jsonl tree.sha256 subject-events.jsonl reviewer-events.jsonl turn-trees.jsonl evaluator-events.jsonl reviewer-output.json objective-checks.jsonl project-brief.json isolation.json attestation.sig json; do
+    rel="tests/eval/results/$base_name.$suffix"
+    runtime_register "$ROOT" "$rel" eval_result \
+      || die "failed to bind canonical result artifact: $rel"
+  done
+}
 
 # Copy a candidate and every bound companion into private staging without
 # following links or replacing a destination. The source metadata is checked
@@ -456,7 +479,7 @@ for arg in "$@"; do
 done
 
 for cmd in jq sha256sum python ssh-keygen mktemp cp find tr grep iconv base64; do need "$cmd"; done
-for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER" "$ALLOWED_SIGNERS"; do
+for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER" "$ALLOWED_SIGNERS" "$BRIEF_VALIDATOR" "$SUBJECT_EVENT_VALIDATOR" "$ISOLATION_VALIDATOR"; do
   [ -f "$path" ] && [ ! -L "$path" ] || die "authority missing or unsafe: $path"
 done
 [ -n "$SIGNING_KEY" ] && [ -f "$SIGNING_KEY" ] && [ ! -L "$SIGNING_KEY" ] || die "a regular non-symlink signing key is required"
@@ -486,10 +509,11 @@ if [ "$allowed_signers_host" = "$canonical_allowed_signers_host" ]; then
   real_user_home="$(cygpath -u "$real_user_home_win")"
   key_host="$(host_path "$SIGNING_KEY")"
   workspace_host="$(host_path "$(cd "$ROOT/.." && pwd -P)")"
-  user_home_host="$(host_path "$real_user_home")"
   case "$key_host" in
-    "$workspace_host"/*|"$user_home_host"/*) ;;
-    *) die "signing key must be inside a root denied to eval sandbox accounts" ;;
+    "$workspace_host"/*)
+      case "$key_host" in "$(host_path "$ROOT")"/*) die "production signing key must be outside the product repository" ;; esac
+      ;;
+    *) die "production signing key must be inside the protected source workspace and outside the repository" ;;
   esac
 else
   [ "$candidates_host" != "$canonical_candidates_host" ] \
@@ -562,13 +586,16 @@ for ((i=0; i<${#artifact_suffixes[@]}; i++)); do
     || die "candidate companion hash mismatch: $key"
 done
 
-jq -e 'type == "object"' "$snapshot_base.project-brief.json" >/dev/null || die "captured PROJECT_BRIEF.json is invalid"
+bash "$BRIEF_VALIDATOR" "$snapshot_base.project-brief.json" >/dev/null 2>&1 \
+  || die "captured PROJECT_BRIEF.json is not canonical for the current product version"
+python "$SUBJECT_EVENT_VALIDATOR" "$snapshot_base.subject-events.jsonl" >/dev/null 2>&1 \
+  || die "subject event stream contains a mutation outside the approved init boundary"
 expected_probe="$(expected_probe_command "$snapshot_base.isolation.json")" \
   || die "could not reconstruct the effective isolation probe command"
 recorded_probe_b64="$(jq -r '.probe.command_event.command | @base64' "$snapshot_base.isolation.json")" \
   || die "effective isolation probe command event is invalid"
 expected_probe_b64="$(printf '%s' "$expected_probe" | base64 | tr -d '\r\n')"
-codex_powershell_path="$(jq -r '.probe.executables.codex_powershell.path // empty' "$snapshot_base.isolation.json")"
+codex_powershell_path="$(jq -r '.probe.executables.codex_powershell.source_path // .probe.executables.codex_powershell.path // empty' "$snapshot_base.isolation.json")"
 probe_wrapper_path="$(jq -r '.probe.shell_wrapper_path // empty' "$snapshot_base.isolation.json")"
 recorded_probe_variant="$(jq -r '.probe.shell_wrapper_argv_variant // empty' "$snapshot_base.isolation.json")"
 powershell_path="$(jq -r '.probe.executables.powershell.path // empty' "$snapshot_base.isolation.json")"
@@ -632,6 +659,12 @@ canonical_workspace_host="$(host_path "$(cd "$ROOT/.." && pwd -P)")" \
   || die "could not resolve the canonical source workspace"
 live_sandbox_accounts="$(windows_sandbox_accounts_json)" \
   || die "could not resolve the live Codex sandbox account SIDs"
+if jq -e '.schema_version == 3' "$snapshot_base.isolation.json" >/dev/null 2>&1; then
+  bash "$ISOLATION_VALIDATOR" "$snapshot_base.isolation.json" "$snapshot_candidate" \
+    "$canonical_source_host" "$canonical_workspace_host" "$live_sandbox_accounts" \
+    "$AGENT_PUBLISHERS" "$PROBE_COMMAND_VALIDATOR" \
+    || die "isolation evidence v3 is incomplete"
+else
 jq -e \
   --arg wrapper_suffix "$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix // empty' "$AGENT_PUBLISHERS")" \
   --arg wrapper_subject "$(jq -r '.windows_runtime_tools.codex_powershell.publisher_subject // empty' "$AGENT_PUBLISHERS")" \
@@ -726,6 +759,7 @@ jq -e \
   and ($e.probe.sanitized_path | type == "array" and length >= 4
     and all(.[]; type == "string" and length > 0 and ((ascii_downcase | contains("/users/")) | not)))
   ' "$snapshot_base.isolation.json" >/dev/null 2>&1 || die "isolation evidence is incomplete"
+fi
 
 if [ "$production_trust" = true ]; then
   for role in subject reviewer; do
@@ -800,7 +834,7 @@ jq -e \
   --arg name "$case_name" --arg version "$case_version" --arg scenario "$scenario" \
   --arg case_sha "$(sha "$case_file")" --arg skill_sha "$(sha "$ROOT/SKILL.md")" --arg runtime_sha "$(sha "$tmp/runtime.manifest")" \
   --arg runner_sha "$(sha "$RUNNER")" --arg schema_sha "$(sha "$SCHEMA")" --arg rubric_sha "$(sha "$tmp/rubric.json")" \
-  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg probe_command_validator_sha "$(sha "$PROBE_COMMAND_VALIDATOR")" --arg executable_guard_sha "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha "$(sha "$PUBLISHER")" \
+  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg probe_command_validator_sha "$(sha "$PROBE_COMMAND_VALIDATOR")" --arg executable_guard_sha "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha "$(sha "$PUBLISHER")" --arg brief_validator_sha "$(sha "$BRIEF_VALIDATOR")" --arg subject_event_validator_sha "$(sha "$SUBJECT_EVENT_VALIDATOR")" --arg isolation_validator_sha "$(sha "$ISOLATION_VALIDATOR")" \
   --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$(jq -c '.agents.codex.approved_builds' "$AGENT_PUBLISHERS")" \
   --argjson input_count "$input_count" '
     .schema_version == 3 and .case == $name and .case_version == $version
@@ -820,8 +854,13 @@ jq -e \
     and .authority.agent_publishers_sha256 == $agent_publishers_sha
     and .authority.agent_build_verifier_sha256 == $agent_build_verifier_sha
     and .authority.publisher_sha256 == $publisher_sha
+    and .authority.project_brief_validator_sha256 == $brief_validator_sha
+    and .authority.subject_event_validator_sha256 == $subject_event_validator_sha
+    and .authority.isolation_validator_sha256 == $isolation_validator_sha
     and .isolation.kind == "windows-native-elevated-acl"
-    and .isolation.source_workspace_denied == true and .isolation.user_home_denied == true and .isolation.controller_denied == true
+    and .isolation.source_workspace_denied == true and .isolation.context_authority_denied == true
+    and .isolation.controller_denied == true and .isolation.host_profile_environment_sanitized == true
+    and .isolation.host_temp_write_denied == true
     and (.rubric_details.checks | type == "array" and length > 0 and all(.[]; .pass == true))
     and (.objective_checks | type == "array" and length > 0 and all(.[]; .pass == true))
     and (.rubric_score | capture("^(?<p>[0-9]+)/(?<t>[0-9]+)$") | (.p|tonumber) == (.t|tonumber))
@@ -905,6 +944,7 @@ python "$PUBLISHER" "$tmp/$base_name.attestation.sig" "$RESULTS_DIR/$base_name.a
   || die "result signature publication failed; lock retained"
 python "$PUBLISHER" "$promoted" "$RESULTS_DIR/$base_name.json" \
   || die "authoritative result publication failed; lock retained"
+register_result_bundle "$base_name"
 rmdir "$publication_lock"
 publication_lock=""
 publication_started=false

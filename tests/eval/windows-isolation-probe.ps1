@@ -51,17 +51,25 @@ function Test-DirectoryList([string]$Path) {
     }
 }
 
-$targetDir = [System.IO.Path]::GetDirectoryName($payload.target_file)
-$marker = Join-Path $targetDir (".harness-eval-write-" + $payload.nonce + ".tmp")
-$targetWrite = $false
-try {
-    [System.IO.File]::WriteAllText($marker, $payload.nonce)
-    $targetWrite = ([System.IO.File]::ReadAllText($marker) -eq $payload.nonce)
-} finally {
-    if ([System.IO.File]::Exists($marker)) {
-        [System.IO.File]::Delete($marker)
+function Test-FileWrite([string]$Path, [string]$Value) {
+    try {
+        [System.IO.File]::WriteAllText($Path, $Value)
+        return ([System.IO.File]::ReadAllText($Path) -eq $Value)
+    } catch [System.UnauthorizedAccessException] {
+        return $false
+    } catch [System.Security.SecurityException] {
+        return $false
+    } finally {
+        if ([System.IO.File]::Exists($Path)) {
+            [System.IO.File]::Delete($Path)
+        }
     }
 }
+
+$targetDir = [System.IO.Path]::GetDirectoryName($payload.target_file)
+$marker = Join-Path $targetDir (".harness-eval-write-" + $payload.nonce + ".tmp")
+$targetWrite = Test-FileWrite $marker $payload.nonce
+$hostTempWrite = Test-FileWrite ([string]$payload.host_temp_marker) $payload.nonce
 
 [ordered]@{
     nonce = $payload.nonce
@@ -71,5 +79,12 @@ try {
     target_writeable = $targetWrite
     source_workspace_readable = Test-FileRead $payload.source_file
     controller_readable = Test-FileRead $payload.controller_file
-    user_home_readable = Test-DirectoryList $payload.user_home
+    user_home_root_listable = Test-DirectoryList $payload.user_home
+    context_authority_readable = Test-FileRead $payload.context_file
+    user_executable_readable = Test-FileRead $payload.user_executable_file
+    host_temp_writeable = $hostTempWrite
+    shell_home = [System.Environment]::GetEnvironmentVariable("HOME")
+    shell_userprofile = [System.Environment]::GetEnvironmentVariable("USERPROFILE")
+    shell_temp = [System.Environment]::GetEnvironmentVariable("TEMP")
+    shell_tmp = [System.Environment]::GetEnvironmentVariable("TMP")
 } | ConvertTo-Json -Compress

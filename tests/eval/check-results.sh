@@ -10,6 +10,9 @@ ALLOWED_SIGNERS="$SCRIPT_DIR/trust/release-allowed-signers"
 ATTESTER="$SCRIPT_DIR/attest-result.sh"
 ACL_HELPER="$SCRIPT_DIR/windows-isolation-acl.ps1"
 ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
+BRIEF_VALIDATOR="$ROOT/scripts/validate-project-brief.sh"
+SUBJECT_EVENT_VALIDATOR="$SCRIPT_DIR/validate-subject-events.py"
+ISOLATION_VALIDATOR="$SCRIPT_DIR/validate-isolation-evidence.sh"
 PROBE_COMMAND_VALIDATOR="$SCRIPT_DIR/validate-probe-command.py"
 EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
 ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
@@ -95,7 +98,7 @@ if [ -n "${HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS:-}" ]; then
   ALLOWED_SIGNERS="$HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS"
 fi
 [ -f "$ALLOWED_SIGNERS" ] && [ ! -L "$ALLOWED_SIGNERS" ] || { echo "eval-gate: trusted signer anchor missing or unsafe" >&2; exit 2; }
-for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
+for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER" "$BRIEF_VALIDATOR" "$SUBJECT_EVENT_VALIDATOR" "$ISOLATION_VALIDATOR"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
 
 sha() { sha256sum "$1" | awk '{print $1}'; }
 runtime_file_manifest() {
@@ -360,6 +363,9 @@ isolation_recovery_sha="$(sha "$ACL_RECOVERY")"
 agent_publishers_sha="$(sha "$AGENT_PUBLISHERS")"
 agent_build_verifier_sha="$(sha "$AGENT_BUILD_VERIFIER")"
 publisher_sha="$(sha "$PUBLISHER")"
+brief_validator_sha="$(sha "$BRIEF_VALIDATOR")"
+subject_event_validator_sha="$(sha "$SUBJECT_EVENT_VALIDATOR")"
+isolation_validator_sha="$(sha "$ISOLATION_VALIDATOR")"
 allowed_signers_sha="$(sha "$ALLOWED_SIGNERS")"
 codex_publisher_subject="$(jq -r '.agents.codex.publisher_subject // empty' "$AGENT_PUBLISHERS")"
 codex_publisher_thumbprints="$(jq -c '.agents.codex.publisher_thumbprints // []' "$AGENT_PUBLISHERS")"
@@ -438,7 +444,9 @@ while IFS= read -r case_file; do
   fi
 
   brief_valid=false
-  if jq -e 'type == "object"' "$base.project-brief.json" >/dev/null 2>&1; then brief_valid=true; fi
+  if bash "$BRIEF_VALIDATOR" "$base.project-brief.json" >/dev/null 2>&1; then brief_valid=true; fi
+  subject_events_valid=false
+  if python "$SUBJECT_EVENT_VALIDATOR" "$base.subject-events.jsonl" >/dev/null 2>&1; then subject_events_valid=true; fi
   isolation_valid=false
   expected_probe="$(expected_probe_command "$base.isolation.json" 2>/dev/null || true)"
   recorded_probe_b64="$(jq -r '.probe.command_event.command | @base64' "$base.isolation.json" 2>/dev/null || true)"
@@ -463,7 +471,12 @@ while IFS= read -r case_file; do
   identified_probe_variant="$(python "$PROBE_COMMAND_VALIDATOR" --identify \
     "$recorded_probe_b64" "$expected_probe_b64" "$probe_wrapper_path" \
     "$probe_shell_variants_b64" 2>/dev/null || true)"
-  if [ -n "$expected_probe" ] \
+  if jq -e '.schema_version == 3' "$base.isolation.json" >/dev/null 2>&1 \
+    && bash "$ISOLATION_VALIDATOR" "$base.isolation.json" "$latest" \
+      "$canonical_source_host" "$canonical_workspace_host" "$live_sandbox_accounts" \
+      "$AGENT_PUBLISHERS" "$PROBE_COMMAND_VALIDATOR" >/dev/null 2>&1; then
+    isolation_valid=true
+  elif [ -n "$expected_probe" ] \
     && [ -n "$probe_wrapper_path" ] \
     && [ -n "$recorded_probe_variant" ] \
     && [ "$identified_probe_variant" = "$recorded_probe_variant" ] \
@@ -564,11 +577,11 @@ while IFS= read -r case_file; do
   bundle_valid=false
   if bash "$AGENT_BUILD_VERIFIER" --verify-bundle-evidence "$AGENT_PUBLISHERS" "$latest" >/dev/null 2>&1; then bundle_valid=true; fi
 
-  if [ "$bound" = true ] && [ "$signature_valid" = true ] && [ "$brief_valid" = true ] && [ "$isolation_valid" = true ] && [ "$bundle_valid" = true ] && jq -e \
+  if [ "$bound" = true ] && [ "$signature_valid" = true ] && [ "$brief_valid" = true ] && [ "$subject_events_valid" = true ] && [ "$isolation_valid" = true ] && [ "$bundle_valid" = true ] && jq -e \
     --arg name "$name" --arg version "$version" --arg scenario "$scenario" \
     --arg case_sha "$(sha "$case_file")" --arg skill_sha "$skill_sha" --arg runtime_sha "$runtime_sha" \
     --arg runner_sha "$runner_sha" --arg schema_sha "$schema_sha" --arg rubric_sha "$(sha "$tmp/rubric.json")" --arg signer_fingerprint "$trusted_fingerprint" \
-    --arg attester_sha "$attester_sha" --arg isolation_helper_sha "$isolation_helper_sha" --arg isolation_recovery_sha "$isolation_recovery_sha" --arg isolation_probe_sha "$isolation_probe_sha" --arg probe_command_validator_sha "$probe_command_validator_sha" --arg executable_guard_sha "$executable_guard_sha" --arg agent_publishers_sha "$agent_publishers_sha" --arg agent_build_verifier_sha "$agent_build_verifier_sha" --arg publisher_sha "$publisher_sha" \
+    --arg attester_sha "$attester_sha" --arg isolation_helper_sha "$isolation_helper_sha" --arg isolation_recovery_sha "$isolation_recovery_sha" --arg isolation_probe_sha "$isolation_probe_sha" --arg probe_command_validator_sha "$probe_command_validator_sha" --arg executable_guard_sha "$executable_guard_sha" --arg agent_publishers_sha "$agent_publishers_sha" --arg agent_build_verifier_sha "$agent_build_verifier_sha" --arg publisher_sha "$publisher_sha" --arg brief_validator_sha "$brief_validator_sha" --arg subject_event_validator_sha "$subject_event_validator_sha" --arg isolation_validator_sha "$isolation_validator_sha" \
     --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$codex_approved_builds" \
     --argjson input_count "$input_count" '
       .schema_version == 3 and .case == $name and .case_version == $version
@@ -595,8 +608,13 @@ while IFS= read -r case_file; do
       and .authority.agent_publishers_sha256 == $agent_publishers_sha
       and .authority.agent_build_verifier_sha256 == $agent_build_verifier_sha
       and .authority.publisher_sha256 == $publisher_sha
+      and .authority.project_brief_validator_sha256 == $brief_validator_sha
+      and .authority.subject_event_validator_sha256 == $subject_event_validator_sha
+      and .authority.isolation_validator_sha256 == $isolation_validator_sha
       and .isolation.kind == "windows-native-elevated-acl"
-      and .isolation.source_workspace_denied == true and .isolation.user_home_denied == true and .isolation.controller_denied == true
+      and .isolation.source_workspace_denied == true and .isolation.context_authority_denied == true
+      and .isolation.controller_denied == true and .isolation.host_profile_environment_sanitized == true
+      and .isolation.host_temp_write_denied == true
       and (.rubric_details.checks | type == "array" and length > 0 and all(.[]; .pass == true))
       and (.objective_checks | type == "array" and length > 0 and all(.[]; .pass == true))
       and (.rubric_score | capture("^(?<p>[0-9]+)/(?<t>[0-9]+)$") | (.p|tonumber) == (.t|tonumber))
@@ -657,6 +675,9 @@ runtime_file_manifest "$ROOT" "$tmp/runtime.after.manifest" || { echo "eval-gate
   && [ "$agent_publishers_sha" = "$(sha "$AGENT_PUBLISHERS")" ] \
   && [ "$agent_build_verifier_sha" = "$(sha "$AGENT_BUILD_VERIFIER")" ] \
   && [ "$publisher_sha" = "$(sha "$PUBLISHER")" ] \
+  && [ "$brief_validator_sha" = "$(sha "$BRIEF_VALIDATOR")" ] \
+  && [ "$subject_event_validator_sha" = "$(sha "$SUBJECT_EVENT_VALIDATOR")" ] \
+  && [ "$isolation_validator_sha" = "$(sha "$ISOLATION_VALIDATOR")" ] \
   && [ "$allowed_signers_sha" = "$(sha "$ALLOWED_SIGNERS")" ] \
   || { echo "eval-gate: current authority changed during validation" >&2; exit 1; }
 

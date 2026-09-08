@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-**v2.0.0-rc.2** — 一个面向 AI 代理的 Skill + Hooks 工具集，为 Harness Engineering（驾驭工程）自动化代理工作流的全部生命周期。它结合了**自动触发的生命周期钩子**和**交互式斜杠命令**，并原生支持 **Claude Code** 与 **Codex** 两大代理。
+**v2.0.0-rc.3** — 一个面向 AI 代理的 Skill + Hooks 工具集，为 Harness Engineering（驾驭工程）自动化代理工作流的全部生命周期。它结合了**引导式对话初始化**、自动触发的生命周期钩子和交互式斜杠命令，并原生支持 **Claude Code** 与 **Codex** 两大代理。
 
 ## 架构（v2 — Core / Adapter 分层）
 
@@ -171,7 +171,7 @@ harness-companion/
 │       ├── install.sh             # 3 种模式：plugin / --repo / --user
 │       └── uninstall.sh
 ├── .codex-plugin/
-│   ├── plugin.json                # Codex plugin 清单（v 2.0.0-rc.1）
+│   ├── plugin.json                # Codex plugin 清单（v 2.0.0-rc.3）
 │   └── skills/                    # Codex 可发现的 skill bundle
 ├── hooks/
 │   ├── hooks.json                 # Codex 事件键控的 hook 注册表

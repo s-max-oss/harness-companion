@@ -980,7 +980,7 @@ G1_PLUG_JSON="$FULL_ARCHIVE_DIR/.claude-plugin/plugin.json"
 if [ -f "$G1_PLUG_JSON" ]; then
   G1_NAME="$(jq -r '.name // empty' "$G1_PLUG_JSON" 2>/dev/null)"
   G1_VER="$(jq -r '.version // empty' "$G1_PLUG_JSON" 2>/dev/null)"
-  if [ "$G1_NAME" = "harness-companion" ] && [ "$G1_VER" = "2.0.0-rc.2" ]; then
+  if [ "$G1_NAME" = "harness-companion" ] && [ "$G1_VER" = "$SOURCE_VERSION" ]; then
     echo "PASS: G1 — plugin.json: name=$G1_NAME version=$G1_VER"
     PASSED=$((PASSED + 1))
   else

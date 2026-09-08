@@ -2,7 +2,7 @@
 
 > 🇨🇳 [简体中文](./README.zh-CN.md)
 
-**v2.0.0-rc.2** — A multi-agent skill that automates Harness Engineering — the practice of building reliable coding environments for AI agents. It combines **automatic lifecycle hooks** with **interactive slash commands**, and ships native adapters for both **Claude Code** and **Codex**.
+**v2.0.0-rc.3** — A multi-agent skill that automates Harness Engineering — the practice of building reliable coding environments for AI agents. It combines **guided conversational initialization**, automatic lifecycle hooks, and interactive slash commands, and ships native adapters for both **Claude Code** and **Codex**.
 
 ## Architecture (v2 — Core/Adapter split)
 
@@ -104,7 +104,7 @@ The uninstall script:
 
 | Command | What It Does |
 |---------|--------------|
-| `/harness:init` | Generate harness scaffold from templates (AGENTS.md, CLAUDE.md, feature_list.json, init.sh, +4 optional) |
+| `/harness:init` | Discuss the project, present a complete Brief for approval, then generate a type-matched harness without overwriting user edits |
 | `/harness:status` | Dashboard of file existence, feature progress, WIP=1 state, stale docs |
 | `/harness:feature` | List / add / update features in `feature_list.json` |
 | `/harness:verify` | Run `check → build → test` chain, auto-fill evidence |
@@ -151,7 +151,7 @@ harness-companion/
 ├── README.zh-CN.md                # 简体中文说明
 ├── CHANGELOG.md                   # Version history
 ├── LICENSE                        # MIT
-├── VERSION                        # Single source of truth (2.0.0-rc.2)
+├── VERSION                        # Single source of truth (2.0.0-rc.3)
 ├── install.sh                     # Top-level dispatcher (Claude Code by default, --codex/--all supported)
 ├── uninstall.sh                   # Top-level dispatcher (--claude/--codex/--all)
 ├── core/                          # Pure bash semantic core (no host awareness)
@@ -173,10 +173,10 @@ harness-companion/
 │       ├── install.sh             # 3 modes: plugin/--repo/--user
 │       └── uninstall.sh
 ├── .claude-plugin/
-│   ├── plugin.json                # Claude Code plugin manifest (v 2.0.0-rc.2)
+│   ├── plugin.json                # Claude Code plugin manifest (v 2.0.0-rc.3)
 │   └── marketplace.json           # Marketplace entry (harness-engineering)
 ├── .codex-plugin/
-│   ├── plugin.json                # Codex plugin manifest (v 2.0.0-rc.1)
+│   ├── plugin.json                # Codex plugin manifest (v 2.0.0-rc.3)
 │   └── skills/                    # Codex-discoverable skill bundle
 ├── hooks/
 │   ├── hooks.json                 # Codex event-keyed hook registry

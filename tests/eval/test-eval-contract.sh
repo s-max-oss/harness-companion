@@ -112,7 +112,7 @@ check "real eval authenticates snapshotted Agent executables independently of PA
 check "Windows command resolution binds the actual regular exe rather than a PATHEXT alias" bash -c 'grep -Fq "MINGW*|MSYS*|CYGWIN*" "$1" && grep -Fq "[ -f \"\$p.exe\" ] && p=\"\$p.exe\"" "$1" && grep -Fq "[ -f \"\$p\" ] && [ ! -L \"\$p\" ]" "$1"' _ "$EVAL/run-eval.sh"
 check "real eval uses a protected absolute GNU timeout" bash -c 'grep -Fq "TRUSTED_WINDOWS_TIMEOUT=\"/c/Program Files/Git/usr/bin/timeout.exe\"" "$1" && grep -Fq "TIMEOUT_BIN=\"\$TRUSTED_WINDOWS_TIMEOUT\"" "$1"' _ "$EVAL/run-eval.sh"
 check "real eval launches Codex through a trusted absolute env under a system-only PATH" bash -c 'grep -Fq "TRUSTED_WINDOWS_ENV=\"/c/Program Files/Git/usr/bin/env.exe\"" "$1" && grep -Fq "subject_launch=(\"\$TRUSTED_WINDOWS_ENV\" \"PATH=\$sandbox_path\" \"\$subject_launch_executable\")" "$1" && grep -Fq "System32/WindowsPowerShell/v1.0" "$1" && ! grep -q "RuntimeRoot\|CodexBinRoot" "$1"' _ "$EVAL/run-eval.sh"
-check "real eval records an effective Offline-sandbox access probe" bash -c 'grep -Fq "codexsandboxoffline" "$1" && grep -Fq "source_workspace_readable == false" "$1" && grep -Fq "controller_readable == false" "$1" && grep -Fq "user_home_readable == false" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval records an effective Offline-sandbox access probe" bash -c 'grep -Fq "codexsandboxoffline" "$1" && grep -Fq "source_workspace_readable == false" "$1" && grep -Fq "controller_readable == false" "$1" && grep -Fq "user_home_root_listable == false" "$1" && grep -Fq "context_authority_readable == false" "$1" && grep -Fq "user_executable_readable == false" "$1" && grep -Fq "host_temp_writeable == false" "$1"' _ "$EVAL/run-eval.sh"
 check "all real eval output directories share one ACL transition lock" grep -Fq 'acl_lock="$ROOT/.harness/eval-acl.lock"' "$EVAL/run-eval.sh"
 check "crashed eval state has identity-bound lifecycle recovery" bash -c 'grep -Fq "eval-recovery-journal.json" "$1" && grep -Fq "windows_process_status" "$1" && grep -Fq "lifecycle recovery complete" "$1"' _ "$EVAL/recover-windows-isolation.sh"
 check "real eval binds the token-resolved user profile instead of caller USERPROFILE" bash -c 'grep -Fq "GetFolderPath([Environment+SpecialFolder]::UserProfile)" "$1" && ! grep -Fq "\${USERPROFILE:-\$HOME}" "$1"' _ "$EVAL/run-eval.sh"
@@ -348,6 +348,20 @@ check "release gate reconstructs Windows evidence from versioned policy without 
 check "Windows canonical path comparisons are case-normalized" bash -c 'grep -Fq "output_host=\"\$(host_path" "$1" && grep -Fq "allowed_signers_host=\"\$(host_path" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh"
 check "release gate performs a concluding set-wide evidence pass" grep -Fq 'evidence source set changed during concluding verification' "$EVAL/check-results.sh"
 check "release gate holds the publication lock and rechecks directory membership" bash -c 'grep -Fq "directory_manifest \"\$RESULTS_DIR\" \"\$tmp/results.before.manifest\"" "$1" && grep -Fq "result membership or content changed during validation" "$1"' _ "$EVAL/check-results.sh"
+check "canonical eval writers bind published evidence before releasing locks" bash -c '
+  grep -Fq '\''runtime_register "$ROOT" "$rel" eval_candidate'\'' "$1" \
+    && grep -Fq '\''register_candidate_bundle "$base"'\'' "$1" \
+    && grep -Fq '\''runtime_register "$ROOT" "$rel" eval_result'\'' "$2" \
+    && grep -Fq '\''register_result_bundle "$base_name"'\'' "$2"
+' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh"
+printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"Get-Content -Raw package.json"}}' > "$TMP/subject-read.jsonl"
+check "subject-event validator permits read-only inspection" python "$EVAL/validate-subject-events.py" "$TMP/subject-read.jsonl"
+printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"brief=$(mktemp) && jq . input.json > $brief && rm $brief"}}' > "$TMP/subject-transient-write.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-transient-write.jsonl" >/dev/null 2>&1; then bad "subject-event validator rejects transient direct writes"; else ok "subject-event validator rejects transient direct writes"; fi
+printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"printf %s $BRIEF | bash C:/authority/scripts/harness-init-boundary.sh C:/target --decision approve --brief-stdin"}}' > "$TMP/subject-boundary.jsonl"
+check "subject-event validator permits the explicit approved boundary" python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary.jsonl"
+printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"bash C:/authority/scripts/harness-init.sh C:/target --brief C:/tmp/brief.json --apply"}}' > "$TMP/subject-direct-executor.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-direct-executor.jsonl" >/dev/null 2>&1; then bad "subject-event validator rejects direct executor invocation"; else ok "subject-event validator rejects direct executor invocation"; fi
 check "ACL state captures and restores DACL only without SeSecurityPrivilege" bash -c 'grep -Fq "AccessControlSections]::Access" "$1" && ! grep -Fq "AccessControlSections]::All" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
 check "ACL recovery skips only an explicit ItemNotFoundException" grep -Fq 'catch [System.Management.Automation.ItemNotFoundException]' "$EVAL/windows-isolation-acl.ps1"
 check "ACL recovery binds a stable Windows file identity" bash -c 'grep -Fq "GetFileInformationByHandle" "$1" && grep -Fq "expectedIdentity" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
@@ -436,7 +450,7 @@ elif grep -q 'signing material must not be present during Agent evaluation' "$EV
 else
   bad "Agent runner fails closed when signing material leaks into Agent evaluation"
 fi
-if grep -q 'signing key must be inside a root denied to eval sandbox accounts' "$EVAL/attest-result.sh"; then
+if grep -q 'production signing key must be inside the protected source workspace and outside the repository' "$EVAL/attest-result.sh"; then
   ok "attester confines release keys to ACL-protected roots"
 else
   bad "attester confines release keys to ACL-protected roots"
@@ -445,6 +459,49 @@ check "tag CI explicitly enables the real-result gate in the Phase 7 execution p
 
 mkdir -p "$TMP/cases" "$TMP/results" "$TMP/results-official" "$TMP/bin" "$TMP/fake-state"
 cp "$EVAL/cases/vague-goal.json" "$TMP/cases/"
+jq -S -n --arg version "$(tr -d '\r\n' < "$ROOT/VERSION")" '{
+  advisory:true,
+  cadence:"stable",
+  captured_from_git_rev:null,
+  conflicts_resolved:[],
+  deadline:null,
+  defaults_applied:[
+    {field:"/cadence",rationale:"Default cadence.",source:"spec_default",value:"stable"},
+    {field:"/deadline",rationale:"No deadline was specified.",source:"spec_default",value:null},
+    {field:"/secrets_handling",rationale:"No secrets policy was specified.",source:"spec_default",value:"unspecified"},
+    {field:"/external_network",rationale:"Ask before external network access.",source:"spec_default",value:"ask"},
+    {field:"/prohibitions",rationale:"No project-specific prohibitions were specified.",source:"spec_default",value:[]},
+    {field:"/operation_preferences",rationale:"Ask before consequential operations.",source:"spec_default",value:{commit:"ask",destructive_ops:false,external_mutation:"ask",install_packages:"ask",merge:"ask",push:"ask",release:"ask"}}
+  ],
+  detected_type:"python",
+  external_network:"ask",
+  generated_by:("harness-companion v" + $version),
+  goal:"Build a small web app for managing the team tasks.",
+  initial_project_state:{detection_summary:"Python project with pytest.",existing_harness_files:[],has_existing_tests:true,is_git_repo:true},
+  operation_preferences:{commit:"ask",destructive_ops:false,external_mutation:"ask",install_packages:"ask",merge:"ask",push:"ask",release:"ask"},
+  prohibitions:[],
+  provenance:{
+    "/cadence":{source:"spec_default"},
+    "/deadline":{source:"spec_default"},
+    "/detected_type":{marker:"pyproject.toml",source:"repo"},
+    "/external_network":{source:"spec_default"},
+    "/goal":{source:"conversation"},
+    "/operation_preferences":{source:"spec_default"},
+    "/prohibitions":{source:"spec_default"},
+    "/secrets_handling":{source:"spec_default"},
+    "/stack":{marker:"pyproject.toml",source:"repo"},
+    "/success_criteria":{source:"conversation"},
+    "/test_framework":{marker:"pytest.ini",source:"repo"}
+  },
+  schema_version:1,
+  secrets_handling:"unspecified",
+  source_version:$version,
+  stack:"python",
+  success_criteria:["Users can create tasks.","Users can assign tasks to team members.","Users can mark tasks complete.","The existing test suite passes."],
+  template_manifest_digest:"0000000000000000000000000000000000000000000000000000000000000000",
+  test_framework:"pytest",
+  type_evidence:null
+}' > "$TMP/fake-state/project-brief.json"
 if bash "$EVAL/check-results.sh" --cases-dir="$TMP/cases" --results-dir="$TMP/results" >/dev/null 2>&1; then bad "release gate blocks an unrun case"; else ok "release gate blocks an unrun case"; fi
 
 cat > "$TMP/bin/codex" <<'FAKE'
@@ -467,7 +524,7 @@ fi
 if printf '%s' "$prompt" | grep -qi 'newest_user_message.*' >/dev/null; then :; fi
 if printf '%s' "$prompt" | grep -qi 'Approve it and initialize'; then
   mkdir -p .harness
-  printf '%s\n' '{"schema_version":1,"advisory":true,"detected_type":"python","goal":"Build a small web app for managing the team'"'"'s tasks.","success_criteria":["Users can create tasks.","Users can assign tasks to team members.","Users can mark tasks complete.","The existing test suite passes."],"cadence":"stable","deadline":null,"secrets_handling":"unspecified","external_network":"ask","prohibitions":[],"operation_preferences":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"},"defaults_applied":[{"field":"/cadence","rationale":"Default cadence.","source":"spec_default","value":"stable"},{"field":"/deadline","rationale":"No deadline was specified.","source":"spec_default","value":null},{"field":"/secrets_handling","rationale":"No secrets policy was specified.","source":"spec_default","value":"unspecified"},{"field":"/external_network","rationale":"Ask before external network access.","source":"spec_default","value":"ask"},{"field":"/prohibitions","rationale":"No project-specific prohibitions were specified.","source":"spec_default","value":[]},{"field":"/operation_preferences","rationale":"Ask before consequential operations.","source":"spec_default","value":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"}}],"stack":"python","test_framework":"pytest"}' > .harness/PROJECT_BRIEF.json
+  cp "$state/project-brief.json" .harness/PROJECT_BRIEF.json
   printf '%s\n' '# Project Brief' > .harness/PROJECT_BRIEF.md
   printf '%s\n' '{"schema_version":1}' > .harness/.template-snapshot.json
   printf '%s\n' '# Agent instructions' > AGENTS.md
@@ -515,7 +572,7 @@ fi
 prompt="$(cat "$prompt_file")"
 if printf '%s' "$prompt" | grep -qi 'Approve it and initialize'; then
   mkdir -p .harness
-  printf '%s\n' '{"schema_version":1,"advisory":true,"detected_type":"python","goal":"Build a small web app for managing the team'"'"'s tasks.","success_criteria":["Users can create tasks.","Users can assign tasks to team members.","Users can mark tasks complete.","The existing test suite passes."],"cadence":"stable","deadline":null,"secrets_handling":"unspecified","external_network":"ask","prohibitions":[],"operation_preferences":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"},"defaults_applied":[{"field":"/cadence","rationale":"Default cadence.","source":"spec_default","value":"stable"},{"field":"/deadline","rationale":"No deadline was specified.","source":"spec_default","value":null},{"field":"/secrets_handling","rationale":"No secrets policy was specified.","source":"spec_default","value":"unspecified"},{"field":"/external_network","rationale":"Ask before external network access.","source":"spec_default","value":"ask"},{"field":"/prohibitions","rationale":"No project-specific prohibitions were specified.","source":"spec_default","value":[]},{"field":"/operation_preferences","rationale":"Ask before consequential operations.","source":"spec_default","value":{"commit":"ask","destructive_ops":false,"external_mutation":"ask","install_packages":"ask","merge":"ask","push":"ask","release":"ask"}}],"stack":"python","test_framework":"pytest"}' > .harness/PROJECT_BRIEF.json
+  cp "$state/project-brief.json" .harness/PROJECT_BRIEF.json
   printf '%s\n' '# Project Brief' > .harness/PROJECT_BRIEF.md
   printf '%s\n' '{"schema_version":1}' > .harness/.template-snapshot.json
   printf '%s\n' '# Agent instructions' > AGENTS.md
@@ -686,13 +743,21 @@ test_source_win="$(cygpath -aw "$ROOT/SKILL.md")"
 test_workspace_win="$(cygpath -aw "$ROOT/..")"
 test_offline_sid="$(env -u PSModulePath powershell.exe -NoProfile -Command '(Get-LocalUser -Name "CodexSandboxOffline" -ErrorAction Stop).SID.Value' | tr -d '\r')"
 test_online_sid="$(env -u PSModulePath powershell.exe -NoProfile -Command '(Get-LocalUser -Name "CodexSandboxOnline" -ErrorAction Stop).SID.Value' | tr -d '\r')"
-test_probe_payload="$(jq -cnS --arg whoami "$test_whoami_win" --arg source_file "$test_source_win" --arg controller_file "$test_probe_run_root_win\\controller\\runtime.manifest" '{nonce:"test-nonce",target_file:"C:\\target\\.harness-eval-isolation-sentinel",source_file:$source_file,controller_file:$controller_file,user_home:"C:\\home",whoami_file:$whoami}')"
+test_context_win='C:\home\.agents\skills\harness-companion\SKILL.md'
+test_user_executable_win='C:\home\bin\jq.exe'
+test_host_temp_marker_win='C:\home\AppData\Local\Temp\harness-eval-host-temp-test-nonce'
+test_agent_home_win="$test_probe_run_root_win\\agent-scratch\\home"
+test_agent_temp_win="$test_probe_run_root_win\\agent-scratch\\temp"
+test_agent_appdata_win="$test_probe_run_root_win\\agent-scratch\\appdata"
+test_agent_localappdata_win="$test_probe_run_root_win\\agent-scratch\\localappdata"
+test_probe_payload="$(jq -cnS --arg whoami "$test_whoami_win" --arg source_file "$test_source_win" --arg controller_file "$test_probe_run_root_win\\controller\\runtime.manifest" --arg context_file "$test_context_win" --arg user_executable_file "$test_user_executable_win" --arg host_temp_marker "$test_host_temp_marker_win" --arg shell_home "$test_agent_home_win" --arg shell_temp "$test_agent_temp_win" '{nonce:"test-nonce",target_file:"C:\\target\\.harness-eval-isolation-sentinel",source_file:$source_file,controller_file:$controller_file,user_home:"C:\\home",context_file:$context_file,user_executable_file:$user_executable_file,host_temp_marker:$host_temp_marker,whoami_file:$whoami,expected_shell:{home:$shell_home,userprofile:$shell_home,temp:$shell_temp,tmp:$shell_temp}}')"
 test_probe_payload_sha="$(printf '%s' "$test_probe_payload" | sha256sum | cut -d ' ' -f 1)"
 test_probe_script_win="$test_probe_run_root_win\\agent-bin\\isolation-probe.ps1"
 test_probe_script_sha="$(sha256sum "$EVAL/windows-isolation-probe.ps1" | cut -d ' ' -f 1)"
 test_probe_command="& '$test_powershell_win' -NoProfile -ExecutionPolicy Bypass -File '$test_probe_script_win' -ExpectedPayloadSha256 '$test_probe_payload_sha'"
 test_codex_powershell_suffix="$(jq -r '.windows_runtime_tools.codex_powershell.user_profile_suffix' "$EVAL/trust/agent-publishers.json")"
-test_codex_powershell_win="C:\\home\\$test_codex_powershell_suffix"
+test_codex_powershell_source_win="C:\\home\\$test_codex_powershell_suffix"
+test_codex_powershell_win="$test_probe_run_root_win\\agent-bin\\codex-powershell.exe"
 test_codex_powershell_sha="$(jq -r '.windows_runtime_tools.codex_powershell.approved_sha256[0]' "$EVAL/trust/agent-publishers.json")"
 test_codex_powershell_subject="$(jq -r '.windows_runtime_tools.codex_powershell.publisher_subject' "$EVAL/trust/agent-publishers.json")"
 test_codex_powershell_thumbprint="$(jq -r '.windows_runtime_tools.codex_powershell.publisher_thumbprints[0]' "$EVAL/trust/agent-publishers.json")"
@@ -700,42 +765,49 @@ test_probe_command_b64="$(printf '%s' "$test_probe_command" | base64 | tr -d '\r
 test_probe_wrapper_win="$(env -u PSModulePath powershell.exe -NoProfile -Command '$env:SystemRoot + "\System32\WindowsPowerShell\v1.0\powershell.exe"' | tr -d '\r')"
 test_probe_variant="powershell-no-profile-command-v1"
 test_probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_variant" "$test_probe_command_b64" "$test_probe_wrapper_win")"
-test_probe_result="$(jq -cn --arg payload_sha "$test_probe_payload_sha" '{nonce:"test-nonce",payload_sha256:$payload_sha,identity:"test-host\\codexsandboxoffline",target_file_readable:true,target_writeable:true,source_workspace_readable:false,controller_readable:false,user_home_readable:false}')"
-jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg workspace_root "$test_workspace_win" --arg source_file "$test_source_win" --arg offline_sid "$test_offline_sid" --arg online_sid "$test_online_sid" --arg controller_root "$test_probe_controller_root" --arg shell_wrapper_path "$test_probe_wrapper_win" --arg shell_wrapper_argv_variant "$test_probe_variant" --arg probe_script_path "$test_probe_script_win" --arg probe_script_sha "$test_probe_script_sha" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" '{
-  schema_version:2,
-  isolation:"windows-native-elevated-acl",
-  controller_visible_to_agent:false,
-  source_workspace_visible_to_agent:false,
-  user_home_visible_to_agent:false,
-  network:"codex-workspace-write-offline",
+test_probe_result="$(jq -cn --arg payload_sha "$test_probe_payload_sha" --arg shell_home "$test_agent_home_win" --arg shell_temp "$test_agent_temp_win" '{nonce:"test-nonce",payload_sha256:$payload_sha,identity:"test-host\\codexsandboxoffline",target_file_readable:true,target_writeable:true,source_workspace_readable:false,controller_readable:false,user_home_root_listable:false,context_authority_readable:false,user_executable_readable:false,host_temp_writeable:false,shell_home:$shell_home,shell_userprofile:$shell_home,shell_temp:$shell_temp,shell_tmp:$shell_temp}')"
+ jq -n --arg command "$test_probe_display" --arg output "$test_probe_result"$'\n' --argjson payload "$test_probe_payload" --argjson result "$test_probe_result" --arg workspace_root "$test_workspace_win" --arg source_file "$test_source_win" --arg context_file "$test_context_win" --arg user_executable_file "$test_user_executable_win" --arg host_temp_root 'C:\home\AppData\Local\Temp' --arg offline_sid "$test_offline_sid" --arg online_sid "$test_online_sid" --arg controller_root "$test_probe_controller_root" --arg shell_wrapper_path "$test_probe_wrapper_win" --arg shell_wrapper_argv_variant "$test_probe_variant" --arg probe_script_path "$test_probe_script_win" --arg probe_script_sha "$test_probe_script_sha" --arg powershell_path "$test_powershell_win" --arg powershell_sha "$test_powershell_sha" --arg whoami_path "$test_whoami_win" --arg whoami_sha "$test_whoami_sha" --arg codex_powershell_path "$test_codex_powershell_win" --arg codex_powershell_source_path "$test_codex_powershell_source_win" --arg codex_powershell_sha "$test_codex_powershell_sha" --arg codex_powershell_subject "$test_codex_powershell_subject" --arg codex_powershell_thumbprint "$test_codex_powershell_thumbprint" --arg shell_home "$test_agent_home_win" --arg shell_temp "$test_agent_temp_win" --arg shell_appdata "$test_agent_appdata_win" --arg shell_localappdata "$test_agent_localappdata_win" '{
+   schema_version:3,
+   isolation:"windows-native-elevated-acl",
+   controller_visible_to_agent:false,
+   source_workspace_visible_to_agent:false,
+   user_home_root_listable_to_agent:false,
+   context_authority_visible_to_agent:false,
+   user_executable_visible_to_agent:false,
+   host_temp_writeable_to_agent:false,
+   network:"codex-workspace-write-offline",
   sandbox_accounts:[
     {Name:"CodexSandboxOffline",Sid:$offline_sid},
     {Name:"CodexSandboxOnline",Sid:$online_sid}
   ],
-  denied_roots:[$workspace_root,"C:/home",$controller_root],
-  checks:[
-    {path:$workspace_root,sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,read_execute_denied:true},
-    {path:$workspace_root,sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,read_execute_denied:true},
-    {path:"C:/home",sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,read_execute_denied:true},
-    {path:"C:/home",sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,read_execute_denied:true},
-    {path:$controller_root,sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,read_execute_denied:true},
-    {path:$controller_root,sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,read_execute_denied:true}
-  ],
-  source_file_deny:{
-    path:$source_file,
-    checks:[
-      {sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,read_execute_denied:true},
-      {sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,read_execute_denied:true}
-    ]
-  },
-  probe:{
+   denied_roots:[$workspace_root,"C:/home",$controller_root],
+   checks:[
+     {path:$workspace_root,sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,rights:"ReadAndExecute",denied:true},
+     {path:$workspace_root,sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,rights:"ReadAndExecute",denied:true},
+     {path:"C:/home",sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,rights:"ReadAndExecute",denied:true},
+     {path:"C:/home",sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,rights:"ReadAndExecute",denied:true},
+     {path:$controller_root,sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,rights:"ReadAndExecute",denied:true},
+     {path:$controller_root,sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,rights:"ReadAndExecute",denied:true}
+   ],
+   source_file_deny:{
+     path:$source_file,
+     checks:[
+       {sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,rights:"ReadAndExecute",denied:true},
+       {sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,rights:"ReadAndExecute",denied:true}
+     ]
+   },
+   context_file_deny:{path:$context_file,checks:[{sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,rights:"ReadAndExecute",denied:true},{sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,rights:"ReadAndExecute",denied:true}]},
+   user_executable_deny:{path:$user_executable_file,checks:[{sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,rights:"ReadAndExecute",denied:true},{sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,rights:"ReadAndExecute",denied:true}]},
+   host_temp_write_deny:{path:$host_temp_root,checks:[{sandbox_account:"CodexSandboxOffline",sandbox_sid:$offline_sid,rights:"Modify",denied:true},{sandbox_account:"CodexSandboxOnline",sandbox_sid:$online_sid,rights:"Modify",denied:true}]},
+   shell_environment_policy:{inherit:"none",home:$shell_home,userprofile:$shell_home,temp:$shell_temp,tmp:$shell_temp,appdata:$shell_appdata,localappdata:$shell_localappdata},
+   probe:{
     command_event:{type:"command_execution",command:$command,aggregated_output:$output,exit_code:0,status:"completed"},
     payload:$payload,
     result:$result,
     shell_wrapper_path:$shell_wrapper_path,
     shell_wrapper_argv_variant:$shell_wrapper_argv_variant,
     script:{path:$probe_script_path,sha256:$probe_script_sha},
-    executables:{powershell:{path:$powershell_path,sha256:$powershell_sha},whoami:{path:$whoami_path,sha256:$whoami_sha},codex_powershell:{path:$codex_powershell_path,sha256:$codex_powershell_sha,authenticode:{status:"Valid",subject:$codex_powershell_subject,thumbprint:$codex_powershell_thumbprint}}},
+     executables:{powershell:{path:$powershell_path,sha256:$powershell_sha},whoami:{path:$whoami_path,sha256:$whoami_sha},codex_powershell:{path:$codex_powershell_path,source_path:$codex_powershell_source_path,sha256:$codex_powershell_sha,authenticode:{status:"Valid",subject:$codex_powershell_subject,thumbprint:$codex_powershell_thumbprint}}},
     sanitized_path:["/c/Windows/System32/WindowsPowerShell/v1.0","/c/Windows/System32","/c/Windows","/c/Program Files/Git/bin","/c/Program Files/Git/usr/bin"]
   }
 }' > "$attest_base.isolation.json"
@@ -745,7 +817,10 @@ test_publisher_thumbprint="$(jq -r '.agents.codex.publisher_thumbprints[0]' "$EV
 test_approved_version="$(jq -r '.agents.codex.approved_builds[0].cli_version' "$EVAL/trust/agent-publishers.json")"
 test_approved_sha="$(jq -r '.agents.codex.approved_builds[0].sha256' "$EVAL/trust/agent-publishers.json")"
 test_approved_components="$(jq -c '.agents.codex.approved_builds[0].components' "$EVAL/trust/agent-publishers.json")"
-jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher_subject" --arg publisher_thumbprint "$test_publisher_thumbprint" --arg approved_version "$test_approved_version" --arg approved_sha "$test_approved_sha" --argjson approved_components "$test_approved_components" '
+test_brief_validator_sha="$(sha256sum "$ROOT/scripts/validate-project-brief.sh" | cut -d ' ' -f 1)"
+test_subject_event_validator_sha="$(sha256sum "$EVAL/validate-subject-events.py" | cut -d ' ' -f 1)"
+test_isolation_validator_sha="$(sha256sum "$EVAL/validate-isolation-evidence.sh" | cut -d ' ' -f 1)"
+jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher_subject" --arg publisher_thumbprint "$test_publisher_thumbprint" --arg approved_version "$test_approved_version" --arg approved_sha "$test_approved_sha" --argjson approved_components "$test_approved_components" --arg brief_validator_sha "$test_brief_validator_sha" --arg subject_event_validator_sha "$test_subject_event_validator_sha" --arg isolation_validator_sha "$test_isolation_validator_sha" '
   .synthetic=false
   | .release_eligible=false
   | .reviewer_verdict="REVIEWED"
@@ -760,7 +835,10 @@ jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher
   | .agent_runtime.components=($approved_components | with_entries(
       .value={source:("/approved-codex-runtime/" + .key),sha256:.value.sha256,authenticode:{status:"Valid",subject:$publisher_subject,thumbprint:$publisher_thumbprint}}
     ))
-  | .isolation={kind:"windows-native-elevated-acl",source_workspace_denied:true,user_home_denied:true,controller_denied:true}
+   | .authority.project_brief_validator_sha256=$brief_validator_sha
+   | .authority.subject_event_validator_sha256=$subject_event_validator_sha
+   | .authority.isolation_validator_sha256=$isolation_validator_sha
+   | .isolation={kind:"windows-native-elevated-acl",source_workspace_denied:true,context_authority_denied:true,controller_denied:true,host_profile_environment_sanitized:true,host_temp_write_denied:true}
   | .artifact_hashes.isolation=$isolation_sha
   | .attestation={required:true,status:"pending",identity:null,namespace:null,signer_fingerprint:null}
 ' "$attest_candidate" > "$TMP/attest-candidate.tmp"
@@ -1101,7 +1179,7 @@ if bash "$EVAL/attest-result.sh" "$probe_tamper_candidate" \
   --results-dir="$TMP/probe-tamper-results" --allowed-signers="$TMP/test-release-signers" \
   > "$TMP/probe-tamper.log" 2>&1; then
   bad "attester binds effective probe claims to command output"
-elif grep -Fq 'isolation evidence is incomplete' "$TMP/probe-tamper.log"; then
+elif grep -Eq 'isolation evidence( v3)? is incomplete' "$TMP/probe-tamper.log"; then
   ok "attester binds effective probe claims to command output"
 else
   sed 's/^/  probe-tamper: /' "$TMP/probe-tamper.log" >&2

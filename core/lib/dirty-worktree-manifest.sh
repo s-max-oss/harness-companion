@@ -64,6 +64,10 @@ DWM_MUTABLE=(
   ".harness/logs/runs/"
   ".harness/reviews/"
   ".harness/acceptance/"
+  "tests"
+  "tests/eval"
+  "tests/eval/candidates/"
+  "tests/eval/results/"
   ".harness/registry-journal.ndjson"
   ".harness/runtime-manifest.jsonl"
   ".harness/.registry.lock/"
@@ -74,6 +78,23 @@ DWM_MUTABLE=(
   "clean-state-checklist.md"
   "checklist.sh"
 )
+
+# Forward-eval output is runtime evidence, not source.  Only the canonical,
+# flat, run-id-bound filenames emitted by run-eval.sh / attest-result.sh enter
+# this namespace; locks, staging paths, nested paths, and arbitrary files are
+# rejected even though the two parent directories are mutable.
+dwm_eval_artifact_kind() {
+  local p="$1"
+  if [[ "$p" =~ ^tests/eval/candidates/[A-Za-z0-9][A-Za-z0-9_-]*\.[0-9]+\.[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+\.(transcript\.jsonl|tree\.sha256|subject-events\.jsonl|reviewer-events\.jsonl|turn-trees\.jsonl|evaluator-events\.jsonl|reviewer-output\.json|objective-checks\.jsonl|project-brief\.json|isolation\.json|json)$ ]]; then
+    printf '%s\n' eval_candidate
+    return 0
+  fi
+  if [[ "$p" =~ ^tests/eval/results/[A-Za-z0-9][A-Za-z0-9_-]*\.[0-9]+\.[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+\.(transcript\.jsonl|tree\.sha256|subject-events\.jsonl|reviewer-events\.jsonl|turn-trees\.jsonl|evaluator-events\.jsonl|reviewer-output\.json|objective-checks\.jsonl|project-brief\.json|isolation\.json|attestation\.sig|json)$ ]]; then
+    printf '%s\n' eval_result
+    return 0
+  fi
+  return 1
+}
 
 # ---- dwm_is_mutable --------------------------------------------------------
 # 0 if path is in the mutable runtime namespace (dir namespaces match by
@@ -436,7 +457,7 @@ dwm_compare_manifest() {
     . as $p | any($m[]; . as $e | if ($e | endswith("/")) then (($p == ($e | rtrimstr("/"))) or ($p | startswith($e))) else ($p == $e) end);
   # runtime-artifact namespace: a NEW file here paired with ANY recorded-file
   # modification in the same namespace is a paired rewrite (see header).
-  def is_runtime_artifact: startswith(".harness/logs/runs/") or startswith(".harness/reviews/") or startswith(".harness/acceptance/");
+  def is_runtime_artifact: startswith(".harness/logs/runs/") or startswith(".harness/reviews/") or startswith(".harness/acceptance/") or startswith("tests/eval/candidates/") or startswith("tests/eval/results/");
 
   ($r | map({key:.path, value:.}) | from_entries) as $rm |
   ($c | map({key:.path, value:.}) | from_entries) as $cm |
@@ -657,7 +678,7 @@ dwm_compare_manifest() {
     fi
   fi
   runtime_namespace_present="$(jq -sr '
-    [.[] | select(.path | test("^\\.harness/logs/runs/.*\\.(ndjson|log)$|^\\.harness/reviews/.*\\.jsonl$|^\\.harness/acceptance/[0-9a-f]+/(acceptance\\.json|A-G\\.log)$"))] | length
+    [.[] | select(.path | test("^\\.harness/logs/runs/.*\\.(ndjson|log)$|^\\.harness/reviews/.*\\.jsonl$|^\\.harness/acceptance/[0-9a-f]+/(acceptance\\.json|A-G\\.log)$|^tests/eval/(candidates|results)/"))] | length
   ' "$cur_file" 2>/dev/null)"
   if [ -L "$runtime_registry_path" ] || { [ -e "$runtime_registry_path" ] && [ ! -f "$runtime_registry_path" ]; }; then
     mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_not_regular"}')")
@@ -713,7 +734,7 @@ dwm_compare_manifest() {
 
     # First walk the trusted registry so a deleted or type-replaced artifact
     # cannot disappear from a current-manifest-driven loop.
-    local cpath centry ckind rsha rsize actual
+    local cpath centry ckind expected_kind rsha rsize actual
     while IFS= read -r centry; do
       [ -n "$centry" ] || continue
       cpath="$(printf '%s' "$centry" | jq -r '.path // empty')"
@@ -722,9 +743,22 @@ dwm_compare_manifest() {
       rsize="$(printf '%s' "$centry" | jq -r '.size // -1')"
       [ -n "$cpath" ] || continue
       case "$cpath" in
-        ".harness/logs/runs/"*.ndjson|".harness/logs/runs/"*.log|".harness/reviews/"*.jsonl|".harness/acceptance/"*/acceptance.json|".harness/acceptance/"*/A-G.log) ;;
+        ".harness/logs/runs/"*.ndjson) expected_kind="ndjson" ;;
+        ".harness/logs/runs/"*.log) expected_kind="log" ;;
+        ".harness/reviews/"*.jsonl) expected_kind="verdict" ;;
+        ".harness/acceptance/"*/acceptance.json) expected_kind="acceptance" ;;
+        ".harness/acceptance/"*/A-G.log) expected_kind="log" ;;
+        tests/eval/candidates/*|tests/eval/results/*)
+          expected_kind="$(dwm_eval_artifact_kind "$cpath" 2>/dev/null || true)"
+          [ -n "$expected_kind" ] || continue
+          ;;
         *) continue ;;
       esac
+      if [ "$ckind" != "$expected_kind" ]; then
+        mutable_violations+=("$(jq -nc --arg p "$cpath" --arg e "$expected_kind" --arg a "$ckind" \
+          '{path:$p, reason:"runtime_artifact_kind_mismatch", expected:$e, actual:$a}')")
+        continue
+      fi
       if [ -L "$project_dir/$cpath" ] || [ ! -f "$project_dir/$cpath" ]; then
         mutable_violations+=("$(jq -nc --arg p "$cpath" '{path:$p, reason:"runtime_artifact_missing_or_not_regular"}')")
         continue
@@ -760,6 +794,14 @@ dwm_compare_manifest() {
         ".harness/reviews/"*.jsonl)    ckind="verdict" ;;
         ".harness/acceptance/"*/acceptance.json) ckind="acceptance" ;;
         ".harness/acceptance/"*/A-G.log)          ckind="log" ;;
+        tests/eval/candidates/*|tests/eval/results/*)
+          ckind="$(dwm_eval_artifact_kind "$cpath" 2>/dev/null || true)"
+          if [ -z "$ckind" ]; then
+            mutable_violations+=("$(jq -nc --arg p "$cpath" \
+              '{path:$p, reason:"runtime_artifact_path_invalid"}')")
+            continue
+          fi
+          ;;
         *) continue ;;
       esac
       centry="$(printf '%s' "$reg_json" | jq -c --arg p "$cpath" 'map(select(.path == $p)) | .[0] // null' 2>/dev/null)"

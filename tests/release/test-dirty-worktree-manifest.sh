@@ -160,6 +160,20 @@ reemit() { dwm_emit_manifest "$1" "$2"; }
 # mf <dir> <suffix> — path for a manifest OUTSIDE the repo tree
 mf() { printf '%s.%s.manifest.jsonl' "$1" "$2"; }
 
+# Mirror the real repository's tracked eval output directories and establish
+# the pre-existing runtime bindings used by every DWM fixture.
+prepare_eval_runtime_repo() {
+  local d="$1" head_sha
+  mkdir -p "$d/tests/eval/candidates" "$d/tests/eval/results"
+  : > "$d/tests/eval/candidates/.gitkeep"
+  : > "$d/tests/eval/results/.gitkeep"
+  git -C "$d" -c user.email=t@e.com -c user.name=t add tests/eval/candidates/.gitkeep tests/eval/results/.gitkeep
+  git -C "$d" -c user.email=t@e.com -c user.name=t commit -q -m eval-dirs
+  head_sha="$(git -C "$d" rev-parse HEAD)"
+  RUNTIME_MANIFEST_GENESIS="$head_sha" runtime_register "$d" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null
+  RUNTIME_MANIFEST_GENESIS="$head_sha" runtime_register "$d" ".harness/reviews/feature/F-CONV-01.jsonl" verdict >/dev/null
+}
+
 # emit + compare, print the compare JSON
 cmp_json() {
   local d="$1" out="$2"
@@ -1298,6 +1312,51 @@ mkdir -p "$D/.harness/acceptance/$UNREGISTERED_HEAD"
 printf '%s\n' '{"schema_version":1}' > "$D/.harness/acceptance/$UNREGISTERED_HEAD/acceptance.json"
 RES="$(dwm_compare_manifest "$D" "$OUT")"
 check "T47b: unregistered acceptance artifact rejected" 1 "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_artifact_unregistered")] | length')"
+
+# Forward-eval candidates/results are mutable runtime evidence, but only for
+# the canonical flat filename grammar and only when their first-seen bytes are
+# bound into the Git-anchored registry.
+D="$(mktemp -d "$TMPDIR/t47-eval-ok-XXXX")"
+setup_repo "$D"
+prepare_eval_runtime_repo "$D"
+OUT="$(mf "$D" t47-eval-ok)"
+dwm_emit_manifest "$D" "$OUT"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+EVAL_REL="tests/eval/candidates/vague-goal.1.20260908T010203Z-12-34.json"
+printf '%s\n' '{"passed":true}' > "$D/$EVAL_REL"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" "$EVAL_REL" eval_candidate
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T47c: registered canonical eval candidate accepted" true "$(printf '%s' "$RES" | jq -r '.valid')"
+
+D="$(mktemp -d "$TMPDIR/t47-eval-unregistered-XXXX")"
+setup_repo "$D"
+prepare_eval_runtime_repo "$D"
+OUT="$(mf "$D" t47-eval-unregistered)"
+dwm_emit_manifest "$D" "$OUT"
+printf '%s\n' '{"passed":true}' > "$D/tests/eval/results/vague-goal.1.20260908T010203Z-12-34.json"
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T47d: unregistered canonical eval result rejected" 1 "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_artifact_unregistered")] | length')"
+
+D="$(mktemp -d "$TMPDIR/t47-eval-invalid-XXXX")"
+setup_repo "$D"
+prepare_eval_runtime_repo "$D"
+OUT="$(mf "$D" t47-eval-invalid)"
+dwm_emit_manifest "$D" "$OUT"
+printf '%s\n' forged > "$D/tests/eval/candidates/not-a-canonical-artifact.txt"
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T47e: arbitrary path in eval runtime directory rejected" 1 "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_artifact_path_invalid")] | length')"
+
+D="$(mktemp -d "$TMPDIR/t47-eval-kind-XXXX")"
+setup_repo "$D"
+prepare_eval_runtime_repo "$D"
+OUT="$(mf "$D" t47-eval-kind)"
+dwm_emit_manifest "$D" "$OUT"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+EVAL_REL="tests/eval/candidates/vague-goal.1.20260908T010203Z-12-34.json"
+printf '%s\n' '{"passed":true}' > "$D/$EVAL_REL"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" "$EVAL_REL" verdict
+RES="$(dwm_compare_manifest "$D" "$OUT")"
+check "T47f: eval artifact registry kind is exact" 1 "$(printf '%s' "$RES" | jq '[.violations[] | select(.reason == "runtime_artifact_kind_mismatch")] | length')"
 
 # ---- T48 (rc6 final remediation R1): runtime_register fail-closed on stale genesis ---
 # An EXISTING registry whose genesis anchor does not match the expected HEAD must

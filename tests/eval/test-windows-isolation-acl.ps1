@@ -20,11 +20,22 @@ function New-Round([string]$Name) {
         UserHome   = Join-Path $base "home"
         Controller = Join-Path $base "controller"
         Source     = Join-Path (Join-Path $base "workspace") "SKILL.md"
+        Context    = Join-Path (Join-Path $base "home") ".agents\skills\harness-companion\SKILL.md"
+        UserExecutable = Join-Path (Join-Path $base "home") "bin\jq.exe"
+        HostTemp   = Join-Path (Join-Path $base "home") "AppData\Local\Temp"
         State      = Join-Path $base "state.json"
         Evidence   = Join-Path $base "evidence.json"
     }
     [void](New-Item -ItemType Directory -Path $value.Workspace, $value.UserHome, $value.Controller)
+    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $value.Context), (Split-Path -Parent $value.UserExecutable), $value.HostTemp -Force)
     [System.IO.File]::WriteAllText($value.Source, "contract source")
+    [System.IO.File]::WriteAllText($value.Context, "installed context")
+    [System.IO.File]::WriteAllText($value.UserExecutable, "executable probe")
+    $value | Add-Member -NotePropertyName ExtraDacls -NotePropertyValue ([pscustomobject]@{
+        Context = Get-Dacl $value.Context
+        UserExecutable = Get-Dacl $value.UserExecutable
+        HostTemp = Get-Dacl $value.HostTemp
+    })
     $script:rounds += $value
     return $value
 }
@@ -39,6 +50,8 @@ function Invoke-Helper([string]$Mode, [object]$Round) {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Helper -Mode $Mode `
         -WorkspaceRoot $Round.Workspace -ControllerRoot $Round.Controller `
         -UserHome $Round.UserHome -SourceFile $Round.Source -StateFile $Round.State `
+        -ContextFile $Round.Context -UserExecutableFile $Round.UserExecutable `
+        -HostTempRoot $Round.HostTemp `
         -EvidenceFile $Round.Evidence
     if ($LASTEXITCODE -ne 0) {
         throw "ACL helper $Mode failed with exit $LASTEXITCODE"
@@ -60,6 +73,9 @@ function Assert-Restored([object]$Round, [hashtable]$Before) {
         (Get-Dacl $Round.Source) -ne $Before.Source) {
         throw "source-file DACL was not restored"
     }
+    if ((Get-Dacl $Round.Context) -ne $Round.ExtraDacls.Context) { throw "context-file DACL was not restored" }
+    if ((Get-Dacl $Round.UserExecutable) -ne $Round.ExtraDacls.UserExecutable) { throw "user-executable DACL was not restored" }
+    if ((Get-Dacl $Round.HostTemp) -ne $Round.ExtraDacls.HostTemp) { throw "host-temp DACL was not restored" }
     if (Test-Path -LiteralPath $Round.State) {
         throw "restoration state was not removed after success"
     }
@@ -101,7 +117,7 @@ try {
         throw "Enter did not persist recovery state"
     }
     $normalState = Get-Content -LiteralPath $normal.State -Raw | ConvertFrom-Json
-    if ([int]$normalState.schema_version -ne 3) {
+    if ([int]$normalState.schema_version -ne 4) {
         throw "Enter did not persist the file-aware recovery schema"
     }
     $sourceEntries = @($normalState.paths | Where-Object {
@@ -127,7 +143,7 @@ try {
     if ($normalEvidence.source_file_deny.path -ne $normal.Source -or
         @($normalEvidence.source_file_deny.checks).Count -ne 2 -or
         @($normalEvidence.source_file_deny.checks | Where-Object {
-            $_.read_execute_denied -ne $true
+            $_.denied -ne $true -or $_.rights -ne 'ReadAndExecute'
         }).Count -ne 0) {
         throw "Enter did not emit exact direct source-file deny evidence"
     }
@@ -144,15 +160,17 @@ try {
     Invoke-Helper "Enter" $legacy
     $legacyState3 = Get-Content -LiteralPath $legacy.State -Raw | ConvertFrom-Json
     $legacySourceEntry = @($legacyState3.paths | Where-Object { $_.kind -eq 'file' })
-    if ($legacySourceEntry.Count -ne 1) {
-        throw "schema-3 state did not contain one source file for legacy setup"
+    if ($legacySourceEntry.Count -ne 3) {
+        throw "schema-4 state did not contain all protected files for legacy setup"
     }
-    $legacySourceAcl = New-Object System.Security.AccessControl.FileSecurity
-    $legacySourceAcl.SetSecurityDescriptorSddlForm(
-        [string]$legacySourceEntry[0].sddl,
-        [System.Security.AccessControl.AccessControlSections]::Access
-    )
-    Set-Acl -LiteralPath $legacy.Source -AclObject $legacySourceAcl
+    foreach ($entry in $legacySourceEntry) {
+        $legacySourceAcl = New-Object System.Security.AccessControl.FileSecurity
+        $legacySourceAcl.SetSecurityDescriptorSddlForm(
+            [string]$entry.sddl,
+            [System.Security.AccessControl.AccessControlSections]::Access
+        )
+        Set-Acl -LiteralPath ([string]$entry.path) -AclObject $legacySourceAcl
+    }
     $legacyDirectories = @($legacyState3.paths | Where-Object { $_.kind -eq 'directory' } | ForEach-Object {
         [pscustomobject]@{
             path = $_.path

@@ -184,6 +184,15 @@ push, merge, tag, release, handling credentials, secrets, API keys, or tokens,
 local skill installation or update, package installation, external network
 access or mutation, and destructive actions.
 
+When `external_network` is `ask`, distinguish task intent from authorization.
+An instruction to run, use, or call a production or other external-service
+command says what the user wants done; it does not by itself authorize crossing
+the network boundary. Before the first attempt, explain that the action will
+access an external service and ask for a separate explicit yes/no authorization.
+Proceed only after the user's reply explicitly authorizes external network
+access. Do not create a network-attempt marker, invoke the command, or perform a
+probe while waiting for that answer.
+
 If the user stops or denies an action, stop immediately. Do not argue from an
 older Brief preference. Record the denial when the active workflow provides an
 evidence sink.

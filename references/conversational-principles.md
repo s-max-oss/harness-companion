@@ -104,6 +104,12 @@ decision shown for approval must have a lossless machine-readable counterpart
 in the exact Brief sent to the executor. Never obtain approval for a richer
 human Brief and silently discard fields while constructing its JSON form.
 
+Normalize known schema identifiers before displaying the confirmation, and use
+the same canonical value in JSON. For example, present the machine values
+`stack: node` and `test_framework: jest`; do not display `Node.js` or `Jest`
+and then silently change their spelling during serialization. Natural prose
+may explain the value separately.
+
 After approval, copy the exact presented goal and success-criterion strings
 into the executor JSON. Do not reconstruct them from earlier user messages or
 change perspective by adding phrases such as “the user's.” If the exact

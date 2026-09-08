@@ -84,6 +84,13 @@ question or its choice menu there and then repeat it in the final response.
 After asking the question, wait for the user's answer instead of paraphrasing
 or asking it again in the same turn.
 
+When several fields conflict, choose one field for the current question. Scope
+the evidence, wording, and every menu choice to that field alone. Do not offer
+composite alternatives such as "Python with pytest" versus "Node with no test
+framework" while both `/stack` and `/test_framework` remain unresolved: ask
+about `/stack` first, wait for the answer, and raise `/test_framework` in the
+next turn. Do not preview the later conflict as part of the current resolution.
+
 Record the chosen resolution in `conflicts_resolved`. Normalize a choice of
 repository evidence, user input, or a third value established through
 clarification as `repo`, `user`, or `custom`, respectively, and always include

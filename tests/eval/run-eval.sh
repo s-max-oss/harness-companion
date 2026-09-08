@@ -264,7 +264,10 @@ contract_test_prepare_post_agent_stage() {
 
   stamp="contract-$recovery_nonce"
   base="$case_name.$case_version.$stamp"
-  stage="$OUTPUT_DIR/.staging-$base"
+  # Keep the transient directory short on Windows.  The final filename already
+  # carries the full case identity; repeating it in the parent can cross
+  # MAX_PATH before the atomic no-replace publisher sees the source.
+  stage="$OUTPUT_DIR/.staging-contract-$recovery_nonce"
   publication_lock="$OUTPUT_DIR/.eval-write.lock"
   set_recovery_publication_paths || die "contract setup could not reserve publication paths"
   contract_test_hold publication_paths_reserved
@@ -1643,7 +1646,10 @@ fi
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
 [ "$CONTRACT_TEST" != 1 ] || die "contract-test mode can never publish an eval candidate"
 base="$case_name.$case_version.$stamp"
-stage="$OUTPUT_DIR/.staging-$base"
+# Do not repeat the full case name in both the staging directory and filename.
+# Long scenario names otherwise exceed legacy Windows path limits even though
+# the final authoritative destination itself is safe.
+stage="$OUTPUT_DIR/.staging-$$-$RANDOM"
 publication_lock="$OUTPUT_DIR/.eval-write.lock"
 if [ "$SYNTHETIC" = 0 ]; then
   set_recovery_publication_paths || die "could not reserve publication paths in lifecycle recovery journal"

@@ -79,6 +79,15 @@ Load `references/conversational-principles.md` and `references/post-init-explana
    the exact approved Brief cannot be recovered from conversation context, do
    not write—present it again and ask for confirmation.
 
+Render every success criterion as its own quoted or code-formatted list item so
+the approved string is unambiguous. Immediately before invoking the consent
+boundary or executor, compare the JSON `goal` and every `success_criteria`
+element with the last displayed complete Brief. They must match character for
+character, including capitalization and punctuation. Do not title-case,
+lowercase, add or remove periods, or split/combine strings after approval. Fix
+any mismatch in the temporary Brief before the first write; never initialize
+with a lossy Brief and ask the user to repair it afterward.
+
 ### Resume and update safety
 
 For resume on a managed-valid project, first perform a no-write 3-way comparison and explain which files are identical, template-only changes, user-modified, or missing. Offer **apply the template-only changes**, **keep all existing files**, or **cancel**. Only an approved exact plan may execute; user-modified files must be preserved. Use the same stable-Brief dry-run and plan-token apply sequence as explicit update below. If the user keeps all or cancels, do not apply the plan.

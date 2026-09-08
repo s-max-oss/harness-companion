@@ -157,6 +157,13 @@ complete resulting Brief, and keep the executor blocked. Invoke the consent
 boundary only when the user explicitly approves the complete Brief or
 explicitly directs initialization from that displayed Brief.
 
+Display each success criterion as a separate quoted or code-formatted string.
+Before the first target write, compare the executor JSON `goal` and each
+`success_criteria` element against the last displayed complete Brief exactly,
+character for character. Capitalization, punctuation, and list boundaries are data: do
+not title-case, lowercase, punctuate, split, or combine an approved string.
+Correct a mismatch before invoking the executor, not after initialization.
+
 The user confirms the Brief, not the Agent's internal feature breakdown or
 implementation plan. In guided mode, target-project writes remain forbidden
 until approval. Keep pre-confirmation Brief state in conversation context only.

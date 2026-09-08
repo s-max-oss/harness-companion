@@ -167,6 +167,14 @@ warn afterward that the generated Brief was not confirmed. Legacy mode may use
 placeholders for compatibility. Resume and update modes require an exact
 no-write preview and approval before applying template changes.
 
+For a concrete post-init Brief edit such as “rename the goal and preserve
+everything else,” load the confirmed on-disk Brief, copy every unchanged field
+exactly, and apply the named edit before showing the revised complete Brief.
+Check the displayed field against the user's requested new value. Do not echo a
+stale pre-edit Brief, return to the initial Approve/Edit/Cancel ceremony, or ask
+the user to reconfirm unchanged fields. The next confirmation is only for
+applying the exact revised update plan.
+
 For a post-init update, do not turn the executor's plan token into a second
 consent ceremony. When the exact intended Brief change and preservation
 guarantees were just shown and the user explicitly says to apply that exact

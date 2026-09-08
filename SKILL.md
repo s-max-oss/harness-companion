@@ -85,6 +85,14 @@ For resume on a managed-valid project, first perform a no-write 3-way comparison
 
 For explicit `/harness:init --update`, store the confirmed Brief in a stable temporary file outside the target. On a legacy-unmanaged project, first explain which files predate Harness management, collect and confirm any missing Brief fields, and make clear that the new snapshot will claim only files this migration creates. Then:
 
+When a managed project is already initialized and the user requests a concrete
+Brief edit while preserving everything else, begin from the on-disk confirmed
+Brief, copy every unchanged field exactly, and replace each named field with the
+requested new value before presenting the revised complete Brief. Verify that
+the displayed revised value is the requested value. Do not reuse the initial
+Approve/Edit/Cancel template with a stale Brief, and do not ask the user to
+reconfirm unchanged fields.
+
 1. Run `bash <skill-root>/scripts/harness-init.sh <target> --brief <temp-json> --non-interactive --host=<claude|codex> --update` as a no-write dry run.
 2. Explain the proposed creates, updates, and preserved user modifications. Ask whether to apply that exact plan.
 3. Only after approval, run `bash <skill-root>/scripts/harness-init.sh <target> --brief <temp-json> --non-interactive --host=<claude|codex> --update --apply --plan-token <token>`. A stale or missing token means stop and regenerate the plan; never bypass the check.

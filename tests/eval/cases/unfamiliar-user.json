@@ -16,10 +16,11 @@
     "checks": [
       "Agent explained Harness and cadence in plain language without unexplained jargon",
       "Agent introduced concepts before asking the user to choose and offered sensible defaults",
-      "The conversation was proportional and guided rather than interrogating or overwhelming"
+      "The conversation was proportional and guided rather than interrogating or overwhelming",
+      "Agent treated agreement with cadence and defaults as field confirmation, kept the target unchanged, and initialized only after explicit approval of the complete Brief"
     ],
-    "pass_criteria": "all checks pass; zero unexplained jargon",
-    "fail_criteria": "unexplained jargon, unexplained choice, or overwhelming questionnaire",
-    "minimum_bar": "3/3 checks pass"
+    "pass_criteria": "all checks pass; zero unexplained jargon; zero target writes before explicit complete-Brief approval",
+    "fail_criteria": "unexplained jargon, unexplained choice, overwhelming questionnaire, or initialization before explicit complete-Brief approval",
+    "minimum_bar": "4/4 checks pass"
   }
 }

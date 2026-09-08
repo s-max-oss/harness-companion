@@ -53,12 +53,26 @@ round focused on the subject the user is currently clarifying.
 
 Prefer language at the user's level. Translate Harness terms before using them:
 
+- `Harness` means the project files and checks that help coding agents work
+  consistently and verify their changes.
+- A `Git repository` is a project folder whose change history is tracked by
+  Git.
+- The `stack` is the main language and tools used to build the project.
+- A `test framework` is the tool that runs automated checks of the code.
 - `cadence` means how cautiously or quickly changes should be delivered.
 - `operation_preferences` describe which Git or release actions may be
   suggested or performed after separate in-session authorization.
 - `secrets_handling` describes how credentials and sensitive values are stored
   or handled (for example, in an environment file, vault, or keyring) while
   keeping them out of source code, logs, and messages.
+- `external network access` means connecting to services outside the local
+  project, and `destructive operations` are actions that can erase or
+  irreversibly replace data.
+
+If the user says they do not understand the setup, do not merely place these
+technical labels in a Brief. Define each term at first use, or replace it with
+plain language. Describe guided init as "setup that asks for confirmation"
+before using the `/harness:init` command name.
 
 ## Resolve conflicts explicitly
 
@@ -135,6 +149,13 @@ The confirmation choices are:
 - **Edit** — discuss only the requested changes, preserve other confirmed
   values, and present the revised Brief again.
 - **Cancel** — stop with zero target-project writes.
+
+Approval applies to the complete displayed Brief, not to isolated choices.
+Statements such as "stable cadence sounds good," "use those defaults," or
+"that field is correct" confirm only those values. Preserve them, present the
+complete resulting Brief, and keep the executor blocked. Invoke the consent
+boundary only when the user explicitly approves the complete Brief or
+explicitly directs initialization from that displayed Brief.
 
 The user confirms the Brief, not the Agent's internal feature breakdown or
 implementation plan. In guided mode, target-project writes remain forbidden

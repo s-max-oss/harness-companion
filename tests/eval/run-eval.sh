@@ -1440,19 +1440,20 @@ if [ -f "$brief" ] && [ ! -L "$brief" ] && jq -e 'type == "object"' "$brief" >/d
     | select((getpath($path) | type) != "object")
     | $path' "$CASE")
 
-  expected_default_fields="$(jq -c '.expected_default_fields // [] | sort' "$CASE")"
   actual_default_fields="$(jq -c '[.defaults_applied[]?.field] | sort' "$brief")"
-  normalized_default_fields="$(jq -c '
-    [ .defaults_applied[]?.field
-      | if . == "/operation_preferences" then
-          ["/operation_preferences/commit","/operation_preferences/destructive_ops","/operation_preferences/external_mutation","/operation_preferences/install_packages","/operation_preferences/merge","/operation_preferences/push","/operation_preferences/release"][]
-        else . end ] | sort
-  ' "$brief")"
-  if [ "$expected_default_fields" = "$normalized_default_fields" ] && jq -e --slurpfile case "$CASE" '
+  if jq -e 'has("expected_default_fields")' "$CASE" >/dev/null; then
+    expected_default_fields="$(jq -c '.expected_default_fields | sort' "$CASE")"
+    normalized_default_fields="$(jq -c '
+      [ .defaults_applied[]?.field
+        | if . == "/operation_preferences" then
+            ["/operation_preferences/commit","/operation_preferences/destructive_ops","/operation_preferences/external_mutation","/operation_preferences/install_packages","/operation_preferences/merge","/operation_preferences/push","/operation_preferences/release"][]
+          else . end ] | sort
+    ' "$brief")"
+    if [ "$expected_default_fields" = "$normalized_default_fields" ] && jq -e --slurpfile case "$CASE" '
       . as $brief
       | def pointer_path:
           split("/")[1:] | map(gsub("~1"; "/") | gsub("~0"; "~"));
-        ($case[0].expected_default_fields // [] | sort) as $expected
+        ($case[0].expected_default_fields | sort) as $expected
       | ([ $brief.defaults_applied[].field ] | unique | length) == ($brief.defaults_applied | length)
         and all($brief.defaults_applied[];
           .field as $field
@@ -1461,9 +1462,26 @@ if [ -f "$brief" ] && [ ! -L "$brief" ] && jq -e 'type == "object"' "$brief" >/d
           and (.rationale | type == "string" and length > 0)
           and .value == ($brief | getpath($field | pointer_path)))
     ' "$brief" >/dev/null; then
-    add_objective "Brief records the complete documented default set" true "fields=$actual_default_fields"
+      add_objective "Brief records the complete documented default set" true "fields=$actual_default_fields"
+    else
+      add_objective "Brief records the complete documented default set" false "expected=$expected_default_fields actual=$actual_default_fields normalized=$normalized_default_fields"
+    fi
   else
-    add_objective "Brief records the complete documented default set" false "expected=$expected_default_fields actual=$actual_default_fields normalized=$normalized_default_fields"
+    if jq -e '
+      . as $brief
+      | def pointer_path:
+          split("/")[1:] | map(gsub("~1"; "/") | gsub("~0"; "~"));
+      ([ $brief.defaults_applied[].field ] | unique | length) == ($brief.defaults_applied | length)
+      and all($brief.defaults_applied[];
+        .field as $field
+        | .source == "spec_default"
+        and (.rationale | type == "string" and length > 0)
+        and .value == ($brief | getpath($field | pointer_path)))
+    ' "$brief" >/dev/null; then
+      add_objective "Brief default records are internally consistent" true "fields=$actual_default_fields"
+    else
+      add_objective "Brief default records are internally consistent" false "fields=$actual_default_fields"
+    fi
   fi
 
   while IFS= read -r goal_regex; do

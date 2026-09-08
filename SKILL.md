@@ -99,7 +99,7 @@ mandatory; this rule removes duplicate consent, not the 3-way safety check.
 
 ### Completion and errors
 
-After a successful run, explain the outcome conversationally using the four categories in `references/post-init-explanation.md`: **generated**, **inferred**, **defaulted**, and **deferred**. Before replying, reconcile the approved human Brief, the exact executor input, and the resulting `PROJECT_BRIEF.json`; do not omit an approved default, report an unrecorded choice as applied, or claim that nothing is deferred when optional choices remain open. Highlight decisions the user may want to revisit and invite them to rerun guided init; do not dump JSON.
+After a successful run, explain the outcome conversationally using the four categories in `references/post-init-explanation.md`: **generated**, **inferred**, **defaulted**, and **deferred**. Before replying, reconcile the approved human Brief, the exact executor input, and the resulting `PROJECT_BRIEF.json`; do not omit an approved default, report an unrecorded choice as applied, or claim that nothing is deferred when optional choices remain open. Treat the completion response as incomplete until it tells the user how to refine any deferred decisions through guided init and closes with a natural next step or an invitation to correct revisitable inferred/defaulted choices. Do not dump JSON.
 
 Translate executor diagnostics into plain language while preserving the failed field or condition and the non-zero result. Do not hide partial state, silently retry, weaken a fail-closed check, or fall back to another mode.
 

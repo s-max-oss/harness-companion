@@ -121,6 +121,12 @@ Close with a natural next step, for example:
 > The setup is ready. If any inferred or defaulted choice looks wrong, tell me
 > what to change and I can rerun guided init safely.
 
+This closing step is required after every successful guided initialization.
+When decisions are deferred, explicitly say that the user can discuss those
+choices and rerun `/harness:init`; when nothing is deferred, still invite the
+user to correct any revisitable inference or default. A generated/inferred/
+defaulted/deferred summary without this route forward is incomplete.
+
 Do not continue asking questions merely to keep the conversation active.
 Resume dialog only for new authorization, an information conflict, a scope
 change, a real blocker, or completion of a major phase.

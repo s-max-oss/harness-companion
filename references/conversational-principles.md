@@ -77,6 +77,13 @@ Which is correct?
   4. Skip this for now
 ```
 
+Ask that resolution question exactly once in one user-visible response. If a
+progress update is useful while inspecting evidence, limit it to status (for
+example, "I am checking the repository markers"); do not include the conflict
+question or its choice menu there and then repeat it in the final response.
+After asking the question, wait for the user's answer instead of paraphrasing
+or asking it again in the same turn.
+
 Record the chosen resolution in `conflicts_resolved`. Normalize a choice of
 repository evidence, user input, or a third value established through
 clarification as `repo`, `user`, or `custom`, respectively, and always include

@@ -89,6 +89,14 @@ For explicit `/harness:init --update`, store the confirmed Brief in a stable tem
 2. Explain the proposed creates, updates, and preserved user modifications. Ask whether to apply that exact plan.
 3. Only after approval, run `bash <skill-root>/scripts/harness-init.sh <target> --brief <temp-json> --non-interactive --host=<claude|codex> --update --apply --plan-token <token>`. A stale or missing token means stop and regenerate the plan; never bypass the check.
 
+Do not add a redundant approval round for the plan token. If the Agent has just
+displayed the exact intended Brief change and preservation guarantees, and the
+user explicitly says to apply that exact safe update, run the dry run, verify
+that its creates/updates/preserved sets introduce nothing beyond the displayed
+plan, and immediately apply its token in the same turn. Ask again only when the
+dry run reveals a new file action, conflict, or scope change. The token remains
+mandatory; this rule removes duplicate consent, not the 3-way safety check.
+
 ### Completion and errors
 
 After a successful run, explain the outcome conversationally using the four categories in `references/post-init-explanation.md`: **generated**, **inferred**, **defaulted**, and **deferred**. Before replying, reconcile the approved human Brief, the exact executor input, and the resulting `PROJECT_BRIEF.json`; do not omit an approved default, report an unrecorded choice as applied, or claim that nothing is deferred when optional choices remain open. Highlight decisions the user may want to revisit and invite them to rerun guided init; do not dump JSON.

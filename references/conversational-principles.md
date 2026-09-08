@@ -167,6 +167,15 @@ warn afterward that the generated Brief was not confirmed. Legacy mode may use
 placeholders for compatibility. Resume and update modes require an exact
 no-write preview and approval before applying template changes.
 
+For a post-init update, do not turn the executor's plan token into a second
+consent ceremony. When the exact intended Brief change and preservation
+guarantees were just shown and the user explicitly says to apply that exact
+safe update, generate the no-write plan, compare its creates, updates, and
+preserved files with what was shown, and apply the returned token in the same
+turn if they match. Stop and present the new difference only if the dry run
+introduces an unshown file action, conflict, or scope change. Never skip the
+dry run or apply without its token.
+
 ## Preserve authority boundaries
 
 The Brief is advisory. Current-session instructions and host security policy

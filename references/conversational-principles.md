@@ -50,6 +50,14 @@ round focused on the subject the user is currently clarifying.
   optional choices explicitly deferred unless the user supplies them and the
   Brief schema can represent them losslessly.
 - Do not optimize optional fields the user did not ask about.
+- Product implementation mechanisms outside the Brief schema and executor are
+  optional, even when they relate directly to the goal. For example, an
+  authentication goal requires observable success criteria, but not a choice
+  among sessions, tokens, or API keys before Harness initialization. Likewise,
+  database, UI, storage, and deployment choices should be deferred unless the
+  user volunteers them or a concrete repository conflict makes one
+  execution-critical. After the user supplies sufficient success criteria,
+  do not re-ask an unanswered optional implementation question.
 
 Prefer language at the user's level. Translate Harness terms before using them:
 

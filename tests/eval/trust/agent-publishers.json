@@ -27,7 +27,8 @@
       "publisher_subject": "CN=\"OpenAI OpCo, LLC\", O=\"OpenAI OpCo, LLC\", L=San Francisco, S=California, C=US",
       "publisher_thumbprints": [
         "24659C19300FCA361D448709FA3780BD1CBDD133",
-        "6EBE77CE17C9B78603A4932CA0E6068DD58DABBB"
+        "6EBE77CE17C9B78603A4932CA0E6068DD58DABBB",
+        "B6A98DDC14F71C381CBD957F0F5B470A831F78DA"
       ],
       "compatible_runtime": {
         "shell_wrapper_argv_variants": [
@@ -79,6 +80,26 @@
             },
             "codex-windows-sandbox-setup.exe": {
               "sha256": "954045c272d0fdf475c2a04c014e50d1e1bce0fcda209ea0eb974fd064dbb736"
+            }
+          }
+        },
+        {
+          "cli_version": "codex-cli 0.153.4",
+          "sha256": "ccdc9eb9dd71fbcfb03ad42c4eca2b0d6ff6fbd32ebe9416550e6244561e559b",
+          "shell_wrapper_argv_variants": [
+            "powershell-command-v1",
+            "powershell-no-profile-command-v1",
+            "powershell-no-profile-command-double-quoted-v1"
+          ],
+          "components": {
+            "codex-code-mode-host.exe": {
+              "sha256": "11a2ca7db48ee292f177584768657e7488ce8ef1e851b065b2f4d5f37f89a71d"
+            },
+            "codex-command-runner.exe": {
+              "sha256": "326b35527130bfd66aeda214813e418943fad337eaf497372afa5822f7f62d54"
+            },
+            "codex-windows-sandbox-setup.exe": {
+              "sha256": "476502bbe566a87d328d1e0a91680ab2a6536372b2de69818e51c13580ab102e"
             }
           }
         }

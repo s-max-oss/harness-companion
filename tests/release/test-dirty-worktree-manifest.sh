@@ -1690,6 +1690,25 @@ check "T57f: successful batch updates the anchor exactly once" 1 "$T57_ANCHOR_CA
 unset -f _runtime_anchor_registry _t57_original_anchor_registry
 eval "$ANCHOR_ORIGINAL"
 
+T57_REGISTERED_SHA="$(_runtime_file_sha256 "$MF")"
+runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
+  < <(printf 'tests/eval/candidates/c1.json\0')
+check "T57g: exact batch re-registration remains idempotent" 0 "$?"
+check "T57h: exact batch re-registration preserves registry bytes" "$T57_REGISTERED_SHA" "$(_runtime_file_sha256 "$MF")"
+printf 'drift\n' >> "$D/tests/eval/candidates/c1.json"
+runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
+  < <(printf 'tests/eval/candidates/c1.json\0')
+check "T57i: existing batch path with byte drift fails closed" 1 "$?"
+check "T57j: drift rejection preserves registry bytes" "$T57_REGISTERED_SHA" "$(_runtime_file_sha256 "$MF")"
+runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
+  < <(printf 'tests/eval/candidates/c2.json\0tests/eval/candidates/c2.json\0')
+check "T57k: duplicate input path fails closed" 1 "$?"
+check "T57l: duplicate rejection preserves registry bytes" "$T57_REGISTERED_SHA" "$(_runtime_file_sha256 "$MF")"
+runtime_register_batch "$D" arbitrary_kind >/dev/null 2>&1 \
+  < <(printf 'tests/eval/candidates/c2.json\0')
+check "T57m: unsupported batch kind fails closed" 1 "$?"
+check "T57n: kind rejection preserves registry bytes" "$T57_REGISTERED_SHA" "$(_runtime_file_sha256 "$MF")"
+
 # If both the anchor update and rollback fail, the pre-publication bytes are
 # retained instead of silently deleting the only recovery material.
 D="$(mktemp -d "$TMPDIR/t57-recovery-XXXX")"
@@ -1711,9 +1730,9 @@ unset -f _runtime_anchor_registry _runtime_rollback_registry
 eval "$ANCHOR_ORIGINAL"
 eval "$ROLLBACK_ORIGINAL"
 T57_BACKUP="$(find "$D/.git" -maxdepth 1 -type f -name 'runtime-manifest-backup.*' -print -quit 2>/dev/null)"
-check "T57g: anchor plus rollback failure propagates" 1 "$T57_RECOVERY_RC"
-check "T57h: uncertain recovery retains one backup" 1 "$(find "$D/.git" -maxdepth 1 -type f -name 'runtime-manifest-backup.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
-check "T57i: retained backup is the exact pre-publication registry" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$T57_BACKUP")"
+check "T57o: anchor plus rollback failure propagates" 1 "$T57_RECOVERY_RC"
+check "T57p: uncertain recovery retains one backup" 1 "$(find "$D/.git" -maxdepth 1 -type f -name 'runtime-manifest-backup.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
+check "T57q: retained backup is the exact pre-publication registry" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$T57_BACKUP")"
 
 # Lock acquisition failure must not create a backup or mutate the registry.
 D="$(mktemp -d "$TMPDIR/t57-lock-XXXX")"
@@ -1731,9 +1750,9 @@ runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
 T57_LOCK_RC=$?
 unset -f _runtime_acquire
 eval "$ACQUIRE_ORIGINAL"
-check "T57j: batch lock acquisition failure propagates" 1 "$T57_LOCK_RC"
-check "T57k: lock failure preserves registry bytes" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$MF")"
-check "T57l: lock failure creates no recovery backup" 0 "$(find "$D/.git" -maxdepth 1 -type f -name 'runtime-manifest-backup.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
+check "T57r: batch lock acquisition failure propagates" 1 "$T57_LOCK_RC"
+check "T57s: lock failure preserves registry bytes" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$MF")"
+check "T57t: lock failure creates no recovery backup" 0 "$(find "$D/.git" -maxdepth 1 -type f -name 'runtime-manifest-backup.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
 
 echo ""
 echo "Dirty-Worktree-Manifest Results: $PASSED passed, $FAILED failed"

@@ -244,6 +244,14 @@ if bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex 
 else
   ok "shared production build verifier rejects a non-approved digest"
 fi
+same_version_count="$(jq -r --arg version 'codex-cli 0.153.4' '[.agents.codex.approved_builds[] | select(.cli_version == $version)] | length' "$EVAL/trust/agent-publishers.json")"
+if [ "$same_version_count" -ge 2 ]; then
+  while IFS= read -r approved_hot_digest; do
+    check "shared production build verifier accepts each exact hot build of one CLI version" bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex "codex-cli 0.153.4" "$approved_hot_digest"
+  done < <(jq -r --arg version 'codex-cli 0.153.4' '.agents.codex.approved_builds[] | select(.cli_version == $version) | .sha256' "$EVAL/trust/agent-publishers.json" | tr -d '\r')
+else
+  bad "trust policy records multiple exact hot builds of one CLI version"
+fi
 approved_component_name="$(jq -r '.agents.codex.approved_builds[0].components | keys[0]' "$EVAL/trust/agent-publishers.json")"
 approved_component_digest="$(jq -r --arg component "$approved_component_name" '.agents.codex.approved_builds[0].components[$component].sha256' "$EVAL/trust/agent-publishers.json")"
 check "shared production build verifier accepts an approved runtime component" bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex "$approved_version" "$approved_component_name" "$approved_component_digest"
@@ -400,6 +408,8 @@ for bypass in \
   "sed -n 'e touch unauthorized' /dev/null" \
   'find . -fprint0 output' \
   'sort -o output input' \
+  'sort /O output input' \
+  'sort --compress-program=evil input' \
   'rg --pre ./mutator pattern file' \
   "Get-Item victim | ForEach-Object -MemberName Delete"; do
   subject_command_pair bypass-1 "$bypass" > "$TMP/subject-semantic-bypass.jsonl"
@@ -409,6 +419,16 @@ subject_command_pair path-bash-1 "printf %s \$BRIEF | $eval_target/bash $eval_bo
 if python "$EVAL/validate-subject-events.py" "$TMP/subject-path-bash.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects path-selected boundary shell"; else ok "subject-event validator rejects path-selected boundary shell"; fi
 subject_command_pair assignment-1 "'$ps_wrapper' -NoProfile -Command '\$env:FLAG = \"changed\"; Get-Content package.json'" > "$TMP/subject-powershell-assignment.jsonl"
 if python "$EVAL/validate-subject-events.py" "$TMP/subject-powershell-assignment.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects PowerShell assignment side effects"; else ok "subject-event validator rejects PowerShell assignment side effects"; fi
+mkdir -p "$TMP/subject-module"
+printf 'Set-Content -LiteralPath marker -Value loaded\n' > "$TMP/subject-module/evil.psm1"
+subject_command_pair module-1 "'$ps_wrapper' -NoProfile -Command 'using module $TMP/subject-module/evil.psm1; Get-Content package.json'" > "$TMP/subject-powershell-module.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-powershell-module.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then
+  bad "subject-event validator rejects PowerShell using-module initialization"
+elif [ ! -e "$TMP/subject-module/marker" ]; then
+  ok "subject-event validator rejects PowerShell using-module before execution"
+else
+  bad "subject-event validator rejects PowerShell using-module before execution"
+fi
 jq -cn --arg command 'Set-Item env:FLAG changed' '{type:"item.started",item:{id:"started-only",type:"command_execution",command:$command}}' > "$TMP/subject-started-only.jsonl"
 if python "$EVAL/validate-subject-events.py" "$TMP/subject-started-only.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator audits and pairs item.started commands"; else ok "subject-event validator audits and pairs item.started commands"; fi
 subject_command_pair wrong-authority-1 "printf %s \$BRIEF | bash C:/arbitrary/scripts/harness-init-boundary.sh $eval_target --decision approve --brief-stdin --non-interactive --host=codex" > "$TMP/subject-wrong-authority.jsonl"
@@ -1157,6 +1177,43 @@ check "recovered production attestation remains signed and release-eligible" jq 
 check "recovered production attestation signature verifies" \
   bash -c 'ssh-keygen -Y verify -q -f "$1" -I harness-eval-release -n harness-eval -s "$2" < "$3"' \
   _ "$TMP/test-release-signers" "${recovery_attested%.json}.attestation.sig" "$recovery_attested"
+
+# A hard process death must be recoverable at every durable pre-publication
+# boundary. These use SIGKILL so the attester EXIT trap cannot hide a missing
+# lifecycle transition or stale-owner proof.
+for crash_boundary in candidate_lock result_lock stage_planned stage_created result_generated signed manifest_created; do
+  crash_candidates="$TMP/crash-$crash_boundary-candidates"
+  crash_results="$TMP/crash-$crash_boundary-results"
+  mkdir -p "$crash_candidates" "$crash_results"
+  for f in "$attest_base".*; do cp "$f" "$crash_candidates/"; done
+  crash_candidate="$crash_candidates/$(basename "$attest_candidate")"
+  if HARNESS_EVAL_TEST_CRASH_AFTER="$crash_boundary" \
+    bash "$EVAL/attest-result.sh" "$crash_candidate" \
+      --signing-key="$TMP/test-signing-key" --candidates-dir="$crash_candidates" \
+      --results-dir="$crash_results" --allowed-signers="$TMP/test-release-signers" \
+      > "$TMP/crash-$crash_boundary.log" 2>&1; then
+    bad "attester is forcibly interrupted after $crash_boundary"
+    continue
+  elif [ ! -d "$crash_candidates/.eval-agent.lock" ]; then
+    bad "attester retains identity-bound recovery state after $crash_boundary"
+    continue
+  else
+    ok "attester retains identity-bound recovery state after $crash_boundary"
+  fi
+  if bash "$EVAL/attest-result.sh" "$crash_candidate" \
+      --signing-key="$TMP/test-signing-key" --candidates-dir="$crash_candidates" \
+      --results-dir="$crash_results" --allowed-signers="$TMP/test-release-signers" \
+      > "$TMP/crash-$crash_boundary-retry.log" 2>&1 \
+    && [ -f "$crash_results/$(basename "$attest_candidate")" ] \
+    && [ ! -e "$crash_results/.eval-write.lock" ] \
+    && [ ! -e "$crash_candidates/.eval-agent.lock" ] \
+    && ! find "$crash_results" -mindepth 1 -maxdepth 1 -name '.attest.*' -print -quit | grep -q .; then
+    ok "attester safely retries after hard interruption at $crash_boundary"
+  else
+    sed "s/^/  crash-$crash_boundary-retry: /" "$TMP/crash-$crash_boundary-retry.log" >&2
+    bad "attester safely retries after hard interruption at $crash_boundary"
+  fi
+done
 
 if bash "$EVAL/attest-result.sh" "$attest_candidate" \
   --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/attest-candidates" \

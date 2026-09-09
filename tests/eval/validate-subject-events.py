@@ -50,7 +50,6 @@ READ_ONLY_NATIVE = {
     "pwd",
     "rg",
     "sha256sum",
-    "sort",
     "wc",
 }
 READ_ONLY_GIT = {"diff", "log", "ls-files", "ls-tree", "rev-parse", "show", "status"}
@@ -146,6 +145,12 @@ foreach ($source in $sources) {
       $node -is [System.Management.Automation.Language.UnaryExpressionAst] -and
         $node.TokenKind -in @('PlusPlus', 'MinusMinus', 'PostfixPlusPlus', 'PostfixMinusMinus')
     }, $true)).Count
+    non_pipeline_statements=@($ast.FindAll({
+      param($node)
+      $node -is [System.Management.Automation.Language.StatementAst] -and
+        $node -isnot [System.Management.Automation.Language.PipelineAst] -and
+        $node -isnot [System.Management.Automation.Language.CommandAst]
+    }, $true) | ForEach-Object { $_.GetType().Name })
     commands=$commands
   }
 }
@@ -226,11 +231,6 @@ def validate_native_args(name: str, args: list[str]) -> None:
         return
     if name == "jq" and any(arg in {"-i", "--in-place"} for arg in lowered):
         fail("jq command has an in-place action")
-    if name == "sort" and any(
-        arg == "-o" or arg.startswith("-o") or arg == "--output" or arg.startswith("--output=")
-        for arg in lowered
-    ):
-        fail("sort command requests file output")
     if name == "rg" and any(
         arg in {"--pre", "--hostname-bin"}
         or arg.startswith("--pre=")
@@ -431,6 +431,8 @@ def validate_powershell(
         )
     ):
         fail("PowerShell inspection contains an unprovable side-effect construct")
+    if analysis.get("non_pipeline_statements"):
+        fail("PowerShell inspection contains a non-pipeline statement")
     commands = analysis.get("commands")
     if not isinstance(commands, list) or not commands:
         fail("PowerShell inspection contains no statically identifiable command")

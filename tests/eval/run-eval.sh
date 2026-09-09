@@ -1230,9 +1230,9 @@ harness-init-boundary.sh executor; that executor is the only mutation boundary.
 Every inspection command must be statically provable as read-only. Use only
 PowerShell Get-ChildItem/Get-Command/Get-Content/Get-Date/Get-FileHash/Get-Item/
 Get-Location/Test-Path/Resolve-Path/Select-String plus the formatting, selection,
-JSON conversion, sorting, and pipeline cmdlets needed to display those reads
+JSON conversion and pipeline cmdlets needed to display those reads
 (ForEach-Object is not allowed); or bare rg, jq without in-place mode, sha256sum,
-cat, grep, head, sort, wc, ls, and pwd. For Git use rev-parse/ls-files/ls-tree,
+cat, grep, head, wc, ls, and pwd. For Git use rev-parse/ls-files/ls-tree,
 `git --no-optional-locks status`, or diff/log/show only with both --no-ext-diff
 and --no-textconv. A `bash -lc` inspection may contain exactly one of those bare
 read commands: no pipelines, separators, newlines, environment assignments,

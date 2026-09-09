@@ -958,10 +958,23 @@ runtime_register() {
 # An anchored registry must already exist. Normal producers should continue to
 # use runtime_register for first creation and one-at-a-time publication.
 runtime_register_batch() {
-  local project_dir="$1" kind="$2" rel f mf tmp backup="" rc=0 changed=0 release_rc=0 retain_backup=0
+  local project_dir="$1" kind="$2" rel seen f mf tmp backup="" rc=0 changed=0 release_rc=0 retain_backup=0
   local -a rels=()
+  case "$kind" in
+    eval_candidate|eval_result) ;;
+    *)
+      echo "runtime-manifest: unsupported batch artifact kind: $kind" >&2
+      return 1
+      ;;
+  esac
   while IFS= read -r -d '' rel; do
     [ -n "$rel" ] || continue
+    for seen in "${rels[@]}"; do
+      if [ "$seen" = "$rel" ]; then
+        echo "runtime-manifest: duplicate path in batch: $rel" >&2
+        return 1
+      fi
+    done
     rels+=("$rel")
   done
   [ "${#rels[@]}" -gt 0 ] || return 0
@@ -1002,9 +1015,6 @@ runtime_register_batch() {
 
   if [ "$rc" -eq 0 ]; then
     for rel in "${rels[@]}"; do
-      if jq -e -s --arg p "$rel" 'any(.[]; .path? == $p)' "$tmp" >/dev/null 2>&1; then
-        continue
-      fi
       f="$project_dir/$rel"
       local h sz
       if [ -L "$f" ] || [ ! -f "$f" ] || ! h="$(_runtime_file_sha256 "$f")"; then
@@ -1013,7 +1023,23 @@ runtime_register_batch() {
         break
       fi
       sz="$(wc -c < "$f" 2>/dev/null | tr -d ' \t\r')"
-      if [ -z "$sz" ] || ! jq -cn --arg p "$rel" --arg k "$kind" --arg h "$h" --argjson s "$sz" \
+      if [ -z "$sz" ]; then
+        echo "runtime-manifest: failed to measure batch entry for $rel" >&2
+        rc=1
+        break
+      fi
+      if jq -e -s --arg p "$rel" 'any(.[]; .path? == $p)' "$tmp" >/dev/null 2>&1; then
+        if ! jq -e -s --arg p "$rel" --arg k "$kind" --arg h "$h" --argjson s "$sz" '
+          ([.[] | select(.path? == $p)] | length) == 1
+          and any(.[]; .path? == $p and .kind == $k and .sha256 == $h and .size == $s)
+        ' "$tmp" >/dev/null 2>&1; then
+          echo "runtime-manifest: existing batch binding does not match current artifact: $rel" >&2
+          rc=1
+          break
+        fi
+        continue
+      fi
+      if ! jq -cn --arg p "$rel" --arg k "$kind" --arg h "$h" --argjson s "$sz" \
           '{path:$p, kind:$k, sha256:$h, size:$s}' >>"$tmp" 2>/dev/null; then
         echo "runtime-manifest: failed to build batch entry for $rel" >&2
         rc=1

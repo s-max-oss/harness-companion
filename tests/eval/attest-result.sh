@@ -56,19 +56,48 @@ register_result_bundle() {
     || die "failed to bind canonical result artifact bundle"
 }
 
+release_attestation_lock() {
+  local lock_path="$1" token="$2" rc=0
+  release_lock "$lock_path" "$token" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 8 ]
+}
+
+write_publication_lifecycle() {
+  local phase="$1" stage="${2:-}" staged="$publication_lock/.lifecycle.$publication_lock_token.tmp"
+  [ ! -e "$staged" ] && [ ! -L "$staged" ] || return 1
+  jq -cn --arg candidate "$candidate_host" --arg candidates "$candidates_host" \
+    --arg results "$results_host" --arg stage "$stage" --arg phase "$phase" \
+    --arg owner "$publication_lock_token" '
+      {schema_version:1,candidate_host:$candidate,candidates_host:$candidates,
+       results_host:$results,stage:(if $stage == "" then null else $stage end),
+       phase:$phase,owner_token:$owner}
+    ' > "$staged" 2>/dev/null || { rm -f -- "$staged"; return 1; }
+  mv "$staged" "$publication_lock/lifecycle.json" 2>/dev/null || {
+    rm -f -- "$staged"
+    return 1
+  }
+}
+
 recover_interrupted_result_publication() {
-  local manifest="$publication_lock/bundle.json" record recovered base_name stage stage_host promoted signature candidate_sha
+  local manifest="$publication_lock/bundle.json" lifecycle="$publication_lock/lifecycle.json"
+  local record recovered base_name stage="" lifecycle_stage="" stage_host promoted signature candidate_sha orphan
   local candidate_core result_core suffix key artifact
   local -a rels=()
-  if [ -e "$candidate_lock" ] || [ -L "$candidate_lock" ]; then
-    [ -d "$candidate_lock" ] && [ ! -L "$candidate_lock" ] || die "stale candidate lock is unsafe"
-  else
-    mkdir "$candidate_lock" || die "could not serialize result publication recovery"
-  fi
-  if [ -e "$publication_lock" ] || [ -L "$publication_lock" ]; then
-    [ -d "$publication_lock" ] && [ ! -L "$publication_lock" ] || die "stale result publication lock is unsafe"
-  else
-    mkdir "$publication_lock" || die "could not serialize result publication recovery"
+  if [ -e "$lifecycle" ] || [ -L "$lifecycle" ]; then
+    [ -f "$lifecycle" ] && [ ! -L "$lifecycle" ] || die "stale result publication lifecycle is unsafe"
+    jq -e --arg candidate "$candidate_host" --arg candidates "$candidates_host" --arg results "$results_host" '
+      keys == ["candidate_host","candidates_host","owner_token","phase","results_host","schema_version","stage"]
+      and .schema_version == 1 and .candidate_host == $candidate
+      and .candidates_host == $candidates and .results_host == $results
+      and (.owner_token | type == "string" and test("^[A-Za-z0-9]{32}$"))
+      and (.phase | IN("stage_planned","stage_created","result_generated","signed","manifest_created","publishing","registered"))
+      and (.stage == null or (.stage | type == "string" and length > 0))
+    ' "$lifecycle" >/dev/null || die "stale result publication lifecycle is invalid"
+    lifecycle_stage="$(jq -r '.stage // empty' "$lifecycle")"
+    if [ -n "$lifecycle_stage" ]; then
+      stage_host="$(host_path "$lifecycle_stage")"
+      case "$stage_host" in "$results_host"/.attest.*) ;; *) die "stale lifecycle stage is outside the result directory" ;; esac
+    fi
   fi
   base_name="${candidate_abs%.json}"
   base_name="$(basename "$base_name")"
@@ -83,12 +112,31 @@ recover_interrupted_result_publication() {
     stage="$(jq -r '.stage' <<< "$record")"
     stage_host="$(host_path "$stage")"
     case "$stage_host" in "$results_host"/.attest.*) ;; *) die "stale result publication stage is outside the result directory" ;; esac
+    [ -z "$lifecycle_stage" ] || [ "$stage_host" = "$(host_path "$lifecycle_stage")" ] \
+      || die "stale lifecycle and publication manifest disagree"
   elif [ -e "$manifest" ] || [ -L "$manifest" ]; then
     die "stale result publication manifest is unsafe"
   fi
   [ "$base_name.json" = "$(basename "$candidate_abs")" ] || die "stale result publication belongs to another candidate"
   promoted="$RESULTS_DIR/$base_name.json"
   signature="$RESULTS_DIR/$base_name.attestation.sig"
+  if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
+    while IFS= read -r -d '' orphan; do
+      [ -n "$lifecycle_stage" ] && [ "$(host_path "$orphan")" = "$(host_path "$lifecycle_stage")" ] \
+        || die "unbound result staging tree cannot be recovered safely"
+    done < <(find "$RESULTS_DIR" -mindepth 1 -maxdepth 1 -name '.attest.*' -print0)
+    if { [ ! -e "$promoted" ] && [ ! -L "$promoted" ]; } \
+       && { [ ! -e "$signature" ] && [ ! -L "$signature" ]; }; then
+      if [ -n "$lifecycle_stage" ] && { [ -e "$lifecycle_stage" ] || [ -L "$lifecycle_stage" ]; }; then
+        python "$PUBLICATION_BUNDLE" remove-tree "$lifecycle_stage" "$RESULTS_DIR" '.attest.' \
+          || die "could not retire interrupted pre-publication staging tree"
+      fi
+      rm -f -- "$lifecycle" || die "could not retire interrupted lifecycle"
+      return 0
+    fi
+    [ -f "$promoted" ] && [ ! -L "$promoted" ] && [ -f "$signature" ] && [ ! -L "$signature" ] \
+      || die "partially published result has no recovery manifest"
+  fi
   if [ -n "$stage" ]; then
     [ -f "$promoted" ] && [ ! -L "$promoted" ] || promoted="$stage/$base_name.json"
     [ -f "$signature" ] && [ ! -L "$signature" ] || signature="$stage/$base_name.attestation.sig"
@@ -145,8 +193,13 @@ EOF
     fi
     rm -f -- "$manifest" || die "could not retire result publication recovery manifest"
   fi
-  rmdir "$publication_lock" || die "could not release recovered result publication lock"
-  rmdir "$candidate_lock" || die "could not release recovered candidate lock"
+  rm -f -- "$lifecycle" || die "could not retire recovered result lifecycle"
+  release_attestation_lock "$publication_lock" "$publication_lock_token" \
+    || die "could not release recovered result publication lock"
+  publication_lock_owned=false
+  release_attestation_lock "$candidate_lock" "$candidate_lock_token" \
+    || die "could not release recovered candidate lock"
+  candidate_lock_owned=false
   echo "eval-attest: recovered_result=$RESULTS_DIR/$base_name.json"
   exit 0
 }
@@ -161,6 +214,19 @@ publication_test_stop() {
     || die "publication stop hook is test-only"
   echo "eval-attest: test publication stop after $boundary" >&2
   exit 99
+}
+
+publication_test_crash() {
+  local boundary="$1"
+  [ -n "${HARNESS_EVAL_TEST_CRASH_AFTER:-}" ] || return 0
+  [ "$HARNESS_EVAL_TEST_CRASH_AFTER" = "$boundary" ] || return 0
+  [ "$allowed_signers_host" != "$canonical_allowed_signers_host" ] \
+    && [ "$candidates_host" != "$canonical_candidates_host" ] \
+    && [ "$results_host" != "$canonical_results_host" ] \
+    || die "publication crash hook is test-only"
+  echo "eval-attest: test crash after $boundary" >&2
+  kill -KILL "${BASHPID:-$$}" 2>/dev/null || exit 137
+  exit 137
 }
 
 # Copy a candidate and every bound companion into private staging without
@@ -632,31 +698,66 @@ else
 fi
 candidate_lock="$CANDIDATES_DIR/.eval-agent.lock"
 publication_lock="$RESULTS_DIR/.eval-write.lock"
+recovery_needed=false
+for existing_lock in "$candidate_lock" "$publication_lock"; do
+  if [ -e "$existing_lock/.claim" ] || [ -L "$existing_lock/.claim" ] \
+     || [ -e "$existing_lock/.ready" ] || [ -L "$existing_lock/.ready" ] \
+     || [ -e "$existing_lock/lifecycle.json" ] || [ -L "$existing_lock/lifecycle.json" ] \
+     || [ -e "$existing_lock/bundle.json" ] || [ -L "$existing_lock/bundle.json" ]; then
+    recovery_needed=true
+  fi
+done
 [ ! -e "$CANDIDATES_DIR/.eval-write.lock" ] && [ ! -L "$CANDIDATES_DIR/.eval-write.lock" ] || die "candidate publication is incomplete"
 [ -f "$CANDIDATE" ] && [ ! -L "$CANDIDATE" ] || die "candidate missing or unsafe"
 candidate_abs="$(cd "$(dirname "$CANDIDATE")" && pwd -P)/$(basename "$CANDIDATE")"
 candidate_host="$(host_path "$candidate_abs")"
 case "$candidate_host" in "$candidates_host"/*.json) ;; *) die "candidate is outside the authoritative candidate directory" ;; esac
 case "$(basename "$candidate_abs")" in *.reviewer-output.json|*[!A-Za-z0-9._-]*) die "unsafe candidate name" ;; esac
-if [ -e "$publication_lock" ] || [ -L "$publication_lock" ] || [ -e "$candidate_lock" ] || [ -L "$candidate_lock" ]; then
-  recover_interrupted_result_publication
-fi
-if ! mkdir "$candidate_lock" 2>/dev/null; then
-  die "Agent evaluation is active or candidate lock is stale: $candidate_lock"
-fi
-candidate_lock_owned=true
+candidate_lock_owned=false
+publication_lock_owned=false
+candidate_lock_token=""
+publication_lock_token=""
 publication_started=false
 tmp=""
 cleanup() {
-  if [ "$publication_started" = false ] && [ -n "$tmp" ] && [ -d "$tmp" ]; then rm -rf -- "$tmp"; fi
-  if [ "$publication_started" = false ] && [ -d "$publication_lock" ]; then rmdir "$publication_lock" 2>/dev/null || true; fi
-  if [ "$publication_started" = false ] && [ "$candidate_lock_owned" = true ] && [ -d "$candidate_lock" ]; then rmdir "$candidate_lock" 2>/dev/null || true; fi
+  if [ "$publication_started" = false ]; then
+    if [ -n "$tmp" ] && { [ -e "$tmp" ] || [ -L "$tmp" ]; }; then
+      python "$PUBLICATION_BUNDLE" remove-tree "$tmp" "$RESULTS_DIR" '.attest.' >/dev/null 2>&1 || true
+    fi
+    if [ "$publication_lock_owned" = true ]; then
+      rm -f -- "$publication_lock/lifecycle.json" "$publication_lock"/.lifecycle.*.tmp 2>/dev/null || true
+      release_attestation_lock "$publication_lock" "$publication_lock_token" || true
+    fi
+    if [ "$candidate_lock_owned" = true ]; then
+      release_attestation_lock "$candidate_lock" "$candidate_lock_token" || true
+    fi
+  fi
 }
 trap cleanup EXIT
 
-if ! mkdir "$publication_lock" 2>/dev/null; then die "result publication lock exists: $publication_lock"; fi
+if ! acquire_lock "$candidate_lock" 12 >/dev/null; then
+  die "Agent evaluation is active or candidate lock could not be recovered safely: $candidate_lock"
+fi
+candidate_lock_token="$LOCK_REGISTRY_TOKEN"
+candidate_lock_owned=true
+publication_test_crash candidate_lock
+if ! acquire_lock "$publication_lock" 12 >/dev/null; then
+  die "result publication is active or its lock could not be recovered safely: $publication_lock"
+fi
+publication_lock_token="$LOCK_REGISTRY_TOKEN"
+publication_lock_owned=true
+publication_test_crash result_lock
+if [ "$recovery_needed" = true ]; then
+  recover_interrupted_result_publication
+fi
 
-tmp="$(mktemp -d "$RESULTS_DIR/.attest.XXXXXX")" || die "attestation staging failed"
+tmp="$RESULTS_DIR/.attest.$publication_lock_token"
+[ ! -e "$tmp" ] && [ ! -L "$tmp" ] || die "attestation staging path already exists"
+write_publication_lifecycle stage_planned "$tmp" || die "could not persist result publication lifecycle"
+publication_test_crash stage_planned
+mkdir "$tmp" || die "attestation staging failed"
+write_publication_lifecycle stage_created "$tmp" || die "could not advance result publication lifecycle"
+publication_test_crash stage_created
 base="${candidate_abs%.json}"
 base_name="$(basename "$base")"
 artifact_suffixes=(transcript.jsonl tree.sha256 subject-events.jsonl reviewer-events.jsonl turn-trees.jsonl evaluator-events.jsonl reviewer-output.json objective-checks.jsonl project-brief.json isolation.json)
@@ -901,12 +1002,15 @@ if [ "$production_trust" = true ]; then
   done
   runtime_agent="$(jq -r '.subject.name // empty' "$snapshot_candidate")"
   runtime_version="$(jq -r '.subject.cli_version // empty' "$snapshot_candidate")"
+  runtime_sha="$(jq -r '.subject.executable_sha256 // empty' "$snapshot_candidate")"
   subject_install_dir="$(dirname "$(jq -r '.subject.executable // empty' "$snapshot_candidate")")"
   reviewer_install_dir="$(dirname "$(jq -r '.reviewer.executable // empty' "$snapshot_candidate")")"
   [ "$(host_path "$subject_install_dir")" = "$(host_path "$reviewer_install_dir")" ] \
     || die "subject and Reviewer runtime directories differ"
-  approved_component_names="$(jq -c --arg agent "$runtime_agent" --arg version "$runtime_version" '
-    [.agents[$agent].approved_builds[]? | select(.cli_version == $version) | .components | keys] | if length == 1 then .[0] | sort else [] end
+  approved_component_names="$(jq -c --arg agent "$runtime_agent" --arg version "$runtime_version" --arg sha "$runtime_sha" '
+    [.agents[$agent].approved_builds[]? | select(
+      .cli_version == $version and (.sha256 | ascii_downcase) == ($sha | ascii_downcase)
+    ) | .components | keys] | if length == 1 then .[0] | sort else [] end
   ' "$AGENT_PUBLISHERS" | tr -d '\r\n')"
   candidate_component_names="$(jq -c '[.agent_runtime.components | keys] | if length == 1 then .[0] | sort else [] end' "$snapshot_candidate" | tr -d '\r\n')"
   [ "$approved_component_names" != '[]' ] && [ "$candidate_component_names" = "$approved_component_names" ] \
@@ -1013,10 +1117,14 @@ jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg fingerprint "$signer_fingerp
       attested_at:$now
     }
 ' "$snapshot_candidate" > "$promoted"
+write_publication_lifecycle result_generated "$tmp" || die "could not advance result publication lifecycle"
+publication_test_crash result_generated
 
 ssh-keygen -Y sign -q -f "$SIGNING_KEY" -n harness-eval "$promoted"
 mv "$promoted.sig" "$tmp/$base_name.attestation.sig"
 for suffix in "${artifact_suffixes[@]}"; do cp "$snapshot_base.$suffix" "$tmp/$base_name.$suffix"; done
+write_publication_lifecycle signed "$tmp" || die "could not advance result publication lifecycle"
+publication_test_crash signed
 
 # Test-only hook for proving that an input swap after validation cannot be
 # promoted. Production use cannot opt into this hook while publishing to the
@@ -1055,7 +1163,10 @@ result_suffixes=("${artifact_suffixes[@]}" attestation.sig json)
 python "$PUBLICATION_BUNDLE" create "$publication_lock/bundle.json" eval_result "$base_name" "$tmp" "$RESULTS_DIR" "${result_suffixes[@]}" \
   || die "could not persist result publication recovery manifest"
 publication_started=true
+write_publication_lifecycle manifest_created "$tmp" || die "could not advance result publication lifecycle"
+publication_test_crash manifest_created
 publication_test_stop ready
+write_publication_lifecycle publishing "$tmp" || die "could not advance result publication lifecycle"
 python "$PUBLISHER" "${publish_args[@]}" || die "result companion publication failed; lock retained"
 publication_test_stop companions
 python "$PUBLISHER" "$tmp/$base_name.attestation.sig" "$RESULTS_DIR/$base_name.attestation.sig" \
@@ -1064,15 +1175,17 @@ python "$PUBLISHER" "$promoted" "$RESULTS_DIR/$base_name.json" \
   || die "authoritative result publication failed; lock retained"
 publication_test_stop authoritative
 register_result_bundle "$base_name"
+write_publication_lifecycle registered "$tmp" || die "could not advance result publication lifecycle"
 publication_test_stop registered
 python "$PUBLICATION_BUNDLE" remove-tree "$tmp" "$RESULTS_DIR" '.attest.' \
   || die "could not retire result publication staging tree"
 tmp=""
 rm -f -- "$publication_lock/bundle.json" || die "could not retire result publication recovery manifest"
-rmdir "$publication_lock"
-publication_lock=""
+rm -f -- "$publication_lock/lifecycle.json" || die "could not retire result publication lifecycle"
+release_attestation_lock "$publication_lock" "$publication_lock_token" || die "result publication lock cleanup failed"
+publication_lock_owned=false
 publication_started=false
-rmdir "$candidate_lock" || die "candidate attestation lock cleanup failed"
+release_attestation_lock "$candidate_lock" "$candidate_lock_token" || die "candidate attestation lock cleanup failed"
 candidate_lock_owned=false
 
 echo "eval-attest: result=$RESULTS_DIR/$base_name.json"

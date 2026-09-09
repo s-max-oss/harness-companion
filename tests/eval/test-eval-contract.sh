@@ -354,22 +354,55 @@ check "canonical eval writers bind published evidence before releasing locks" ba
     && grep -Fq '\''runtime_register "$ROOT" "$rel" eval_result'\'' "$2" \
     && grep -Fq '\''register_result_bundle "$base_name"'\'' "$2"
 ' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh"
-printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"Get-Content -Raw package.json"}}' > "$TMP/subject-read.jsonl"
-check "subject-event validator permits read-only inspection" python "$EVAL/validate-subject-events.py" "$TMP/subject-read.jsonl"
-printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"brief=$(mktemp) && jq . input.json > $brief && rm $brief"}}' > "$TMP/subject-transient-write.jsonl"
-if python "$EVAL/validate-subject-events.py" "$TMP/subject-transient-write.jsonl" >/dev/null 2>&1; then bad "subject-event validator rejects transient direct writes"; else ok "subject-event validator rejects transient direct writes"; fi
-printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"printf %s $BRIEF | bash C:/authority/scripts/harness-init-boundary.sh C:/target --decision approve --brief-stdin"}}' > "$TMP/subject-boundary.jsonl"
-if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary.jsonl" >/dev/null 2>&1; then bad "subject-event validator rejects incomplete boundary invocation"; else ok "subject-event validator rejects incomplete boundary invocation"; fi
-printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"printf %s $BRIEF | bash C:/authority/scripts/harness-init-boundary.sh C:/target --decision approve --brief-stdin --non-interactive --host=codex"}}' > "$TMP/subject-boundary.jsonl"
-check "subject-event validator permits the exact approved boundary" python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary.jsonl"
-printf '%s\n' '{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"C:/target/transient.json","kind":"add"}],"status":"completed"}}' > "$TMP/subject-file-change.jsonl"
-if python "$EVAL/validate-subject-events.py" "$TMP/subject-file-change.jsonl" >/dev/null 2>&1; then bad "subject-event validator rejects direct file_change events"; else ok "subject-event validator rejects direct file_change events"; fi
-printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"touch C:/target/transient && printf %s $BRIEF | bash C:/authority/scripts/harness-init-boundary.sh C:/target --decision approve --brief-stdin --non-interactive --host=codex"}}' > "$TMP/subject-compound-boundary.jsonl"
-if python "$EVAL/validate-subject-events.py" "$TMP/subject-compound-boundary.jsonl" >/dev/null 2>&1; then bad "subject-event validator rejects compound boundary commands"; else ok "subject-event validator rejects compound boundary commands"; fi
-printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"touch C:/target/transient; echo C:/authority/scripts/harness-init-boundary.sh --decision approve"}}' > "$TMP/subject-boundary-substring.jsonl"
-if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-substring.jsonl" >/dev/null 2>&1; then bad "subject-event validator rejects boundary substrings"; else ok "subject-event validator rejects boundary substrings"; fi
-printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"bash C:/authority/scripts/harness-init.sh C:/target --brief C:/tmp/brief.json --apply"}}' > "$TMP/subject-direct-executor.jsonl"
-if python "$EVAL/validate-subject-events.py" "$TMP/subject-direct-executor.jsonl" >/dev/null 2>&1; then bad "subject-event validator rejects direct executor invocation"; else ok "subject-event validator rejects direct executor invocation"; fi
+check "real eval tells the subject the provable read-only command allowlist" bash -c '
+  grep -Fq "Every inspection command must be statically provable as read-only" "$1" \
+    && grep -Fq "Do not use command" "$1" \
+    && grep -Fq "outside that allowlist" "$1"
+' _ "$EVAL/run-eval.sh"
+eval_run_hash="$(printf 'a%.0s' {1..64})"
+eval_run_root="C:/Users/Public/harness-companion-eval/runs/run.$eval_run_hash"
+eval_boundary="$eval_run_root/skill-authority/scripts/harness-init-boundary.sh"
+eval_target="$eval_run_root/project"
+ps_wrapper='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+jq -n --arg target_file "$eval_target/.harness-eval-isolation-sentinel" \
+  --arg wrapper "$ps_wrapper" \
+  '{probe:{payload:{target_file:$target_file},shell_wrapper_path:$wrapper}}' > "$TMP/subject-isolation.json"
+subject_command_pair() {
+  local id="$1" command="$2"
+  jq -cn --arg id "$id" --arg command "$command" \
+    '{type:"item.started",item:{id:$id,type:"command_execution",command:$command}},
+     {type:"item.completed",item:{id:$id,type:"command_execution",command:$command,status:"completed",exit_code:0}}'
+}
+subject_command_pair read-1 'Get-Content -Raw package.json' > "$TMP/subject-read.jsonl"
+check "subject-event validator permits read-only inspection" python "$EVAL/validate-subject-events.py" "$TMP/subject-read.jsonl" "$TMP/subject-isolation.json"
+subject_command_pair write-1 'brief=$(mktemp) && jq . input.json > $brief && rm $brief' > "$TMP/subject-transient-write.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-transient-write.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects transient direct writes"; else ok "subject-event validator rejects transient direct writes"; fi
+subject_command_pair boundary-1 "printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin" > "$TMP/subject-boundary.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects incomplete boundary invocation"; else ok "subject-event validator rejects incomplete boundary invocation"; fi
+subject_command_pair boundary-2 "printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin --non-interactive --host=codex" > "$TMP/subject-boundary.jsonl"
+check "subject-event validator permits the exact approved boundary" python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary.jsonl" "$TMP/subject-isolation.json"
+printf '%s\n' '{"type":"item.completed","item":{"id":"file-1","type":"file_change","changes":[{"path":"C:/target/transient.json","kind":"add"}],"status":"completed"}}' > "$TMP/subject-file-change.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-file-change.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects direct file_change events"; else ok "subject-event validator rejects direct file_change events"; fi
+subject_command_pair compound-1 "touch C:/target/transient && printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin --non-interactive --host=codex" > "$TMP/subject-compound-boundary.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-compound-boundary.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects compound boundary commands"; else ok "subject-event validator rejects compound boundary commands"; fi
+subject_command_pair substring-1 "touch C:/target/transient; echo $eval_boundary --decision approve" > "$TMP/subject-boundary-substring.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-substring.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects boundary substrings"; else ok "subject-event validator rejects boundary substrings"; fi
+subject_command_pair direct-1 "bash $eval_run_root/skill-authority/scripts/harness-init.sh $eval_target --brief C:/tmp/brief.json --apply" > "$TMP/subject-direct-executor.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-direct-executor.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects direct executor invocation"; else ok "subject-event validator rejects direct executor invocation"; fi
+for mutator in 'git apply patch.diff' 'git diff --output=leak.patch' 'Set-Item env:FLAG changed' 'patch -p1 input.patch' 'dd if=input of=output' 'sed --in-place=.bak s/x/y/ input'; do
+  subject_command_pair mutator-1 "$mutator" > "$TMP/subject-allowlist-negative.jsonl"
+  if python "$EVAL/validate-subject-events.py" "$TMP/subject-allowlist-negative.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects non-allowlisted mutator: $mutator"; else ok "subject-event validator rejects non-allowlisted mutator: $mutator"; fi
+done
+subject_command_pair assignment-1 "'$ps_wrapper' -NoProfile -Command '\$env:FLAG = \"changed\"; Get-Content package.json'" > "$TMP/subject-powershell-assignment.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-powershell-assignment.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects PowerShell assignment side effects"; else ok "subject-event validator rejects PowerShell assignment side effects"; fi
+jq -cn --arg command 'Set-Item env:FLAG changed' '{type:"item.started",item:{id:"started-only",type:"command_execution",command:$command}}' > "$TMP/subject-started-only.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-started-only.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator audits and pairs item.started commands"; else ok "subject-event validator audits and pairs item.started commands"; fi
+subject_command_pair wrong-authority-1 "printf %s \$BRIEF | bash C:/arbitrary/scripts/harness-init-boundary.sh $eval_target --decision approve --brief-stdin --non-interactive --host=codex" > "$TMP/subject-wrong-authority.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-wrong-authority.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator binds the isolated authority path"; else ok "subject-event validator binds the isolated authority path"; fi
+subject_command_pair reordered-1 "printf %s \$BRIEF | bash $eval_boundary $eval_target --brief-stdin --decision approve --non-interactive --host=codex" > "$TMP/subject-reordered-boundary.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-reordered-boundary.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects reordered boundary arguments"; else ok "subject-event validator rejects reordered boundary arguments"; fi
+subject_command_pair extra-1 "printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin --non-interactive --host=codex --force-config" > "$TMP/subject-extra-boundary.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-extra-boundary.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects extra boundary arguments"; else ok "subject-event validator rejects extra boundary arguments"; fi
 check "ACL state captures and restores DACL only without SeSecurityPrivilege" bash -c 'grep -Fq "AccessControlSections]::Access" "$1" && ! grep -Fq "AccessControlSections]::All" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
 check "ACL recovery skips only an explicit ItemNotFoundException" grep -Fq 'catch [System.Management.Automation.ItemNotFoundException]' "$EVAL/windows-isolation-acl.ps1"
 check "ACL recovery binds a stable Windows file identity" bash -c 'grep -Fq "GetFileInformationByHandle" "$1" && grep -Fq "expectedIdentity" "$1"' _ "$EVAL/windows-isolation-acl.ps1"

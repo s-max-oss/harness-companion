@@ -1,41 +1,131 @@
 #!/usr/bin/env python3
-"""Reject Agent shell commands that mutate outside the trusted init boundary."""
+"""Prove that subject commands are read-only or use the exact init boundary."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
+import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
-MUTATORS = re.compile(
-    r"(?ix)(?:"
-    r"\b(?:set-content|add-content|out-file|new-item|remove-item|move-item|copy-item|"
-    r"rename-item|clear-content|new-temporaryfile|set-acl|touch|mkdir|mktemp|rmdir|del|erase)\b|"
-    r"\[\s*(?:system\.)?io\.(?:file|directory)\s*\]\s*::\s*(?!readalltext\b|readalllines\b|exists\b)|"
-    r"\b(?:rm|mv|cp|install|tee|python|python3|node|perl|ruby|curl|wget)\b|"
-    r"\bgit\s+(?:add|commit|push|merge|checkout|switch|reset|clean|restore|tag)\b"
-    r")"
+RUN_ROOT = re.compile(
+    r"(?i)^c:/users/public/harness-companion-eval/runs/run\.[0-9a-f]{64}$"
 )
-BOUNDARY = re.compile(r"(?i)(?:^|[\\/])harness-init-boundary\.sh\b")
-BOUNDARY_INVOKE = re.compile(
-    r"(?i)\bbash(?:\.exe)?\s+['\"]?\S*(?:^|[\\/])harness-init-boundary\.sh\b"
-)
-APPROVE = re.compile(r"(?i)--decision(?:=|\s+)approve\b")
-DIRECT_EXECUTOR = re.compile(r"(?i)(?:^|[\\/])harness-init\.sh\b")
-POWERSHELL_LAUNCH = re.compile(
-    r"(?is)^\s*\"?[^\"\r\n]*powershell(?:\.exe)?\"?\s+-NoProfile\s+-Command\s+['\"]*"
-)
-SAFE_VARIABLE = re.compile(r"^\$[A-Za-z_][A-Za-z0-9_]*$")
-SAFE_PRINTF = re.compile(
-    r"(?is)^printf\s+%s\s+\$[A-Za-z_][A-Za-z0-9_]*$"
-)
+BOUNDARY_TEXT = re.compile(r"(?i)(?:^|[\\/])harness-init-boundary\.sh\b")
 MUTATING_ITEM_TYPES = {"file_change"}
-# File redirection is a write even when the resulting file is removed before
-# the next tree snapshot.  Exclude descriptor-to-descriptor forms such as
-# ``2>&1``, which do not create or replace a filesystem object.
-FILE_REDIRECT = re.compile(r">{1,2}(?!&)\s*")
+READ_ONLY_POWERSHELL = {
+    "compare-object",
+    "convertfrom-json",
+    "convertto-json",
+    "foreach-object",
+    "format-list",
+    "format-table",
+    "get-childitem",
+    "get-command",
+    "get-content",
+    "get-date",
+    "get-filehash",
+    "get-item",
+    "get-location",
+    "join-path",
+    "out-null",
+    "out-string",
+    "resolve-path",
+    "select-object",
+    "select-string",
+    "sort-object",
+    "test-path",
+    "where-object",
+    "write-output",
+}
+READ_ONLY_NATIVE = {
+    "cat",
+    "grep",
+    "head",
+    "jq",
+    "ls",
+    "pwd",
+    "rg",
+    "sed",
+    "sha256sum",
+    "sort",
+    "wc",
+}
+READ_ONLY_GIT = {"diff", "log", "ls-files", "ls-tree", "rev-parse", "show", "status"}
+GIT_SIDE_EFFECT_FLAGS = {
+    "--ext-diff",
+    "--textconv",
+    "--output",
+    "-o",
+}
+
+
+POWERSHELL_ANALYZER = r"""
+$ErrorActionPreference = 'Stop'
+$sources = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$results = @()
+foreach ($source in $sources) {
+  $tokens = $null
+  $errors = $null
+  $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+    [string]$source, [ref]$tokens, [ref]$errors
+  )
+  $commands = @()
+  foreach ($command in $ast.FindAll({
+      param($node) $node -is [System.Management.Automation.Language.CommandAst]
+    }, $true)) {
+    $elements = @()
+    foreach ($element in $command.CommandElements) {
+      if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+        $elements += [pscustomobject]@{text=[string]$element.Value; static=$true}
+      } else {
+        $elements += [pscustomobject]@{text=[string]$element.Extent.Text; static=$false}
+      }
+    }
+    $hasPipelineInput = $false
+    if ($command.Parent -is [System.Management.Automation.Language.PipelineAst]) {
+      $pipeline = $command.Parent
+      for ($index = 1; $index -lt $pipeline.PipelineElements.Count; $index++) {
+        if ([object]::ReferenceEquals($pipeline.PipelineElements[$index], $command)) {
+          $hasPipelineInput = $true
+        }
+      }
+    }
+    $commands += [pscustomobject]@{
+      name=[string]$command.GetCommandName()
+      invocation=[string]$command.InvocationOperator
+      elements=$elements
+      has_pipeline_input=$hasPipelineInput
+    }
+  }
+  $results += [pscustomobject]@{
+    parse_errors=@($errors | ForEach-Object { [string]$_.Message })
+    redirections=@($ast.FindAll({
+      param($node) $node -is [System.Management.Automation.Language.RedirectionAst]
+    }, $true)).Count
+    method_invocations=@($ast.FindAll({
+      param($node) $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst]
+    }, $true)).Count
+    function_definitions=@($ast.FindAll({
+      param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+    }, $true)).Count
+    assignments=@($ast.FindAll({
+      param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst]
+    }, $true)).Count
+    mutating_unary=@($ast.FindAll({
+      param($node)
+      $node -is [System.Management.Automation.Language.UnaryExpressionAst] -and
+        $node.TokenKind -in @('PlusPlus', 'MinusMinus', 'PostfixPlusPlus', 'PostfixMinusMinus')
+    }, $true)).Count
+    commands=$commands
+  }
+}
+$results | ConvertTo-Json -Depth 8 -Compress
+"""
 
 
 def fail(message: str) -> None:
@@ -43,131 +133,331 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-def _clean_shell_quotes(value: str) -> str:
-    """Remove quote-only transport noise from a simple command fragment."""
+def normalize_windows_path(value: str) -> str:
+    normalized = value.strip().strip("'\"").replace("\\", "/")
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+    if re.match(r"^/[A-Za-z]/", normalized):
+        normalized = normalized[1] + ":" + normalized[2:]
+    return normalized.rstrip("/").casefold()
 
-    return value.replace("'", "").replace('"', "").strip()
+
+def basename(value: str) -> str:
+    return PureWindowsPath(value.replace("/", "\\")).name.casefold()
 
 
-def _boundary_pipeline_is_exact(fragment: str, variable: str | None = None) -> bool:
-    """Accept one data-only producer piped to one approved init boundary."""
+def require_trusted_native_name(value: str, name: str) -> None:
+    """Reject path-selected binaries; bare names resolve only in the sanitized PATH."""
 
-    if fragment.count("|") != 1 or any(token in fragment for token in (";", "&&", "||", "\n", "\r")):
-        return False
-    producer_raw, invocation_raw = (part.strip() for part in fragment.split("|", 1))
-    producer = _clean_shell_quotes(producer_raw)
-    invocation = _clean_shell_quotes(invocation_raw)
-    if variable is not None:
-        if producer != f"${variable}":
-            return False
-    elif not (SAFE_VARIABLE.fullmatch(producer) or SAFE_PRINTF.fullmatch(producer)):
-        json_start = producer_raw.find("{")
-        json_end = producer_raw.rfind("}")
-        if json_start < 0 or json_end <= json_start:
-            return False
-        if _clean_shell_quotes(producer_raw[:json_start]) != "printf %s":
-            return False
-        if _clean_shell_quotes(producer_raw[json_end + 1 :]):
-            return False
-        try:
-            brief = json.loads(producer_raw[json_start : json_end + 1].replace(r'\"', '"'))
-        except json.JSONDecodeError:
-            return False
-        if not isinstance(brief, dict):
-            return False
+    if "/" not in value and "\\" not in value:
+        return
+    normalized = normalize_windows_path(value)
+    if name in {"bash", "bash.exe"} and normalized == "c:/program files/git/bin/bash.exe":
+        return
+    fail("absolute native command is outside the trusted runtime")
 
-    tokens = invocation.split()
-    if len(tokens) < 7 or tokens[0].lower() not in {"bash", "bash.exe"}:
-        return False
-    if not re.search(r"(?i)(?:^|[\\/])harness-init-boundary\.sh$", tokens[1]):
-        return False
-    if tokens[2].startswith("-"):
-        return False
+
+def validate_git_args(args: list[str]) -> None:
+    if not args or args[0].casefold() not in READ_ONLY_GIT:
+        fail("git command is not in the read-only allowlist")
+    lowered = [arg.casefold() for arg in args[1:]]
+    if any(
+        arg in GIT_SIDE_EFFECT_FLAGS
+        or arg.startswith("--output=")
+        or arg.startswith("--ext-diff=")
+        or arg.startswith("--textconv=")
+        for arg in lowered
+    ):
+        fail("git read command requests output mutation or external execution")
+
+
+def load_authority(isolation_path: Path) -> dict[str, str]:
+    if not isolation_path.is_file() or isolation_path.is_symlink():
+        fail("isolation evidence is missing or unsafe")
     try:
-        decision_index = tokens.index("--decision")
-    except ValueError:
-        decision_index = -1
-    decision_ok = (
-        decision_index >= 0
-        and decision_index + 1 < len(tokens)
-        and tokens[decision_index + 1].lower() == "approve"
-    ) or any(token.lower() == "--decision=approve" for token in tokens)
+        evidence = json.loads(isolation_path.read_text(encoding="utf-8"))
+        target_file = evidence["probe"]["payload"]["target_file"]
+        wrapper = evidence["probe"]["shell_wrapper_path"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        fail(f"isolation evidence cannot bind command authority: {exc}")
+    if not isinstance(target_file, str) or not isinstance(wrapper, str):
+        fail("isolation command authority fields are invalid")
+    target_norm = normalize_windows_path(target_file)
+    sentinel = "/project/.harness-eval-isolation-sentinel"
+    if not target_norm.endswith(sentinel):
+        fail("isolation target sentinel is not authoritative")
+    run_root = target_norm[: -len(sentinel)]
+    if not RUN_ROOT.fullmatch(run_root):
+        fail("isolation run root is not canonical")
+    wrapper_norm = normalize_windows_path(wrapper)
+    if wrapper_norm != "c:/windows/system32/windowspowershell/v1.0/powershell.exe":
+        fail("isolation shell wrapper is not the trusted Windows PowerShell")
+    return {
+        "run_root": run_root,
+        "target": f"{run_root}/project",
+        "boundary": f"{run_root}/skill-authority/scripts/harness-init-boundary.sh",
+        "wrapper": wrapper_norm,
+    }
+
+
+def powershell_executable() -> str:
+    root = os.environ.get("SystemRoot", r"C:\Windows")
+    return str(Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+
+
+def analyze_powershell(sources: list[str]) -> list[dict[str, object]]:
+    if not sources:
+        return []
+    try:
+        completed = subprocess.run(
+            [
+                powershell_executable(),
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                POWERSHELL_ANALYZER,
+            ],
+            input=json.dumps(sources, separators=(",", ":")),
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        fail(f"trusted PowerShell parser unavailable: {exc}")
+    if completed.returncode != 0:
+        fail("trusted PowerShell parser failed")
+    try:
+        parsed = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        fail("trusted PowerShell parser returned invalid output")
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list) or len(parsed) != len(sources):
+        fail("trusted PowerShell parser returned an incomplete analysis")
+    return parsed
+
+
+def decode_command(command: str, authority: dict[str, str]) -> tuple[str, str]:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError as exc:
+        fail(f"command transport is malformed: {exc}")
+    if (
+        len(tokens) == 4
+        and tokens[1].casefold() == "-noprofile"
+        and tokens[2].casefold() == "-command"
+    ):
+        if normalize_windows_path(tokens[0]) != authority["wrapper"]:
+            fail("command used an untrusted PowerShell wrapper")
+        return "powershell", tokens[3]
+    return "shell", command
+
+
+def exact_boundary_elements(
+    elements: list[dict[str, object]], authority: dict[str, str], has_input: bool
+) -> bool:
+    if len(elements) != 8 or not has_input:
+        return False
+    values = [str(element.get("text", "")) for element in elements]
+    if not all(bool(element.get("static")) for element in elements[1:]):
+        return False
     return (
-        decision_ok
-        and "--brief-stdin" in tokens
-        and "--non-interactive" in tokens
-        and any(token.lower() in {"--host=claude", "--host=codex"} for token in tokens)
-        and not FILE_REDIRECT.search(invocation)
-        and not DIRECT_EXECUTOR.search(invocation)
-        and len(BOUNDARY.findall(invocation)) == 1
+        basename(values[0]) in {"bash", "bash.exe"}
+        and normalize_windows_path(values[1]) == authority["boundary"]
+        and normalize_windows_path(values[2]) == authority["target"]
+        and values[3:7] == ["--decision", "approve", "--brief-stdin", "--non-interactive"]
+        and values[7].casefold() in {"--host=claude", "--host=codex"}
     )
 
 
-def approved_boundary_command(command: str) -> bool:
-    """Recognize only the documented stdin-to-boundary command shapes."""
-
-    if len(BOUNDARY.findall(command)) != 1 or len(APPROVE.findall(command)) != 1:
-        return False
-    if FILE_REDIRECT.search(command) or DIRECT_EXECUTOR.search(command):
-        return False
-
-    # Direct POSIX form from SKILL.md: printf %s "$BRIEF" | bash ...
-    if _boundary_pipeline_is_exact(command):
-        return True
-
-    # A Windows Codex command may wrap that same exact pipeline in PowerShell.
-    powershell = POWERSHELL_LAUNCH.match(command)
-    if powershell and _boundary_pipeline_is_exact(command[powershell.end() :]):
-        return True
-
-    # Codex on Windows wraps the same pipeline in PowerShell and assigns the
-    # complete Brief JSON to one local scalar first.  Parse that scalar as JSON
-    # so the assignment cannot hide command substitution or another statement.
-    assignment = re.search(r"\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*", command)
-    boundary_match = BOUNDARY.search(command)
-    if not assignment or not boundary_match or assignment.start() >= boundary_match.start():
-        return False
-    if not POWERSHELL_LAUNCH.fullmatch(command[: assignment.start()]):
-        return False
-    separator = command.rfind(";", assignment.end(), boundary_match.start())
-    if separator < 0:
-        return False
-    assigned = command[assignment.end() : separator]
-    json_start = assigned.find("{")
-    json_end = assigned.rfind("}")
-    if json_start < 0 or json_end <= json_start:
-        return False
-    if _clean_shell_quotes(assigned[:json_start]) or _clean_shell_quotes(assigned[json_end + 1 :]):
-        return False
+def validate_shell_script(source: str) -> None:
+    if any(marker in source for marker in ("$(", "`", ">", "<", "\x00")):
+        fail("shell inspection uses substitution or redirection")
+    lexer = shlex.shlex(source, posix=True, punctuation_chars="|;&")
+    lexer.whitespace_split = True
     try:
-        brief = json.loads(assigned[json_start : json_end + 1].replace(r'\"', '"'))
-    except json.JSONDecodeError:
+        tokens = list(lexer)
+    except ValueError as exc:
+        fail(f"shell inspection is malformed: {exc}")
+    segments: list[list[str]] = []
+    segment: list[str] = []
+    for token in tokens:
+        if token in {"|", ";", "&&", "||", "&"}:
+            if token == "&":
+                fail("background shell execution is not read-only evidence")
+            if segment:
+                segments.append(segment)
+                segment = []
+        else:
+            segment.append(token)
+    if segment:
+        segments.append(segment)
+    if not segments:
+        fail("empty shell inspection")
+    for words in segments:
+        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=[^\s]*", words[0]):
+            words = words[1:]
+        if not words:
+            continue
+        name = basename(words[0])
+        args = words[1:]
+        if name == "set" and args == ["-euo", "pipefail"]:
+            continue
+        if name == "cd" and len(args) == 1:
+            continue
+        if name == "command" and len(args) == 2 and args[0] == "-v":
+            continue
+        if name == "git":
+            validate_git_args(args)
+            continue
+        if name == "find":
+            forbidden = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"}
+            if any(arg.casefold() in forbidden for arg in args):
+                fail("find command has a mutating action")
+            continue
+        if name == "sed":
+            if any(
+                arg == "-i"
+                or arg.startswith("-i")
+                or arg == "--in-place"
+                or arg.startswith("--in-place=")
+                for arg in args
+            ):
+                fail("sed command has an in-place action")
+            continue
+        if name == "jq":
+            if any(arg in {"-i", "--in-place"} for arg in args):
+                fail("jq command has an in-place action")
+            continue
+        if name not in READ_ONLY_NATIVE and name not in READ_ONLY_POWERSHELL:
+            fail(f"shell command is not in the read-only allowlist: {name or '<dynamic>'}")
+
+
+def validate_native(
+    command: dict[str, object], authority: dict[str, str]
+) -> tuple[bool, bool]:
+    name_value = str(command.get("name", ""))
+    name = basename(name_value)
+    elements = command.get("elements")
+    if not isinstance(elements, list) or not elements:
+        fail("PowerShell command has invalid elements")
+    if str(command.get("invocation", "")) not in {"Unknown", ""}:
+        fail("PowerShell call or dot invocation is not permitted")
+    if exact_boundary_elements(elements, authority, bool(command.get("has_pipeline_input"))):
+        require_trusted_native_name(name_value, name)
+        return True, True
+    if name in {"bash", "bash.exe"}:
+        require_trusted_native_name(name_value, name)
+        values = [str(element.get("text", "")) for element in elements]
+        if len(values) == 2 and values[1] == "--version":
+            return True, False
+        if len(values) >= 3 and values[1] == "-lc" and bool(elements[2].get("static")):
+            validate_shell_script(values[2])
+            return True, False
+        fail("bash command is not an exact read-only inspection or init boundary")
+    values = [str(element.get("text", "")) for element in elements]
+    args = values[1:]
+    if name == "git":
+        require_trusted_native_name(name_value, name)
+        validate_git_args(args)
+        return True, False
+    if name in {"find", "sed"}:
+        require_trusted_native_name(name_value, name)
+        validate_shell_script(" ".join(shlex.quote(value) for value in values))
+        return True, False
+    if name == "jq":
+        require_trusted_native_name(name_value, name)
+        if any(arg in {"-i", "--in-place"} for arg in args):
+            fail("jq command has an in-place action")
+        return True, False
+    if name in READ_ONLY_NATIVE or name in READ_ONLY_POWERSHELL:
+        if name in READ_ONLY_NATIVE:
+            require_trusted_native_name(name_value, name)
+        return True, False
+    fail(f"PowerShell command is not in the read-only allowlist: {name or '<dynamic>'}")
+
+
+def validate_powershell(
+    analysis: dict[str, object], source: str, authority: dict[str, str]
+) -> None:
+    if analysis.get("parse_errors"):
+        fail("PowerShell inspection does not parse exactly")
+    if any(
+        int(analysis.get(field, 0))
+        for field in (
+            "redirections",
+            "method_invocations",
+            "function_definitions",
+            "assignments",
+            "mutating_unary",
+        )
+    ):
+        fail("PowerShell inspection contains an unprovable side-effect construct")
+    commands = analysis.get("commands")
+    if not isinstance(commands, list) or not commands:
+        fail("PowerShell inspection contains no statically identifiable command")
+    boundaries = 0
+    for command in commands:
+        if not isinstance(command, dict):
+            fail("PowerShell command analysis is invalid")
+        _, boundary = validate_native(command, authority)
+        boundaries += int(boundary)
+    references = len(BOUNDARY_TEXT.findall(source))
+    if references != boundaries:
+        fail("init boundary reference is absent, duplicated, or not the authoritative invocation")
+    if boundaries > 1:
+        fail("more than one init boundary invocation appears in one command")
+
+
+def exact_direct_boundary(command: str, authority: dict[str, str]) -> bool:
+    if command.count("|") != 1 or any(token in command for token in (";", "&&", "||", "\n", "\r", ">", "<")):
         return False
-    if not isinstance(brief, dict):
+    producer_raw, invocation_raw = (part.strip() for part in command.split("|", 1))
+    try:
+        producer = shlex.split(producer_raw, posix=True)
+        invocation = shlex.split(invocation_raw, posix=True)
+    except ValueError:
         return False
-    without_brief = command[assignment.end() : json_start] + command[json_end + 1 : separator]
-    if ";" in without_brief or "$(" in without_brief or "`" in without_brief:
-        return False
-    return _boundary_pipeline_is_exact(command[separator + 1 :], assignment.group(1))
+    return (
+        producer == ["printf", "%s", "$BRIEF"]
+        and len(invocation) == 8
+        and basename(invocation[0]) in {"bash", "bash.exe"}
+        and normalize_windows_path(invocation[1]) == authority["boundary"]
+        and normalize_windows_path(invocation[2]) == authority["target"]
+        and invocation[3:7] == ["--decision", "approve", "--brief-stdin", "--non-interactive"]
+        and invocation[7].casefold() in {"--host=claude", "--host=codex"}
+    )
+
+
+def validate_direct_shell(command: str, authority: dict[str, str]) -> None:
+    if exact_direct_boundary(command, authority):
+        return
+    if BOUNDARY_TEXT.search(command):
+        fail("direct shell command is not the exact authoritative init boundary")
+    validate_shell_script(command)
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: validate-subject-events.py <subject-events.jsonl>", file=sys.stderr)
+    if len(sys.argv) != 3:
+        print(
+            "usage: validate-subject-events.py <subject-events.jsonl> <isolation.json>",
+            file=sys.stderr,
+        )
         return 2
     path = Path(sys.argv[1])
     if not path.is_file() or path.is_symlink():
         fail("event stream is missing or unsafe")
-
-    commands = 0
+    pending: dict[str, str] = {}
+    completed_commands = 0
+    occurrences: list[tuple[str, str, int]] = []
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         try:
             event = json.loads(raw)
         except json.JSONDecodeError as exc:
             fail(f"line {number} is not JSON: {exc}")
-        if not isinstance(event, dict):
-            fail(f"line {number} is not an object")
-        if event.get("type") not in {"item.started", "item.completed"}:
+        if not isinstance(event, dict) or event.get("type") not in {"item.started", "item.completed"}:
             continue
         item = event.get("item")
         if not isinstance(item, dict):
@@ -177,26 +467,42 @@ def main() -> int:
             fail(f"line {number} contains prohibited {item_type} mutation evidence")
         if item_type != "command_execution":
             continue
-        if event.get("type") != "item.completed":
-            continue
         command = item.get("command")
-        if not isinstance(command, str) or not command.strip():
-            fail(f"line {number} has an invalid command")
-        commands += 1
-        has_boundary = bool(BOUNDARY_INVOKE.search(command))
-        if has_boundary:
-            if not approved_boundary_command(command):
-                fail(f"line {number} is not an exact approved init boundary invocation")
-            continue
-        forbidden = bool(
-            MUTATORS.search(command)
-            or FILE_REDIRECT.search(command)
-            or DIRECT_EXECUTOR.search(command)
-        )
-        if forbidden:
-            fail(f"line {number} contains a mutator outside the approved init boundary")
+        item_id = item.get("id")
+        if not isinstance(command, str) or not command.strip() or not isinstance(item_id, str) or not item_id:
+            fail(f"line {number} has an invalid command event")
+        event_type = str(event["type"])
+        if event_type == "item.started":
+            if item_id in pending:
+                fail(f"line {number} reuses an unfinished command id")
+            pending[item_id] = command
+        else:
+            if pending.get(item_id) != command:
+                fail(f"line {number} has no identical started command")
+            del pending[item_id]
+            completed_commands += 1
+        occurrences.append((event_type, command, number))
+    if pending:
+        fail("event stream ends with an unfinished command")
+    if not occurrences:
+        print(json.dumps({"valid": True, "completed_commands": 0}, separators=(",", ":")))
+        return 0
 
-    print(json.dumps({"valid": True, "completed_commands": commands}, separators=(",", ":")))
+    authority = load_authority(Path(sys.argv[2]))
+    decoded = [decode_command(command, authority) for _, command, _ in occurrences]
+    powershell_sources = [source for kind, source in decoded if kind == "powershell"]
+    analyses = iter(analyze_powershell(powershell_sources))
+    for (event_type, _command, number), (kind, source) in zip(occurrences, decoded):
+        try:
+            if kind == "powershell":
+                validate_powershell(next(analyses), source, authority)
+            else:
+                validate_direct_shell(source, authority)
+        except SystemExit:
+            print(f"subject-event-validator: rejected {event_type} at line {number}", file=sys.stderr)
+            raise
+
+    print(json.dumps({"valid": True, "completed_commands": completed_commands}, separators=(",", ":")))
     return 0
 
 

@@ -588,7 +588,7 @@ done
 
 bash "$BRIEF_VALIDATOR" "$snapshot_base.project-brief.json" >/dev/null 2>&1 \
   || die "captured PROJECT_BRIEF.json is not canonical for the current product version"
-python "$SUBJECT_EVENT_VALIDATOR" "$snapshot_base.subject-events.jsonl" >/dev/null 2>&1 \
+python "$SUBJECT_EVENT_VALIDATOR" "$snapshot_base.subject-events.jsonl" "$snapshot_base.isolation.json" >/dev/null 2>&1 \
   || die "subject event stream contains a mutation outside the approved init boundary"
 expected_probe="$(expected_probe_command "$snapshot_base.isolation.json")" \
   || die "could not reconstruct the effective isolation probe command"

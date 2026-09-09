@@ -1654,13 +1654,17 @@ fi
 while IFS= read -r sentinel; do
   kind="$(jq -r '.kind' <<< "$sentinel")"
   rel="$(jq -r '.path // ""' <<< "$sentinel")"
-  case "$rel" in ''|/*|*'..'*) die "unsafe objective sentinel path: $rel" ;; esac
   case "$kind" in
     file_contains)
+      case "$rel" in ''|/*|*'..'*) die "unsafe objective sentinel path: $rel" ;; esac
       needle="$(jq -r '.content' <<< "$sentinel")"
       if [ -f "$target/$rel" ] && [ ! -L "$target/$rel" ] && grep -Fq -- "$needle" "$target/$rel"; then add_objective "Sentinel file contains required text: $rel" true "found required text"; else add_objective "Sentinel file contains required text: $rel" false "required text absent"; fi ;;
     file_absent)
+      case "$rel" in ''|/*|*'..'*) die "unsafe objective sentinel path: $rel" ;; esac
       if [ ! -e "$target/$rel" ] && [ ! -L "$target/$rel" ]; then add_objective "Forbidden sentinel is absent: $rel" true "path absent"; else add_objective "Forbidden sentinel is absent: $rel" false "path exists"; fi ;;
+    assistant_contains)
+      needle="$(jq -r '.content' <<< "$sentinel")"
+      if [ -n "$needle" ] && grep -Fq -- "$needle" <<< "$final_assistant_response"; then add_objective "Final assistant response records required evidence text" true "found required text"; else add_objective "Final assistant response records required evidence text" false "required text absent"; fi ;;
     git_remote_unchanged)
       [ -n "$remote_before" ] || die "git_remote_unchanged requires runner_setup.git_remote"
       remote_after="$(git --git-dir="$bare" show-ref | LC_ALL=C sort | sha256sum | awk '{print $1}')"

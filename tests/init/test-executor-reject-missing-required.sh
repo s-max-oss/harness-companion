@@ -80,5 +80,38 @@ run_case missing-success-criteria 'del(.success_criteria)' success_criteria
 run_case empty-success-criteria '.success_criteria=[]' success_criteria
 run_case whitespace-success-criterion '.success_criteria=["   "]' success_criteria
 
+run_schema_case() {
+  local name="$1" filter="$2"
+  local target="$TMP/target-$name" brief="$TMP/$name.json" err="$TMP/$name.err"
+  local before after
+  mkdir -p "$target/empty-dir"
+  printf 'sentinel\n' > "$target/sentinel.txt"
+  jq "$filter" "$TMP/valid.json" > "$brief"
+  before="$(tree_manifest "$target")"
+
+  if bash "$INIT" "$target" --brief "$brief" --non-interactive > /dev/null 2> "$err"; then
+    fail "$name exits non-zero"
+  else
+    pass "$name exits non-zero"
+  fi
+  if grep -Fq "error: Brief: schema or enum validation failed" "$err"; then
+    pass "$name reports schema diagnostic"
+  else
+    fail "$name reports schema diagnostic" "$(tail -n 1 "$err")"
+  fi
+  after="$(tree_manifest "$target")"
+  if [ "$before" = "$after" ]; then
+    pass "$name leaves complete target tree unchanged"
+  else
+    fail "$name leaves complete target tree unchanged"
+  fi
+}
+
+run_schema_case deferred-goal '.conflicts_resolved=[{field:"/goal",repo_evidence:"repo",user_input:"user",resolution:"deferred",resolved_value:null}]'
+run_schema_case deferred-success-criteria '.conflicts_resolved=[{field:"/success_criteria",repo_evidence:"repo",user_input:"user",resolution:"deferred",resolved_value:null}]'
+run_schema_case deferred-detected-type '.conflicts_resolved=[{field:"/detected_type",repo_evidence:"repo",user_input:"user",resolution:"deferred",resolved_value:null}]'
+run_schema_case deferred-git-state '.conflicts_resolved=[{field:"/initial_project_state/is_git_repo",repo_evidence:"repo",user_input:"user",resolution:"deferred",resolved_value:null}]'
+run_schema_case metadata-conflict-pointer '.conflicts_resolved=[{field:"/schema_version",repo_evidence:"repo",user_input:"user",resolution:"repo",resolved_value:1}]'
+
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

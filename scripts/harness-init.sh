@@ -707,7 +707,23 @@ validate_brief_input() {
       capture("^(?<y>[0-9]{4})-(?<m>[0-9]{2})-(?<d>[0-9]{2})$") as $x
       | ($x.y|tonumber) as $y | ($x.m|tonumber) as $m | ($x.d|tonumber) as $d
       | ($m >= 1 and $m <= 12 and $d >= 1
-         and $d <= ([31,(if (($y%4==0 and $y%100!=0) or $y%400==0) then 29 else 28 end),31,30,31,30,31,31,30,31,30,31][$m-1]));
+       and $d <= ([31,(if (($y%4==0 and $y%100!=0) or $y%400==0) then 29 else 28 end),31,30,31,30,31,31,30,31,30,31][$m-1]));
+    def conflict_pointer:
+      IN(
+        "/detected_type", "/goal", "/success_criteria", "/cadence", "/deadline",
+        "/stack", "/test_framework", "/secrets_handling", "/external_network",
+        "/prohibitions", "/initial_project_state/is_git_repo",
+        "/initial_project_state/has_existing_tests",
+        "/initial_project_state/existing_harness_files",
+        "/initial_project_state/detection_summary",
+        "/operation_preferences/commit", "/operation_preferences/push",
+        "/operation_preferences/merge", "/operation_preferences/release",
+        "/operation_preferences/install_packages",
+        "/operation_preferences/external_mutation",
+        "/operation_preferences/destructive_ops"
+      );
+    def execution_critical_pointer:
+      IN("/goal", "/success_criteria", "/detected_type", "/initial_project_state/is_git_repo");
     type == "object"
     and ((has("schema_version") | not) or .schema_version == 1)
     and (.goal | type == "string" and test("[^[:space:]]") and length <= 500)
@@ -737,9 +753,11 @@ validate_brief_input() {
          and (.rationale|type=="string" and length<=200)
          and (.source|IN("spec_default","legacy_placeholder")))))
     and ((has("conflicts_resolved") | not) or (.conflicts_resolved | type == "array" and all(.[ ];
-         type == "object" and (.field|type=="string" and startswith("/"))
+         type == "object" and (keys | sort == ["field","repo_evidence","resolution","resolved_value","user_input"])
+         and (.field|type=="string" and startswith("/") and conflict_pointer)
          and (.repo_evidence|type=="string") and (.user_input|type=="string")
          and (.resolution|IN("user","repo","custom","deferred")) and has("resolved_value")
+         and (if .resolution=="deferred" then (.field | execution_critical_pointer | not) else true end)
          and (if .resolution=="deferred" then .resolved_value==null else .resolved_value!=null end))))
     and ((has("provenance") | not) or (.provenance | type == "object" and all(to_entries[];
          (.key|startswith("/")) and (.value|type=="object")

@@ -65,6 +65,22 @@ jq -e --arg version "$EXPECTED_VERSION" '
       "/operation_preferences/external_mutation",
       "/operation_preferences/destructive_ops", "/goal", "/success_criteria"
     );
+  def conflict_pointer:
+    IN(
+      "/detected_type", "/goal", "/success_criteria", "/cadence", "/deadline",
+      "/stack", "/test_framework", "/secrets_handling", "/external_network",
+      "/prohibitions", "/initial_project_state/is_git_repo",
+      "/initial_project_state/has_existing_tests",
+      "/initial_project_state/existing_harness_files",
+      "/initial_project_state/detection_summary",
+      "/operation_preferences/commit", "/operation_preferences/push",
+      "/operation_preferences/merge", "/operation_preferences/release",
+      "/operation_preferences/install_packages",
+      "/operation_preferences/external_mutation",
+      "/operation_preferences/destructive_ops"
+    );
+  def execution_critical_pointer:
+    IN("/goal", "/success_criteria", "/detected_type", "/initial_project_state/is_git_repo");
   . as $brief
   | type == "object"
   and (keys | sort == [
@@ -117,10 +133,13 @@ jq -e --arg version "$EXPECTED_VERSION" '
        and all(.[]; . as $conflict |
          type == "object"
          and (keys | sort == ["field","repo_evidence","resolution","resolved_value","user_input"])
-         and ($conflict.field | type == "string" and startswith("/") and allowed_pointer)
+         and ($conflict.field | type == "string" and startswith("/") and conflict_pointer)
          and ($conflict.repo_evidence | type == "string")
          and ($conflict.user_input | type == "string")
          and ($conflict.resolution | IN("user","repo","custom","deferred"))
+         and (if $conflict.resolution == "deferred"
+              then ($conflict.field | execution_critical_pointer | not)
+              else true end)
          and (if $conflict.resolution == "deferred" then $conflict.resolved_value == null
               else $conflict.resolved_value != null
                 and $conflict.resolved_value == ($brief | getpath($conflict.field | pointer_path)) end)))

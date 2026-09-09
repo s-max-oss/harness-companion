@@ -1674,11 +1674,66 @@ printf 'tests/eval/candidates/c1.json\0tests/eval/candidates/missing.json\0' \
   | runtime_register_batch "$D" eval_candidate >/dev/null 2>&1
 check "T57a: a missing batch source fails closed" 1 "$?"
 check "T57b: rejected batch preserves registry bytes" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$MF")"
-printf 'tests/eval/candidates/c1.json\0tests/eval/candidates/c2.json\0tests/eval/candidates/c3.json\0' \
-  | runtime_register_batch "$D" eval_candidate >/dev/null 2>&1
+ANCHOR_ORIGINAL="$(declare -f _runtime_anchor_registry)"
+eval "$(printf '%s\n' "$ANCHOR_ORIGINAL" | sed '1s/_runtime_anchor_registry/_t57_original_anchor_registry/')"
+T57_ANCHOR_CALLS=0
+_runtime_anchor_registry() {
+  T57_ANCHOR_CALLS=$((T57_ANCHOR_CALLS + 1))
+  _t57_original_anchor_registry "$@"
+}
+runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
+  < <(printf 'tests/eval/candidates/c1.json\0tests/eval/candidates/c2.json\0tests/eval/candidates/c3.json\0')
 check "T57c: valid batch registration succeeds" 0 "$?"
 check "T57d: all batch records are present" 3 "$(jq -s '[.[] | select(.kind? == "eval_candidate")] | length' "$MF")"
 check "T57e: batch publication preserves the dedicated anchor" 0 "$(_runtime_verify_registry_anchor "$D" "$MF" >/dev/null 2>&1; echo $?)"
+check "T57f: successful batch updates the anchor exactly once" 1 "$T57_ANCHOR_CALLS"
+unset -f _runtime_anchor_registry _t57_original_anchor_registry
+eval "$ANCHOR_ORIGINAL"
+
+# If both the anchor update and rollback fail, the pre-publication bytes are
+# retained instead of silently deleting the only recovery material.
+D="$(mktemp -d "$TMPDIR/t57-recovery-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null 2>&1
+MF="$D/.harness/runtime-manifest.jsonl"
+mkdir -p "$D/tests/eval/candidates"
+printf 'candidate\n' > "$D/tests/eval/candidates/c1.json"
+T57_BEFORE_SHA="$(_runtime_file_sha256 "$MF")"
+ANCHOR_ORIGINAL="$(declare -f _runtime_anchor_registry)"
+ROLLBACK_ORIGINAL="$(declare -f _runtime_rollback_registry)"
+_runtime_anchor_registry() { return 1; }
+_runtime_rollback_registry() { return 1; }
+runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
+  < <(printf 'tests/eval/candidates/c1.json\0')
+T57_RECOVERY_RC=$?
+unset -f _runtime_anchor_registry _runtime_rollback_registry
+eval "$ANCHOR_ORIGINAL"
+eval "$ROLLBACK_ORIGINAL"
+T57_BACKUP="$(find "$D/.git" -maxdepth 1 -type f -name 'runtime-manifest-backup.*' -print -quit 2>/dev/null)"
+check "T57g: anchor plus rollback failure propagates" 1 "$T57_RECOVERY_RC"
+check "T57h: uncertain recovery retains one backup" 1 "$(find "$D/.git" -maxdepth 1 -type f -name 'runtime-manifest-backup.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
+check "T57i: retained backup is the exact pre-publication registry" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$T57_BACKUP")"
+
+# Lock acquisition failure must not create a backup or mutate the registry.
+D="$(mktemp -d "$TMPDIR/t57-lock-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null 2>&1
+MF="$D/.harness/runtime-manifest.jsonl"
+mkdir -p "$D/tests/eval/candidates"
+printf 'candidate\n' > "$D/tests/eval/candidates/c1.json"
+T57_BEFORE_SHA="$(_runtime_file_sha256 "$MF")"
+ACQUIRE_ORIGINAL="$(declare -f _runtime_acquire)"
+_runtime_acquire() { return 1; }
+runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
+  < <(printf 'tests/eval/candidates/c1.json\0')
+T57_LOCK_RC=$?
+unset -f _runtime_acquire
+eval "$ACQUIRE_ORIGINAL"
+check "T57j: batch lock acquisition failure propagates" 1 "$T57_LOCK_RC"
+check "T57k: lock failure preserves registry bytes" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$MF")"
+check "T57l: lock failure creates no recovery backup" 0 "$(find "$D/.git" -maxdepth 1 -type f -name 'runtime-manifest-backup.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
 
 echo ""
 echo "Dirty-Worktree-Manifest Results: $PASSED passed, $FAILED failed"

@@ -958,7 +958,7 @@ runtime_register() {
 # An anchored registry must already exist. Normal producers should continue to
 # use runtime_register for first creation and one-at-a-time publication.
 runtime_register_batch() {
-  local project_dir="$1" kind="$2" rel f mf tmp backup="" rc=0 changed=0 release_rc=0
+  local project_dir="$1" kind="$2" rel f mf tmp backup="" rc=0 changed=0 release_rc=0 retain_backup=0
   local -a rels=()
   while IFS= read -r -d '' rel; do
     [ -n "$rel" ] || continue
@@ -1029,8 +1029,10 @@ runtime_register_batch() {
       rc=1
     elif ! _runtime_anchor_registry "$project_dir" "$mf"; then
       echo "runtime-manifest: batch anchor update failed; rolling back registry" >&2
-      _runtime_rollback_registry "$project_dir" "$mf" "$backup" 1 >/dev/null 2>&1 || \
+      if ! _runtime_rollback_registry "$project_dir" "$mf" "$backup" 1 >/dev/null 2>&1; then
         echo "runtime-manifest: batch rollback failed" >&2
+        retain_backup=1
+      fi
       rc=1
     fi
   fi
@@ -1039,11 +1041,19 @@ runtime_register_batch() {
   _runtime_release "$project_dir" || release_rc=$?
   if [ "$release_rc" -ne 0 ] && [ "$release_rc" -ne 8 ]; then
     echo "runtime-manifest: failed to release registry lock after batch" >&2
+    # Ownership is uncertain. Keep the exact pre-publication bytes for a
+    # serialized recovery instead of deleting the only trustworthy rollback.
+    retain_backup=1
+    _runtime_release "$project_dir" >/dev/null 2>&1 || true
     rc=1
   elif [ "$release_rc" -eq 8 ]; then
     echo "runtime-manifest: batch committed; lock cleanup incomplete" >&2
   fi
-  rm -f "$backup"
+  if [ "$retain_backup" = "0" ]; then
+    [ -z "$backup" ] || rm -f "$backup"
+  elif [ -n "$backup" ]; then
+    echo "runtime-manifest: retained batch recovery backup at $backup" >&2
+  fi
   return "$rc"
 }
 

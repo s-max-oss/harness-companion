@@ -30,6 +30,12 @@ die() { echo "eval: $*" >&2; exit 2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 sha() { sha256sum "$1" | awk '{print $1}'; }
 
+release_eval_lock() {
+  local lock_path="$1" token="$2" rc=0
+  release_lock "$lock_path" "$token" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 8 ]
+}
+
 # Canonical forward-eval output participates in the same append-only,
 # Git-anchored runtime evidence chain as run logs and Reviewer verdicts.
 # Test-only --output-dir paths stay isolated and never touch the repository
@@ -310,7 +316,7 @@ contract_test_prepare_post_agent_stage() {
   stage_owned=false
   rmdir "$publication_lock" || die "contract setup could not release publication lock"
   publication_lock_owned=false
-  rmdir "$agent_lock" || die "contract setup could not release Agent lock"
+  release_eval_lock "$agent_lock" "$agent_lock_token" || die "contract setup could not release Agent lock"
   agent_lock_owned=false
   update_recovery_journal agent_lock_released || die "contract setup could not record Agent lock release"
   rm -rf -- "$tmp" || die "contract setup could not remove isolated run tree"
@@ -779,6 +785,7 @@ acl_owner_stage=""
 acl_lock_owned=false
 agent_lock="$OUTPUT_DIR/.eval-agent.lock"
 agent_lock_owned=false
+agent_lock_token=""
 publication_lock=""
 publication_lock_owned=false
 publication_started=false
@@ -877,7 +884,7 @@ cleanup() {
     rmdir "$publication_lock" >/dev/null 2>&1 && publication_lock_owned=false || restore_failed=true
   fi
   if [ "$restore_failed" = false ] && [ "$agent_lock_owned" = true ] && [ "$publication_started" = false ]; then
-    rmdir "$agent_lock" >/dev/null 2>&1 && agent_lock_owned=false || restore_failed=true
+    release_eval_lock "$agent_lock" "$agent_lock_token" && agent_lock_owned=false || restore_failed=true
     if [ "$SYNTHETIC" = 0 ] && [ "$agent_lock_owned" = false ]; then update_recovery_journal agent_lock_released || restore_failed=true; fi
   fi
   if [ "$restore_failed" = false ] && [ "$acl_lock_owned" = true ]; then
@@ -912,7 +919,8 @@ if [ "$SYNTHETIC" = 0 ]; then
   update_recovery_journal acl_lock_acquired || die "could not update lifecycle recovery journal"
   contract_test_hold acl_lock_acquired
 fi
-if ! mkdir "$agent_lock" 2>/dev/null; then die "another eval Agent run is active or stale: $agent_lock"; fi
+if ! acquire_lock "$agent_lock" 0 >/dev/null; then die "another eval Agent run is active or stale: $agent_lock"; fi
+agent_lock_token="$LOCK_REGISTRY_TOKEN"
 agent_lock_owned=true
 if [ "$SYNTHETIC" = 0 ]; then
   update_recovery_journal agent_lock_acquired || die "could not update lifecycle recovery journal"
@@ -1867,7 +1875,7 @@ fi
 rmdir "$publication_lock"
 publication_lock_owned=false
 publication_started=false
-rmdir "$agent_lock"
+release_eval_lock "$agent_lock" "$agent_lock_token" || die "could not release Agent lock"
 agent_lock_owned=false
 if [ "$SYNTHETIC" = 0 ]; then update_recovery_journal agent_lock_released || die "could not update lifecycle recovery journal"; fi
 

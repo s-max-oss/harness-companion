@@ -22,6 +22,8 @@ PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
 PUBLICATION_BUNDLE="$SCRIPT_DIR/publication-bundle.py"
 WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 WINDOWS_WHOAMI="/c/Windows/System32/whoami.exe"
+# shellcheck source=../../core/lib/lock-registry.sh
+. "$ROOT/core/lib/lock-registry.sh" || { echo "eval-gate: runtime lock support is unavailable" >&2; exit 2; }
 for arg in "$@"; do
   case "$arg" in
     --cases-dir=*) CASES_DIR="${arg#*=}" ;;
@@ -337,15 +339,31 @@ PY
 }
 
 publication_lock="$RESULTS_DIR/.eval-write.lock"
-if ! mkdir "$publication_lock" 2>/dev/null; then
+release_gate_lock() {
+  local rc=0
+  release_lock "$publication_lock" "$publication_lock_token" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 8 ]
+}
+if [ -e "$publication_lock" ] || [ -L "$publication_lock" ] \
+  || ! acquire_lock "$publication_lock" 0 >/dev/null; then
   echo "eval-gate: result publication is incomplete or another gate is active" >&2
   exit 1
 fi
+publication_lock_token="$LOCK_REGISTRY_TOKEN"
 gate_lock_owned=true
-tmp="$(mktemp -d)" || { rmdir "$publication_lock" 2>/dev/null || true; exit 2; }
+tmp="$(mktemp -d)" || { release_gate_lock || true; exit 2; }
 cleanup() {
+  local original_rc=$? release_rc=0
+  trap - EXIT
   if [ -n "${tmp:-}" ] && [ -d "$tmp" ]; then rm -rf -- "$tmp"; fi
-  if [ "${gate_lock_owned:-false}" = true ]; then rmdir "$publication_lock" 2>/dev/null || true; fi
+  if [ "${gate_lock_owned:-false}" = true ]; then
+    release_gate_lock || release_rc=$?
+  fi
+  if [ "$original_rc" -eq 0 ] && [ "$release_rc" -ne 0 ]; then
+    echo "eval-gate: could not safely release result publication lock" >&2
+    original_rc=2
+  fi
+  exit "$original_rc"
 }
 trap cleanup EXIT
 directory_manifest "$CASES_DIR" "$tmp/cases.before.manifest" || { echo "eval-gate: case authority snapshot failed" >&2; exit 2; }

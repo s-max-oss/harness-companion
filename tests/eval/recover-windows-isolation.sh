@@ -424,7 +424,16 @@ rm -f -- "$acl_helper_state" "$acl_helper_state_stage" "$acl_helper_continue" "$
 
 if [ -e "$CANONICAL_AGENT_LOCK" ] || [ -L "$CANONICAL_AGENT_LOCK" ]; then
   [ -d "$CANONICAL_AGENT_LOCK" ] && [ ! -L "$CANONICAL_AGENT_LOCK" ] || die "Agent lock is unsafe"
-  rmdir "$CANONICAL_AGENT_LOCK" || die "could not retire stale Agent lock"
+  if ! acquire_lock "$CANONICAL_AGENT_LOCK" 12 >/dev/null; then
+    die "could not prove the stale Agent lock is recoverable"
+  fi
+  recovered_agent_lock_token="$LOCK_REGISTRY_TOKEN"
+  recovered_agent_lock_release_rc=0
+  release_lock "$CANONICAL_AGENT_LOCK" "$recovered_agent_lock_token" >/dev/null 2>&1 \
+    || recovered_agent_lock_release_rc=$?
+  [ "$recovered_agent_lock_release_rc" -eq 0 ] \
+    || [ "$recovered_agent_lock_release_rc" -eq 8 ] \
+    || die "could not retire stale Agent lock"
 fi
 if [ -n "$publication_stage_win" ]; then
   publication_stage="$(cygpath -u "$publication_stage_win")"

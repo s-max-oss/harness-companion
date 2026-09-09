@@ -1137,6 +1137,70 @@ else
   ok "attester rejects coherently forged source-root evidence"
 fi
 
+# Runner, attester, and gate must use the same identity-bound lock protocol.
+# A live owner must never be mistaken for an interrupted attester merely
+# because it has not written attestation lifecycle files into the lock.
+cat > "$TMP/hold-eval-lock.sh" <<'HOLD_LOCK'
+#!/bin/bash
+set -euo pipefail
+. "$1"
+lock_path="$2"
+ready_file="$3"
+release_file="$4"
+acquire_lock "$lock_path" 0 >/dev/null
+lock_token="$LOCK_REGISTRY_TOKEN"
+: > "$ready_file"
+while [ ! -e "$release_file" ]; do sleep 0.05; done
+release_rc=0
+release_lock "$lock_path" "$lock_token" >/dev/null 2>&1 || release_rc=$?
+[ "$release_rc" -eq 0 ] || [ "$release_rc" -eq 8 ]
+HOLD_LOCK
+chmod +x "$TMP/hold-eval-lock.sh"
+
+for active_role in runner gate; do
+  active_candidates="$TMP/active-$active_role-candidates"
+  active_results="$TMP/active-$active_role-results"
+  active_ready="$TMP/active-$active_role.ready"
+  active_release="$TMP/active-$active_role.release"
+  mkdir -p "$active_candidates" "$active_results"
+  for f in "$attest_base".*; do cp "$f" "$active_candidates/"; done
+  active_candidate="$active_candidates/$(basename "$attest_candidate")"
+  if [ "$active_role" = runner ]; then
+    active_lock="$active_candidates/.eval-agent.lock"
+  else
+    active_lock="$active_results/.eval-write.lock"
+  fi
+  bash "$TMP/hold-eval-lock.sh" "$ROOT/core/lib/lock-registry.sh" \
+    "$active_lock" "$active_ready" "$active_release" &
+  active_holder_pid=$!
+  active_waits=0
+  while [ ! -e "$active_ready" ] && kill -0 "$active_holder_pid" 2>/dev/null \
+      && [ "$active_waits" -lt 200 ]; do
+    sleep 0.05
+    active_waits=$((active_waits + 1))
+  done
+  active_attest_rc=0
+  bash "$EVAL/attest-result.sh" "$active_candidate" \
+    --signing-key="$TMP/test-signing-key" --candidates-dir="$active_candidates" \
+    --results-dir="$active_results" --allowed-signers="$TMP/test-release-signers" \
+    > "$TMP/active-$active_role-attest.log" 2>&1 || active_attest_rc=$?
+  active_owner_intact=false
+  if [ "$active_attest_rc" -ne 0 ] && kill -0 "$active_holder_pid" 2>/dev/null \
+      && [ -f "$active_lock/.claim" ]; then
+    active_owner_intact=true
+  fi
+  : > "$active_release"
+  active_holder_rc=0
+  wait "$active_holder_pid" || active_holder_rc=$?
+  if [ "$active_owner_intact" = true ] && [ "$active_holder_rc" -eq 0 ] \
+      && [ ! -e "$active_lock" ]; then
+    ok "attester refuses the active $active_role identity lock without stealing it"
+  else
+    sed "s/^/  active-$active_role: /" "$TMP/active-$active_role-attest.log" >&2
+    bad "attester refuses the active $active_role identity lock without stealing it"
+  fi
+done
+
 mkdir -p "$TMP/recovery-attest-candidates" "$TMP/recovery-attested-results"
 for f in "$attest_base".*; do cp "$f" "$TMP/recovery-attest-candidates/"; done
 recovery_attest_candidate="$TMP/recovery-attest-candidates/$(basename "$attest_candidate")"

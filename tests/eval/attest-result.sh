@@ -700,13 +700,15 @@ candidate_lock="$CANDIDATES_DIR/.eval-agent.lock"
 publication_lock="$RESULTS_DIR/.eval-write.lock"
 recovery_needed=false
 for existing_lock in "$candidate_lock" "$publication_lock"; do
-  if [ -e "$existing_lock/.claim" ] || [ -L "$existing_lock/.claim" ] \
-     || [ -e "$existing_lock/.ready" ] || [ -L "$existing_lock/.ready" ] \
-     || [ -e "$existing_lock/lifecycle.json" ] || [ -L "$existing_lock/lifecycle.json" ] \
+  if [ -e "$existing_lock/lifecycle.json" ] || [ -L "$existing_lock/lifecycle.json" ] \
      || [ -e "$existing_lock/bundle.json" ] || [ -L "$existing_lock/bundle.json" ]; then
     recovery_needed=true
   fi
 done
+[ "$candidates_host" != "$canonical_candidates_host" ] \
+  || { [ ! -e "$ROOT/.harness/eval-recovery-journal.json" ] \
+       && [ ! -L "$ROOT/.harness/eval-recovery-journal.json" ]; } \
+  || die "real Agent evaluation recovery is pending"
 [ ! -e "$CANDIDATES_DIR/.eval-write.lock" ] && [ ! -L "$CANDIDATES_DIR/.eval-write.lock" ] || die "candidate publication is incomplete"
 [ -f "$CANDIDATE" ] && [ ! -L "$CANDIDATE" ] || die "candidate missing or unsafe"
 candidate_abs="$(cd "$(dirname "$CANDIDATE")" && pwd -P)/$(basename "$CANDIDATE")"

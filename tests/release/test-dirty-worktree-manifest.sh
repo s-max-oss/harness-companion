@@ -1659,6 +1659,27 @@ if command -v cygpath >/dev/null 2>&1; then
   check "T56b: named Windows path hash has no escape prefix" 64 "${#T56_SHA}"
 fi
 
+# ---- T57: batch registration is atomic and updates the anchor once ---------
+D="$(mktemp -d "$TMPDIR/t57-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null 2>&1
+MF="$D/.harness/runtime-manifest.jsonl"
+mkdir -p "$D/tests/eval/candidates"
+for n in 1 2 3; do
+  printf 'candidate-%s\n' "$n" >"$D/tests/eval/candidates/c$n.json"
+done
+T57_BEFORE_SHA="$(_runtime_file_sha256 "$MF")"
+printf 'tests/eval/candidates/c1.json\0tests/eval/candidates/missing.json\0' \
+  | runtime_register_batch "$D" eval_candidate >/dev/null 2>&1
+check "T57a: a missing batch source fails closed" 1 "$?"
+check "T57b: rejected batch preserves registry bytes" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$MF")"
+printf 'tests/eval/candidates/c1.json\0tests/eval/candidates/c2.json\0tests/eval/candidates/c3.json\0' \
+  | runtime_register_batch "$D" eval_candidate >/dev/null 2>&1
+check "T57c: valid batch registration succeeds" 0 "$?"
+check "T57d: all batch records are present" 3 "$(jq -s '[.[] | select(.kind? == "eval_candidate")] | length' "$MF")"
+check "T57e: batch publication preserves the dedicated anchor" 0 "$(_runtime_verify_registry_anchor "$D" "$MF" >/dev/null 2>&1; echo $?)"
+
 echo ""
 echo "Dirty-Worktree-Manifest Results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

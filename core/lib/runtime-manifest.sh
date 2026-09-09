@@ -35,6 +35,7 @@
 #   runtime_manifest_path <project_dir>              → registry path
 #   runtime_manifest_genesis_value <project_dir>    → genesis string (HEAD OID)
 #   runtime_register <project_dir> <rel_path> <kind> → idempotent append (rc≠0 on fail)
+#   runtime_register_batch <project_dir> <kind>      → NUL-delimited, one atomic append
 #   runtime_register_run <project_dir> <run_id>      → register run NDJSON + logs
 
 # ---- runtime_manifest_path --------------------------------------------------
@@ -944,6 +945,106 @@ runtime_register() {
     echo "runtime-manifest: retained recovery backup at $backup" >&2
   fi
   return "$lock_rc"
+}
+
+# ---- runtime_register_batch -------------------------------------------------
+# Register a NUL-delimited stream of repository-relative paths under one kind.
+# This is the scalable equivalent of repeated runtime_register calls for a
+# recovered artifact set: it verifies the existing dedicated anchor, appends
+# every new record to a private same-directory file, validates the completed
+# registry, publishes it once, and updates the Git index anchor once. The live
+# registry is restored byte-for-byte if the anchor update fails.
+#
+# An anchored registry must already exist. Normal producers should continue to
+# use runtime_register for first creation and one-at-a-time publication.
+runtime_register_batch() {
+  local project_dir="$1" kind="$2" rel f mf tmp backup="" rc=0 changed=0 release_rc=0
+  local -a rels=()
+  while IFS= read -r -d '' rel; do
+    [ -n "$rel" ] || continue
+    rels+=("$rel")
+  done
+  [ "${#rels[@]}" -gt 0 ] || return 0
+
+  project_dir="$(cd "$project_dir" 2>/dev/null && pwd)" || return 1
+  mf="$(runtime_manifest_path "$project_dir")"
+  if [ -L "$mf" ] || [ ! -f "$mf" ]; then
+    echo "runtime-manifest: batch registration requires an existing regular registry" >&2
+    return 1
+  fi
+
+  # Reject the whole batch before taking the lock if any source is already
+  # missing or is a symlink. Sources are checked again while hashing below.
+  for rel in "${rels[@]}"; do
+    f="$project_dir/$rel"
+    if [ -L "$f" ] || [ ! -f "$f" ]; then
+      echo "runtime-manifest: refusing to batch-register missing file: $rel" >&2
+      return 1
+    fi
+  done
+
+  _runtime_acquire "$project_dir" || {
+    echo "runtime-manifest: failed to acquire registry lock" >&2
+    return 1
+  }
+
+  tmp="${mf}.batch.$$"
+  if ! _runtime_verify_registry_anchor "$project_dir" "$mf" \
+     || ! _runtime_validate_registry "$project_dir" "$mf"; then
+    echo "runtime-manifest: existing registry or dedicated anchor is invalid" >&2
+    rc=1
+  fi
+  if [ "$rc" -eq 0 ]; then
+    backup="$(_runtime_backup_path "$project_dir")" || rc=1
+    [ "$rc" -ne 0 ] || cp "$mf" "$backup" || rc=1
+    [ "$rc" -ne 0 ] || cp "$mf" "$tmp" || rc=1
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    for rel in "${rels[@]}"; do
+      if jq -e -s --arg p "$rel" 'any(.[]; .path? == $p)' "$tmp" >/dev/null 2>&1; then
+        continue
+      fi
+      f="$project_dir/$rel"
+      local h sz
+      if [ -L "$f" ] || [ ! -f "$f" ] || ! h="$(_runtime_file_sha256 "$f")"; then
+        echo "runtime-manifest: batch source changed or hash failed: $rel" >&2
+        rc=1
+        break
+      fi
+      sz="$(wc -c < "$f" 2>/dev/null | tr -d ' \t\r')"
+      if [ -z "$sz" ] || ! jq -cn --arg p "$rel" --arg k "$kind" --arg h "$h" --argjson s "$sz" \
+          '{path:$p, kind:$k, sha256:$h, size:$s}' >>"$tmp" 2>/dev/null; then
+        echo "runtime-manifest: failed to build batch entry for $rel" >&2
+        rc=1
+        break
+      fi
+      changed=1
+    done
+  fi
+
+  if [ "$rc" -eq 0 ] && [ "$changed" = "1" ]; then
+    if ! _runtime_validate_registry "$project_dir" "$tmp" || ! mv "$tmp" "$mf" 2>/dev/null; then
+      echo "runtime-manifest: batch registry validation or publication failed" >&2
+      rc=1
+    elif ! _runtime_anchor_registry "$project_dir" "$mf"; then
+      echo "runtime-manifest: batch anchor update failed; rolling back registry" >&2
+      _runtime_rollback_registry "$project_dir" "$mf" "$backup" 1 >/dev/null 2>&1 || \
+        echo "runtime-manifest: batch rollback failed" >&2
+      rc=1
+    fi
+  fi
+
+  rm -f "$tmp"
+  _runtime_release "$project_dir" || release_rc=$?
+  if [ "$release_rc" -ne 0 ] && [ "$release_rc" -ne 8 ]; then
+    echo "runtime-manifest: failed to release registry lock after batch" >&2
+    rc=1
+  elif [ "$release_rc" -eq 8 ]; then
+    echo "runtime-manifest: batch committed; lock cleanup incomplete" >&2
+  fi
+  rm -f "$backup"
+  return "$rc"
 }
 
 # ---- runtime_register_run ---------------------------------------------------

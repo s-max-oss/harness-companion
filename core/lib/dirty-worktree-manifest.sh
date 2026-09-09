@@ -827,15 +827,32 @@ dwm_compare_manifest() {
     mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_missing"}')")
   fi
 
-  rm -f "$cur_file"
+  # Feed potentially large result sets through files rather than --argjson.
+  # Windows has a comparatively small command-line limit, and repositories
+  # with many immutable eval artifacts can legitimately exceed it.
+  local mv_file am_file fa_file ccm_file final jq_rc
+  mv_file="$(mktemp)" || { rm -f "$cur_file"; return 2; }
+  am_file="$(mktemp)" || { rm -f "$cur_file" "$mv_file"; return 2; }
+  fa_file="$(mktemp)" || { rm -f "$cur_file" "$mv_file" "$am_file"; return 2; }
+  ccm_file="$(mktemp)" || { rm -f "$cur_file" "$mv_file" "$am_file" "$fa_file"; return 2; }
 
-  local final
+  printf '%s\n' "${mutable_violations[@]}" | jq -c 'select(length > 0)' >"$mv_file" || {
+    rm -f "$cur_file" "$mv_file" "$am_file" "$fa_file" "$ccm_file"
+    return 2
+  }
+  printf '%s\n' "${appended_mutable[@]}" | jq -R -c 'select(length > 0)' >"$am_file"
+  printf '%s\n' "${feature_advanced[@]}" | jq -R -c 'select(length > 0)' >"$fa_file"
+  printf '%s\n' "${content_changed_mutable[@]}" | jq -R -c 'select(length > 0)' >"$ccm_file"
+
   final="$(printf '%s\n' "$result" | jq -c \
-    --argjson mv "$(printf '%s\n' "${mutable_violations[@]}" | jq -R -s 'split("\n") | map(select(length>0) | fromjson)' 2>/dev/null || printf '[]')" \
-    --argjson am "$(printf '%s\n' "${appended_mutable[@]}" | jq -R -s 'split("\n") | map(select(length>0))')" \
-    --argjson fa "$(printf '%s\n' "${feature_advanced[@]}" | jq -R -s 'split("\n") | map(select(length>0))')" \
-    --argjson ccm "$(printf '%s\n' "${content_changed_mutable[@]}" | jq -R -s 'split("\n") | map(select(length>0))')" \
+    --slurpfile mv "$mv_file" \
+    --slurpfile am "$am_file" \
+    --slurpfile fa "$fa_file" \
+    --slurpfile ccm "$ccm_file" \
     '.violations = (.violations + $mv) | .appended_mutable = $am | .feature_revision_advanced = $fa | .content_changed_mutable = $ccm | .valid = ((.violations | length) == 0 and (.new_non_mutable | length) == 0)')"
+  jq_rc=$?
+  rm -f "$cur_file" "$mv_file" "$am_file" "$fa_file" "$ccm_file"
+  [ "$jq_rc" -eq 0 ] || return 2
   printf '%s\n' "$final"
   if [ "$(printf '%s' "$final" | jq -r '.valid')" = "true" ]; then
     return 0

@@ -21,7 +21,6 @@ READ_ONLY_POWERSHELL = {
     "compare-object",
     "convertfrom-json",
     "convertto-json",
-    "foreach-object",
     "format-list",
     "format-table",
     "get-childitem",
@@ -50,7 +49,6 @@ READ_ONLY_NATIVE = {
     "ls",
     "pwd",
     "rg",
-    "sed",
     "sha256sum",
     "sort",
     "wc",
@@ -61,6 +59,30 @@ GIT_SIDE_EFFECT_FLAGS = {
     "--textconv",
     "--output",
     "-o",
+}
+POWERSHELL_PARAMETERS = {
+    "compare-object": {"-referenceobject", "-differenceobject", "-syncwindow", "-property", "-excludedifferent", "-includeequal", "-passthru", "-culture", "-casesensitive"},
+    "convertfrom-json": {"-inputobject", "-ashashtable", "-depth", "-noenumerate", "-datekind"},
+    "convertto-json": {"-inputobject", "-depth", "-compress", "-enumsasstrings", "-escapehandling"},
+    "format-list": {"-property", "-view", "-showerror", "-displayerror", "-force", "-groupby"},
+    "format-table": {"-property", "-view", "-showerror", "-displayerror", "-force", "-groupby", "-autosize", "-hidetableheaders", "-wrap"},
+    "get-childitem": {"-path", "-literalpath", "-filter", "-include", "-exclude", "-recurse", "-depth", "-force", "-name", "-attributes", "-directory", "-file", "-hidden", "-readonly", "-system"},
+    "get-command": {"-name", "-verb", "-noun", "-module", "-commandtype", "-all", "-listimported", "-syntax", "-totalcount"},
+    "get-content": {"-path", "-literalpath", "-readcount", "-totalcount", "-tail", "-raw", "-encoding", "-delimiter", "-wait", "-force", "-stream"},
+    "get-date": {"-date", "-format", "-uformat", "-unixtimeseconds", "-asutc"},
+    "get-filehash": {"-path", "-literalpath", "-algorithm", "-inputstream"},
+    "get-item": {"-path", "-literalpath", "-force", "-stream"},
+    "get-location": {"-psprovider", "-psdrive"},
+    "join-path": {"-path", "-childpath", "-resolve", "-additionalchildpath"},
+    "out-null": {"-inputobject"},
+    "out-string": {"-inputobject", "-width", "-stream"},
+    "resolve-path": {"-path", "-literalpath", "-relative", "-relativebasepath"},
+    "select-object": {"-inputobject", "-property", "-excludeproperty", "-expandproperty", "-unique", "-last", "-first", "-skip", "-wait", "-skiplast", "-index"},
+    "select-string": {"-pattern", "-path", "-literalpath", "-simplematch", "-casesensitive", "-quiet", "-list", "-include", "-exclude", "-notmatch", "-allmatches", "-encoding", "-context", "-raw", "-noemphasis"},
+    "sort-object": {"-inputobject", "-property", "-descending", "-unique", "-culture", "-casesensitive", "-stable", "-top", "-bottom"},
+    "test-path": {"-path", "-literalpath", "-pathtype", "-isvalid", "-olderthan", "-newerthan"},
+    "where-object": {"-inputobject", "-filterScript", "-property", "-value", "-eq", "-ceq", "-ne", "-cne", "-gt", "-cgt", "-lt", "-clt", "-ge", "-cge", "-le", "-cle", "-like", "-clike", "-notlike", "-cnotlike", "-match", "-cmatch", "-notmatch", "-cnotmatch", "-contains", "-ccontains", "-notcontains", "-cnotcontains", "-in", "-cin", "-notin", "-cnotin", "-is", "-isnot"},
+    "write-output": {"-inputobject", "-noenumerate"},
 }
 
 
@@ -80,8 +102,11 @@ foreach ($source in $sources) {
     }, $true)) {
     $elements = @()
     foreach ($element in $command.CommandElements) {
-      if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+      if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+          $element -is [System.Management.Automation.Language.ConstantExpressionAst]) {
         $elements += [pscustomobject]@{text=[string]$element.Value; static=$true}
+      } elseif ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
+        $elements += [pscustomobject]@{text=[string]$element.Extent.Text; static=$true}
       } else {
         $elements += [pscustomobject]@{text=[string]$element.Extent.Text; static=$false}
       }
@@ -146,21 +171,37 @@ def basename(value: str) -> str:
     return PureWindowsPath(value.replace("/", "\\")).name.casefold()
 
 
+def trusted_native_name(value: str, name: str) -> bool:
+    """Return whether a native command resolves inside the trusted runtime."""
+
+    if "/" not in value and "\\" not in value:
+        return True
+    normalized = normalize_windows_path(value)
+    return name in {"bash", "bash.exe"} and normalized == "c:/program files/git/bin/bash.exe"
+
+
 def require_trusted_native_name(value: str, name: str) -> None:
     """Reject path-selected binaries; bare names resolve only in the sanitized PATH."""
 
-    if "/" not in value and "\\" not in value:
-        return
-    normalized = normalize_windows_path(value)
-    if name in {"bash", "bash.exe"} and normalized == "c:/program files/git/bin/bash.exe":
+    if trusted_native_name(value, name):
         return
     fail("absolute native command is outside the trusted runtime")
 
 
 def validate_git_args(args: list[str]) -> None:
-    if not args or args[0].casefold() not in READ_ONLY_GIT:
+    if not args:
         fail("git command is not in the read-only allowlist")
-    lowered = [arg.casefold() for arg in args[1:]]
+    lowered_all = [arg.casefold() for arg in args]
+    if lowered_all[0] == "--no-optional-locks":
+        lowered_all = lowered_all[1:]
+        if not lowered_all or lowered_all[0] != "status":
+            fail("git --no-optional-locks is permitted only for status")
+    elif lowered_all[0] == "status":
+        fail("git status must disable optional index locks")
+    subcommand = lowered_all[0]
+    if subcommand not in READ_ONLY_GIT:
+        fail("git command is not in the read-only allowlist")
+    lowered = lowered_all[1:]
     if any(
         arg in GIT_SIDE_EFFECT_FLAGS
         or arg.startswith("--output=")
@@ -169,6 +210,44 @@ def validate_git_args(args: list[str]) -> None:
         for arg in lowered
     ):
         fail("git read command requests output mutation or external execution")
+    if subcommand in {"diff", "log", "show"} and not {
+        "--no-ext-diff",
+        "--no-textconv",
+    }.issubset(set(lowered)):
+        fail("git content inspection must explicitly disable external helpers")
+
+
+def validate_native_args(name: str, args: list[str]) -> None:
+    """Reject callback/output modes of otherwise read-only native tools."""
+
+    lowered = [arg.casefold() for arg in args]
+    if name == "git":
+        validate_git_args(args)
+        return
+    if name == "jq" and any(arg in {"-i", "--in-place"} for arg in lowered):
+        fail("jq command has an in-place action")
+    if name == "sort" and any(
+        arg == "-o" or arg.startswith("-o") or arg == "--output" or arg.startswith("--output=")
+        for arg in lowered
+    ):
+        fail("sort command requests file output")
+    if name == "rg" and any(
+        arg in {"--pre", "--hostname-bin"}
+        or arg.startswith("--pre=")
+        or arg.startswith("--hostname-bin=")
+        for arg in lowered
+    ):
+        fail("rg command requests external helper execution")
+
+
+def validate_powershell_args(name: str, args: list[str]) -> None:
+    allowed = {value.casefold() for value in POWERSHELL_PARAMETERS.get(name, set())}
+    for arg in args:
+        if not arg.startswith("-"):
+            continue
+        parameter = arg.split(":", 1)[0].casefold()
+        if parameter not in allowed:
+            fail(f"PowerShell read command uses an unrecognized parameter: {arg}")
 
 
 def load_authority(isolation_path: Path) -> dict[str, str]:
@@ -252,6 +331,8 @@ def decode_command(command: str, authority: dict[str, str]) -> tuple[str, str]:
         if normalize_windows_path(tokens[0]) != authority["wrapper"]:
             fail("command used an untrusted PowerShell wrapper")
         return "powershell", tokens[3]
+    if tokens and basename(tokens[0]) in READ_ONLY_POWERSHELL:
+        return "powershell", command
     return "shell", command
 
 
@@ -265,6 +346,7 @@ def exact_boundary_elements(
         return False
     return (
         basename(values[0]) in {"bash", "bash.exe"}
+        and trusted_native_name(values[0], basename(values[0]))
         and normalize_windows_path(values[1]) == authority["boundary"]
         and normalize_windows_path(values[2]) == authority["target"]
         and values[3:7] == ["--decision", "approve", "--brief-stdin", "--non-interactive"]
@@ -273,66 +355,25 @@ def exact_boundary_elements(
 
 
 def validate_shell_script(source: str) -> None:
-    if any(marker in source for marker in ("$(", "`", ">", "<", "\x00")):
-        fail("shell inspection uses substitution or redirection")
+    if any(marker in source for marker in ("$", "`", ">", "<", "\x00", "\n", "\r")):
+        fail("shell inspection uses expansion, substitution, redirection, or multiple lines")
     lexer = shlex.shlex(source, posix=True, punctuation_chars="|;&")
     lexer.whitespace_split = True
     try:
         tokens = list(lexer)
     except ValueError as exc:
         fail(f"shell inspection is malformed: {exc}")
-    segments: list[list[str]] = []
-    segment: list[str] = []
-    for token in tokens:
-        if token in {"|", ";", "&&", "||", "&"}:
-            if token == "&":
-                fail("background shell execution is not read-only evidence")
-            if segment:
-                segments.append(segment)
-                segment = []
-        else:
-            segment.append(token)
-    if segment:
-        segments.append(segment)
-    if not segments:
+    if any(token in {"|", ";", "&&", "||", "&"} for token in tokens):
+        fail("shell composition is not statically provable as read-only")
+    if not tokens:
         fail("empty shell inspection")
-    for words in segments:
-        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=[^\s]*", words[0]):
-            words = words[1:]
-        if not words:
-            continue
-        name = basename(words[0])
-        args = words[1:]
-        if name == "set" and args == ["-euo", "pipefail"]:
-            continue
-        if name == "cd" and len(args) == 1:
-            continue
-        if name == "command" and len(args) == 2 and args[0] == "-v":
-            continue
-        if name == "git":
-            validate_git_args(args)
-            continue
-        if name == "find":
-            forbidden = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"}
-            if any(arg.casefold() in forbidden for arg in args):
-                fail("find command has a mutating action")
-            continue
-        if name == "sed":
-            if any(
-                arg == "-i"
-                or arg.startswith("-i")
-                or arg == "--in-place"
-                or arg.startswith("--in-place=")
-                for arg in args
-            ):
-                fail("sed command has an in-place action")
-            continue
-        if name == "jq":
-            if any(arg in {"-i", "--in-place"} for arg in args):
-                fail("jq command has an in-place action")
-            continue
-        if name not in READ_ONLY_NATIVE and name not in READ_ONLY_POWERSHELL:
-            fail(f"shell command is not in the read-only allowlist: {name or '<dynamic>'}")
+    name = basename(tokens[0])
+    args = tokens[1:]
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+        fail("shell environment assignments are not permitted")
+    if name not in READ_ONLY_NATIVE and name != "git":
+        fail(f"shell command is not in the read-only allowlist: {name or '<dynamic>'}")
+    validate_native_args(name, args)
 
 
 def validate_native(
@@ -346,14 +387,15 @@ def validate_native(
     if str(command.get("invocation", "")) not in {"Unknown", ""}:
         fail("PowerShell call or dot invocation is not permitted")
     if exact_boundary_elements(elements, authority, bool(command.get("has_pipeline_input"))):
-        require_trusted_native_name(name_value, name)
         return True, True
+    if not all(bool(element.get("static")) for element in elements):
+        fail("PowerShell command contains a dynamic command or argument")
     if name in {"bash", "bash.exe"}:
         require_trusted_native_name(name_value, name)
         values = [str(element.get("text", "")) for element in elements]
         if len(values) == 2 and values[1] == "--version":
             return True, False
-        if len(values) >= 3 and values[1] == "-lc" and bool(elements[2].get("static")):
+        if len(values) == 3 and values[1] == "-lc":
             validate_shell_script(values[2])
             return True, False
         fail("bash command is not an exact read-only inspection or init boundary")
@@ -361,20 +403,14 @@ def validate_native(
     args = values[1:]
     if name == "git":
         require_trusted_native_name(name_value, name)
-        validate_git_args(args)
+        validate_native_args(name, args)
         return True, False
-    if name in {"find", "sed"}:
+    if name in READ_ONLY_NATIVE:
         require_trusted_native_name(name_value, name)
-        validate_shell_script(" ".join(shlex.quote(value) for value in values))
+        validate_native_args(name, args)
         return True, False
-    if name == "jq":
-        require_trusted_native_name(name_value, name)
-        if any(arg in {"-i", "--in-place"} for arg in args):
-            fail("jq command has an in-place action")
-        return True, False
-    if name in READ_ONLY_NATIVE or name in READ_ONLY_POWERSHELL:
-        if name in READ_ONLY_NATIVE:
-            require_trusted_native_name(name_value, name)
+    if name in READ_ONLY_POWERSHELL:
+        validate_powershell_args(name, args)
         return True, False
     fail(f"PowerShell command is not in the read-only allowlist: {name or '<dynamic>'}")
 
@@ -424,6 +460,7 @@ def exact_direct_boundary(command: str, authority: dict[str, str]) -> bool:
         producer == ["printf", "%s", "$BRIEF"]
         and len(invocation) == 8
         and basename(invocation[0]) in {"bash", "bash.exe"}
+        and trusted_native_name(invocation[0], basename(invocation[0]))
         and normalize_windows_path(invocation[1]) == authority["boundary"]
         and normalize_windows_path(invocation[2]) == authority["target"]
         and invocation[3:7] == ["--decision", "approve", "--brief-stdin", "--non-interactive"]

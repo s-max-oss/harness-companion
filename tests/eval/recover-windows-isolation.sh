@@ -9,6 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ACL_HELPER="$SCRIPT_DIR/windows-isolation-acl.ps1"
 EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
+PUBLICATION_BUNDLE="$SCRIPT_DIR/publication-bundle.py"
+PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
 RECOVERY_JOURNAL="$ROOT/.harness/eval-recovery-journal.json"
 ACL_STATE="$ROOT/.harness/eval-acl-state.json"
 GUARD_STATE="$ROOT/.harness/eval-guard-state.json"
@@ -19,6 +21,11 @@ CANONICAL_OUTPUT="$SCRIPT_DIR/candidates"
 WORK_ROOT="/c/Users/Public/harness-companion-eval"
 WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 TRUSTED_WINDOWS_ENV="/c/Program Files/Git/usr/bin/env.exe"
+
+# shellcheck source=../../core/lib/lock-registry.sh
+. "$ROOT/core/lib/lock-registry.sh" || { echo "eval-recover: runtime lock support is unavailable" >&2; exit 2; }
+# shellcheck source=../../core/lib/runtime-manifest.sh
+. "$ROOT/core/lib/runtime-manifest.sh" || { echo "eval-recover: runtime manifest support is unavailable" >&2; exit 2; }
 
 die() { echo "eval-recover: $*" >&2; exit 2; }
 recovery_test_crash() {
@@ -189,7 +196,7 @@ remove_verified_tree() {
 [ "$#" -eq 0 ] || die "usage: recover-windows-isolation.sh"
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) die "Windows isolation recovery requires Git Bash on Windows" ;; esac
 for cmd in jq python cygpath; do command -v "$cmd" >/dev/null 2>&1 || die "$cmd is required"; done
-for path in "$ACL_HELPER" "$EXECUTABLE_GUARD" "$WINDOWS_POWERSHELL" "$TRUSTED_WINDOWS_ENV"; do
+for path in "$ACL_HELPER" "$EXECUTABLE_GUARD" "$PUBLICATION_BUNDLE" "$WINDOWS_POWERSHELL" "$TRUSTED_WINDOWS_ENV"; do
   [ -f "$path" ] && [ ! -L "$path" ] || die "recovery authority missing or unsafe: $path"
 done
 [ -f "$RECOVERY_JOURNAL" ] && [ ! -L "$RECOVERY_JOURNAL" ] || die "lifecycle recovery journal missing or unsafe"
@@ -205,6 +212,7 @@ jq -e '
           .paths.acl_helper_abort,.paths.acl_helper_recovery; type == "string" and length > 0)
   and ((.paths.publication_lock == null) or (.paths.publication_lock | type == "string" and length > 0))
   and ((.paths.publication_stage == null) or (.paths.publication_stage | type == "string" and length > 0))
+  and ((.paths.publication_bundle == null) or (.paths.publication_bundle | type == "string" and length > 0))
 ' "$RECOVERY_JOURNAL" >/dev/null || die "lifecycle recovery journal is invalid"
 
 journal_nonce="$(jq -r '.nonce' "$RECOVERY_JOURNAL")"
@@ -230,6 +238,7 @@ acl_helper_abort="$(cygpath -u "$(jq -r '.paths.acl_helper_abort' "$RECOVERY_JOU
 acl_helper_recovery="$(cygpath -u "$(jq -r '.paths.acl_helper_recovery' "$RECOVERY_JOURNAL")")"
 publication_lock_win="$(jq -r '.paths.publication_lock // empty' "$RECOVERY_JOURNAL")"
 publication_stage_win="$(jq -r '.paths.publication_stage // empty' "$RECOVERY_JOURNAL")"
+publication_bundle_win="$(jq -r '.paths.publication_bundle // empty' "$RECOVERY_JOURNAL")"
 
 [ "$(host_path "$(jq -r '.paths.journal' "$RECOVERY_JOURNAL")")" = "$(host_path "$RECOVERY_JOURNAL")" ] || die "journal path is not authoritative"
 [ "$(host_path "$work_runs_root")" = "$(host_path "$WORK_ROOT/runs")" ] || die "work root is not canonical"
@@ -254,6 +263,7 @@ if [ "$journal_stage" = recovery_complete ]; then
     "$acl_helper_state" "$acl_helper_state_stage" "$acl_helper_continue" "$acl_helper_abort" "$acl_helper_recovery")
   [ -z "$publication_stage_win" ] || completed_paths+=("$(cygpath -u "$publication_stage_win")")
   [ -z "$publication_lock_win" ] || completed_paths+=("$(cygpath -u "$publication_lock_win")")
+  [ -z "$publication_bundle_win" ] || completed_paths+=("$(cygpath -u "$publication_bundle_win")")
   for path in "${completed_paths[@]}"; do
     [ ! -e "$path" ] && [ ! -L "$path" ] || die "completed recovery still has live state: $path"
   done
@@ -418,7 +428,41 @@ if [ -e "$CANONICAL_AGENT_LOCK" ] || [ -L "$CANONICAL_AGENT_LOCK" ]; then
 fi
 if [ -n "$publication_stage_win" ]; then
   publication_stage="$(cygpath -u "$publication_stage_win")"
-  remove_verified_tree "$publication_stage" "$CANONICAL_OUTPUT" '.staging-' || die "could not remove verified publication stage"
+  if [ -n "$publication_bundle_win" ]; then
+    publication_bundle="$(cygpath -u "$publication_bundle_win")"
+    [ "$(host_path "$publication_bundle")" = "$(host_path "$run_root/controller/publication-bundle.json")" ] \
+      || die "publication recovery manifest is not controller-owned"
+    if [ -e "$publication_bundle" ] || [ -L "$publication_bundle" ]; then
+      [ -f "$PUBLICATION_BUNDLE" ] && [ ! -L "$PUBLICATION_BUNDLE" ] || die "publication recovery authority is missing or unsafe"
+      publication_record="$(python "$PUBLICATION_BUNDLE" verify "$publication_bundle")" \
+        || die "candidate publication recovery manifest is invalid"
+      [ "$(jq -r '.kind' <<< "$publication_record")" = eval_candidate ] || die "publication recovery kind is invalid"
+      [ "$(jq -c '.files | map(.suffix)' <<< "$publication_record")" = '["transcript.jsonl","tree.sha256","subject-events.jsonl","reviewer-events.jsonl","turn-trees.jsonl","evaluator-events.jsonl","reviewer-output.json","objective-checks.jsonl","project-brief.json","isolation.json","json"]' ] \
+        || die "candidate publication file set is invalid"
+      [ "$(host_path "$(jq -r '.stage' <<< "$publication_record")")" = "$(host_path "$publication_stage")" ] \
+        || die "publication recovery stage is not authoritative"
+      [ "$(host_path "$(jq -r '.output' <<< "$publication_record")")" = "$(host_path "$CANONICAL_OUTPUT")" ] \
+        || die "publication recovery output is not authoritative"
+      publication_record="$(python "$PUBLICATION_BUNDLE" recover "$publication_bundle")" \
+        || die "candidate publication could not be completed"
+      publication_base="$(jq -r '.base' <<< "$publication_record")"
+      publication_rels=()
+      while IFS= read -r suffix; do
+        publication_rels+=("tests/eval/candidates/$publication_base.$suffix")
+      done < <(jq -r '.files[].suffix' <<< "$publication_record")
+      printf '%s\0' "${publication_rels[@]}" | runtime_register_batch "$ROOT" eval_candidate \
+        || die "recovered candidate bundle could not be registered atomically"
+      if [ -e "$publication_stage" ] || [ -L "$publication_stage" ]; then
+        python "$PUBLICATION_BUNDLE" remove-tree "$publication_stage" "$CANONICAL_OUTPUT" '.staging-' \
+          || die "could not retire recovered candidate publication stage"
+      fi
+      rm -f -- "$publication_bundle" || die "could not retire publication recovery manifest"
+    else
+      remove_verified_tree "$publication_stage" "$CANONICAL_OUTPUT" '.staging-' || die "could not remove verified publication stage"
+    fi
+  else
+    remove_verified_tree "$publication_stage" "$CANONICAL_OUTPUT" '.staging-' || die "could not remove verified publication stage"
+  fi
 fi
 if [ -n "$publication_lock_win" ]; then
   publication_lock="$(cygpath -u "$publication_lock_win")"

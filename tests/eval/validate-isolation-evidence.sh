@@ -121,6 +121,7 @@ jq -e \
   and ($context | endswith("/skill.md"))
   and ($user_exe | startswith($user_home + "/"))
   and ($host_temp | startswith($user_home + "/"))
+  and ($target == ($run_root + "/project/.harness-eval-isolation-sentinel"))
   and ([range(0; $roots|length) as $i | ($target | startswith($roots[$i] + "/") | not)] | all)
   and ($e.shell_environment_policy | type == "object"
     and (keys | sort) == ["appdata","home","inherit","localappdata","temp","tmp","userprofile"]

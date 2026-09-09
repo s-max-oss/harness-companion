@@ -349,9 +349,9 @@ check "Windows canonical path comparisons are case-normalized" bash -c 'grep -Fq
 check "release gate performs a concluding set-wide evidence pass" grep -Fq 'evidence source set changed during concluding verification' "$EVAL/check-results.sh"
 check "release gate holds the publication lock and rechecks directory membership" bash -c 'grep -Fq "directory_manifest \"\$RESULTS_DIR\" \"\$tmp/results.before.manifest\"" "$1" && grep -Fq "result membership or content changed during validation" "$1"' _ "$EVAL/check-results.sh"
 check "canonical eval writers bind published evidence before releasing locks" bash -c '
-  grep -Fq '\''runtime_register "$ROOT" "$rel" eval_candidate'\'' "$1" \
+  grep -Fq '\''runtime_register_batch "$ROOT" eval_candidate'\'' "$1" \
     && grep -Fq '\''register_candidate_bundle "$base"'\'' "$1" \
-    && grep -Fq '\''runtime_register "$ROOT" "$rel" eval_result'\'' "$2" \
+    && grep -Fq '\''runtime_register_batch "$ROOT" eval_result'\'' "$2" \
     && grep -Fq '\''register_result_bundle "$base_name"'\'' "$2"
 ' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh"
 check "real eval tells the subject the provable read-only command allowlist" bash -c '
@@ -393,6 +393,20 @@ for mutator in 'git apply patch.diff' 'git diff --output=leak.patch' 'Set-Item e
   subject_command_pair mutator-1 "$mutator" > "$TMP/subject-allowlist-negative.jsonl"
   if python "$EVAL/validate-subject-events.py" "$TMP/subject-allowlist-negative.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects non-allowlisted mutator: $mutator"; else ok "subject-event validator rejects non-allowlisted mutator: $mutator"; fi
 done
+subject_command_pair newline-1 $'bash -lc \'cat package.json\nrm -f .eval-network-called\'' > "$TMP/subject-shell-newline.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-shell-newline.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects newline shell composition"; else ok "subject-event validator rejects newline shell composition"; fi
+for bypass in \
+  "BASH_ENV=./call-production-api.sh bash -lc 'cat pyproject.toml'" \
+  "sed -n 'e touch unauthorized' /dev/null" \
+  'find . -fprint0 output' \
+  'sort -o output input' \
+  'rg --pre ./mutator pattern file' \
+  "Get-Item victim | ForEach-Object -MemberName Delete"; do
+  subject_command_pair bypass-1 "$bypass" > "$TMP/subject-semantic-bypass.jsonl"
+  if python "$EVAL/validate-subject-events.py" "$TMP/subject-semantic-bypass.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects semantic bypass: $bypass"; else ok "subject-event validator rejects semantic bypass: $bypass"; fi
+done
+subject_command_pair path-bash-1 "printf %s \$BRIEF | $eval_target/bash $eval_boundary $eval_target --decision approve --brief-stdin --non-interactive --host=codex" > "$TMP/subject-path-bash.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-path-bash.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects path-selected boundary shell"; else ok "subject-event validator rejects path-selected boundary shell"; fi
 subject_command_pair assignment-1 "'$ps_wrapper' -NoProfile -Command '\$env:FLAG = \"changed\"; Get-Content package.json'" > "$TMP/subject-powershell-assignment.jsonl"
 if python "$EVAL/validate-subject-events.py" "$TMP/subject-powershell-assignment.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects PowerShell assignment side effects"; else ok "subject-event validator rejects PowerShell assignment side effects"; fi
 jq -cn --arg command 'Set-Item env:FLAG changed' '{type:"item.started",item:{id:"started-only",type:"command_execution",command:$command}}' > "$TMP/subject-started-only.jsonl"
@@ -763,6 +777,41 @@ else
   bad "publisher atomically refuses an existing destination"
 fi
 
+for publication_boundary in ready companions authoritative registered; do
+  publication_root="$TMP/publication-$publication_boundary"
+  publication_stage="$publication_root/.staging-test"
+  publication_output="$publication_root/output"
+  publication_manifest="$publication_root/bundle.json"
+  mkdir -p "$publication_stage" "$publication_output"
+  printf '%s\n' companion > "$publication_stage/case.1.test.transcript.jsonl"
+  printf '%s\n' authority > "$publication_stage/case.1.test.json"
+  python "$EVAL/publication-bundle.py" create "$publication_manifest" eval_candidate case.1.test \
+    "$publication_stage" "$publication_output" transcript.jsonl json
+  case "$publication_boundary" in
+    companions|authoritative|registered)
+      python "$EVAL/publish-no-replace.py" "$publication_stage/case.1.test.transcript.jsonl" \
+        "$publication_output/case.1.test.transcript.jsonl"
+      ;;
+  esac
+  case "$publication_boundary" in
+    authoritative|registered)
+      python "$EVAL/publish-no-replace.py" "$publication_stage/case.1.test.json" \
+        "$publication_output/case.1.test.json"
+      ;;
+  esac
+  if [ "$publication_boundary" = registered ]; then
+    python "$EVAL/publication-bundle.py" remove-tree "$publication_stage" "$publication_root" '.staging-'
+  fi
+  if python "$EVAL/publication-bundle.py" recover "$publication_manifest" >/dev/null \
+    && python "$EVAL/publication-bundle.py" recover "$publication_manifest" >/dev/null \
+    && [ "$(cat "$publication_output/case.1.test.transcript.jsonl")" = companion ] \
+    && [ "$(cat "$publication_output/case.1.test.json")" = authority ]; then
+    ok "publication recovery is idempotent after $publication_boundary boundary"
+  else
+    bad "publication recovery is idempotent after $publication_boundary boundary"
+  fi
+done
+
 # Exercise the entire post-Agent trust boundary with a disposable key. The
 # synthetic runner output is copied and reshaped into a structurally real
 # candidate only for this offline plumbing test; the production trust anchor is
@@ -791,7 +840,7 @@ test_agent_home_win="$test_probe_run_root_win\\agent-scratch\\home"
 test_agent_temp_win="$test_probe_run_root_win\\agent-scratch\\temp"
 test_agent_appdata_win="$test_probe_run_root_win\\agent-scratch\\appdata"
 test_agent_localappdata_win="$test_probe_run_root_win\\agent-scratch\\localappdata"
-test_probe_payload="$(jq -cnS --arg whoami "$test_whoami_win" --arg source_file "$test_source_win" --arg controller_file "$test_probe_run_root_win\\controller\\runtime.manifest" --arg context_file "$test_context_win" --arg user_executable_file "$test_user_executable_win" --arg host_temp_marker "$test_host_temp_marker_win" --arg shell_home "$test_agent_home_win" --arg shell_temp "$test_agent_temp_win" '{nonce:"test-nonce",target_file:"C:\\target\\.harness-eval-isolation-sentinel",source_file:$source_file,controller_file:$controller_file,user_home:"C:\\home",context_file:$context_file,user_executable_file:$user_executable_file,host_temp_marker:$host_temp_marker,whoami_file:$whoami,expected_shell:{home:$shell_home,userprofile:$shell_home,temp:$shell_temp,tmp:$shell_temp}}')"
+test_probe_payload="$(jq -cnS --arg whoami "$test_whoami_win" --arg target_file "$test_probe_run_root_win\\project\\.harness-eval-isolation-sentinel" --arg source_file "$test_source_win" --arg controller_file "$test_probe_run_root_win\\controller\\runtime.manifest" --arg context_file "$test_context_win" --arg user_executable_file "$test_user_executable_win" --arg host_temp_marker "$test_host_temp_marker_win" --arg shell_home "$test_agent_home_win" --arg shell_temp "$test_agent_temp_win" '{nonce:"test-nonce",target_file:$target_file,source_file:$source_file,controller_file:$controller_file,user_home:"C:\\home",context_file:$context_file,user_executable_file:$user_executable_file,host_temp_marker:$host_temp_marker,whoami_file:$whoami,expected_shell:{home:$shell_home,userprofile:$shell_home,temp:$shell_temp,tmp:$shell_temp}}')"
 test_probe_payload_sha="$(printf '%s' "$test_probe_payload" | sha256sum | cut -d ' ' -f 1)"
 test_probe_script_win="$test_probe_run_root_win\\agent-bin\\isolation-probe.ps1"
 test_probe_script_sha="$(sha256sum "$EVAL/windows-isolation-probe.ps1" | cut -d ' ' -f 1)"
@@ -884,6 +933,31 @@ jq --arg isolation_sha "$isolation_sha" --arg publisher_subject "$test_publisher
   | .attestation={required:true,status:"pending",identity:null,namespace:null,signer_fingerprint:null}
 ' "$attest_candidate" > "$TMP/attest-candidate.tmp"
 mv "$TMP/attest-candidate.tmp" "$attest_candidate"
+test_accounts_json="$(jq -cn --arg offline "$test_offline_sid" --arg online "$test_online_sid" '[{Name:"CodexSandboxOffline",Sid:$offline},{Name:"CodexSandboxOnline",Sid:$online}]')"
+check "isolation validator binds target and controller to one canonical run root" bash "$EVAL/validate-isolation-evidence.sh" \
+  "$attest_base.isolation.json" "$attest_candidate" "$test_source_win" "$test_workspace_win" \
+  "$test_accounts_json" "$EVAL/trust/agent-publishers.json" "$EVAL/validate-probe-command.py"
+other_probe_run_root_win="C:\\Users\\Public\\harness-companion-eval\\runs\\run.$(printf '1%.0s' {1..64})"
+jq --arg target "$other_probe_run_root_win\\project\\.harness-eval-isolation-sentinel" '.probe.payload.target_file=$target' \
+  "$attest_base.isolation.json" > "$TMP/cross-run-isolation.json"
+cross_payload="$(jq -cS '.probe.payload' "$TMP/cross-run-isolation.json")"
+cross_payload_sha="$(printf '%s' "$cross_payload" | sha256sum | cut -d ' ' -f 1)"
+cross_probe_command="& '$test_powershell_win' -NoProfile -ExecutionPolicy Bypass -File '$test_probe_script_win' -ExpectedPayloadSha256 '$cross_payload_sha'"
+cross_probe_command_b64="$(printf '%s' "$cross_probe_command" | base64 | tr -d '\r\n')"
+cross_probe_display="$(python "$EVAL/validate-probe-command.py" --canonical "$test_probe_variant" "$cross_probe_command_b64" "$test_probe_wrapper_win")"
+jq --arg sha "$cross_payload_sha" --arg command "$cross_probe_display" '
+  .probe.result.payload_sha256=$sha
+  | .probe.command_event.command=$command
+  | .probe.command_event.aggregated_output=((.probe.result | tojson) + "\n")
+' "$TMP/cross-run-isolation.json" > "$TMP/cross-run-isolation.tmp"
+mv "$TMP/cross-run-isolation.tmp" "$TMP/cross-run-isolation.json"
+if bash "$EVAL/validate-isolation-evidence.sh" "$TMP/cross-run-isolation.json" "$attest_candidate" \
+  "$test_source_win" "$test_workspace_win" "$test_accounts_json" "$EVAL/trust/agent-publishers.json" \
+  "$EVAL/validate-probe-command.py" >/dev/null 2>&1; then
+  bad "isolation validator rejects target/controller cross-run binding"
+else
+  ok "isolation validator rejects target/controller cross-run binding"
+fi
 check "shared bundle verifier accepts complete same-directory evidence" bash "$EVAL/verify-agent-build.sh" \
   --verify-bundle-evidence "$EVAL/trust/agent-publishers.json" "$attest_candidate"
 bundle_component="$(jq -r '.agent_runtime.components | keys[0]' "$attest_candidate")"
@@ -1042,6 +1116,47 @@ if bash "$EVAL/attest-result.sh" "$coherent_source_candidate" \
 else
   ok "attester rejects coherently forged source-root evidence"
 fi
+
+mkdir -p "$TMP/recovery-attest-candidates" "$TMP/recovery-attested-results"
+for f in "$attest_base".*; do cp "$f" "$TMP/recovery-attest-candidates/"; done
+recovery_attest_candidate="$TMP/recovery-attest-candidates/$(basename "$attest_candidate")"
+recovery_attest_base="${recovery_attest_candidate%.json}"
+if HARNESS_EVAL_TEST_PUBLICATION_STOP_AFTER=companions \
+  bash "$EVAL/attest-result.sh" "$recovery_attest_candidate" \
+    --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/recovery-attest-candidates" \
+    --results-dir="$TMP/recovery-attested-results" --allowed-signers="$TMP/test-release-signers" \
+    > "$TMP/recovery-attest-stop.log" 2>&1; then
+  bad "production attester preserves interrupted publication for retry"
+elif [ "$?" -eq 99 ] \
+  && [ -d "$TMP/recovery-attest-candidates/.eval-agent.lock" ] \
+  && [ -f "$TMP/recovery-attested-results/.eval-write.lock/bundle.json" ] \
+  && [ ! -e "$TMP/recovery-attested-results/$(basename "$recovery_attest_candidate")" ]; then
+  ok "production attester preserves interrupted publication for retry"
+else
+  sed 's/^/  recovery-stop: /' "$TMP/recovery-attest-stop.log" >&2
+  bad "production attester preserves interrupted publication for retry"
+fi
+if bash "$EVAL/attest-result.sh" "$recovery_attest_candidate" \
+  --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/recovery-attest-candidates" \
+  --results-dir="$TMP/recovery-attested-results" --allowed-signers="$TMP/test-release-signers" \
+  > "$TMP/recovery-attest-retry.log" 2>&1 \
+  && [ -f "$TMP/recovery-attested-results/$(basename "$recovery_attest_candidate")" ] \
+  && [ ! -e "$TMP/recovery-attested-results/.eval-write.lock" ] \
+  && [ ! -e "$TMP/recovery-attest-candidates/.eval-agent.lock" ]; then
+  ok "production attester retry completes and retires interrupted publication"
+else
+  sed 's/^/  recovery-retry: /' "$TMP/recovery-attest-retry.log" >&2
+  bad "production attester retry completes and retires interrupted publication"
+fi
+recovery_attested="$TMP/recovery-attested-results/$(basename "$result")"
+check "recovered production attestation remains signed and release-eligible" jq -e \
+  --arg candidate_sha "$(sha256sum "$recovery_attest_candidate" | cut -d ' ' -f 1)" '
+    .schema_version == 3 and .release_eligible == true and .attestation.status == "verified"
+    and .attestation.candidate_sha256 == $candidate_sha
+  ' "$recovery_attested"
+check "recovered production attestation signature verifies" \
+  bash -c 'ssh-keygen -Y verify -q -f "$1" -I harness-eval-release -n harness-eval -s "$2" < "$3"' \
+  _ "$TMP/test-release-signers" "${recovery_attested%.json}.attestation.sig" "$recovery_attested"
 
 if bash "$EVAL/attest-result.sh" "$attest_candidate" \
   --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/attest-candidates" \

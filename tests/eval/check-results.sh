@@ -19,6 +19,7 @@ ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
 AGENT_BUILD_VERIFIER="$SCRIPT_DIR/verify-agent-build.sh"
 PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
+PUBLICATION_BUNDLE="$SCRIPT_DIR/publication-bundle.py"
 WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 WINDOWS_WHOAMI="/c/Windows/System32/whoami.exe"
 for arg in "$@"; do
@@ -98,7 +99,7 @@ if [ -n "${HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS:-}" ]; then
   ALLOWED_SIGNERS="$HARNESS_EVAL_GATE_TEST_ALLOWED_SIGNERS"
 fi
 [ -f "$ALLOWED_SIGNERS" ] && [ ! -L "$ALLOWED_SIGNERS" ] || { echo "eval-gate: trusted signer anchor missing or unsafe" >&2; exit 2; }
-for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER" "$BRIEF_VALIDATOR" "$SUBJECT_EVENT_VALIDATOR" "$ISOLATION_VALIDATOR"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
+for path in "$ATTESTER" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER" "$PUBLICATION_BUNDLE" "$BRIEF_VALIDATOR" "$SUBJECT_EVENT_VALIDATOR" "$ISOLATION_VALIDATOR"; do [ -f "$path" ] && [ ! -L "$path" ] || { echo "eval-gate: eval authority missing or unsafe: $path" >&2; exit 2; }; done
 
 sha() { sha256sum "$1" | awk '{print $1}'; }
 runtime_file_manifest() {
@@ -363,6 +364,7 @@ isolation_recovery_sha="$(sha "$ACL_RECOVERY")"
 agent_publishers_sha="$(sha "$AGENT_PUBLISHERS")"
 agent_build_verifier_sha="$(sha "$AGENT_BUILD_VERIFIER")"
 publisher_sha="$(sha "$PUBLISHER")"
+publication_bundle_sha="$(sha "$PUBLICATION_BUNDLE")"
 brief_validator_sha="$(sha "$BRIEF_VALIDATOR")"
 subject_event_validator_sha="$(sha "$SUBJECT_EVENT_VALIDATOR")"
 isolation_validator_sha="$(sha "$ISOLATION_VALIDATOR")"
@@ -581,7 +583,7 @@ while IFS= read -r case_file; do
     --arg name "$name" --arg version "$version" --arg scenario "$scenario" \
     --arg case_sha "$(sha "$case_file")" --arg skill_sha "$skill_sha" --arg runtime_sha "$runtime_sha" \
     --arg runner_sha "$runner_sha" --arg schema_sha "$schema_sha" --arg rubric_sha "$(sha "$tmp/rubric.json")" --arg signer_fingerprint "$trusted_fingerprint" \
-    --arg attester_sha "$attester_sha" --arg isolation_helper_sha "$isolation_helper_sha" --arg isolation_recovery_sha "$isolation_recovery_sha" --arg isolation_probe_sha "$isolation_probe_sha" --arg probe_command_validator_sha "$probe_command_validator_sha" --arg executable_guard_sha "$executable_guard_sha" --arg agent_publishers_sha "$agent_publishers_sha" --arg agent_build_verifier_sha "$agent_build_verifier_sha" --arg publisher_sha "$publisher_sha" --arg brief_validator_sha "$brief_validator_sha" --arg subject_event_validator_sha "$subject_event_validator_sha" --arg isolation_validator_sha "$isolation_validator_sha" \
+    --arg attester_sha "$attester_sha" --arg isolation_helper_sha "$isolation_helper_sha" --arg isolation_recovery_sha "$isolation_recovery_sha" --arg isolation_probe_sha "$isolation_probe_sha" --arg probe_command_validator_sha "$probe_command_validator_sha" --arg executable_guard_sha "$executable_guard_sha" --arg agent_publishers_sha "$agent_publishers_sha" --arg agent_build_verifier_sha "$agent_build_verifier_sha" --arg publisher_sha "$publisher_sha" --arg publication_bundle_sha "$publication_bundle_sha" --arg brief_validator_sha "$brief_validator_sha" --arg subject_event_validator_sha "$subject_event_validator_sha" --arg isolation_validator_sha "$isolation_validator_sha" \
     --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$codex_approved_builds" \
     --argjson input_count "$input_count" '
       .schema_version == 3 and .case == $name and .case_version == $version
@@ -608,6 +610,7 @@ while IFS= read -r case_file; do
       and .authority.agent_publishers_sha256 == $agent_publishers_sha
       and .authority.agent_build_verifier_sha256 == $agent_build_verifier_sha
       and .authority.publisher_sha256 == $publisher_sha
+      and .authority.publication_bundle_sha256 == $publication_bundle_sha
       and .authority.project_brief_validator_sha256 == $brief_validator_sha
       and .authority.subject_event_validator_sha256 == $subject_event_validator_sha
       and .authority.isolation_validator_sha256 == $isolation_validator_sha
@@ -675,6 +678,7 @@ runtime_file_manifest "$ROOT" "$tmp/runtime.after.manifest" || { echo "eval-gate
   && [ "$agent_publishers_sha" = "$(sha "$AGENT_PUBLISHERS")" ] \
   && [ "$agent_build_verifier_sha" = "$(sha "$AGENT_BUILD_VERIFIER")" ] \
   && [ "$publisher_sha" = "$(sha "$PUBLISHER")" ] \
+  && [ "$publication_bundle_sha" = "$(sha "$PUBLICATION_BUNDLE")" ] \
   && [ "$brief_validator_sha" = "$(sha "$BRIEF_VALIDATOR")" ] \
   && [ "$subject_event_validator_sha" = "$(sha "$SUBJECT_EVENT_VALIDATOR")" ] \
   && [ "$isolation_validator_sha" = "$(sha "$ISOLATION_VALIDATOR")" ] \

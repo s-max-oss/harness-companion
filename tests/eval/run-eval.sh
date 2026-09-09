@@ -11,6 +11,7 @@ DEFAULT_RESULTS="$SCRIPT_DIR/results"
 ACL_HELPER="$SCRIPT_DIR/windows-isolation-acl.ps1"
 ACL_RECOVERY="$SCRIPT_DIR/recover-windows-isolation.sh"
 PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
+PUBLICATION_BUNDLE="$SCRIPT_DIR/publication-bundle.py"
 ATTESTER="$SCRIPT_DIR/attest-result.sh"
 ISOLATION_PROBE="$SCRIPT_DIR/windows-isolation-probe.ps1"
 BRIEF_VALIDATOR="$ROOT/scripts/validate-project-brief.sh"
@@ -40,12 +41,14 @@ sha() { sha256sum "$1" | awk '{print $1}'; }
 
 register_candidate_bundle() {
   local base_name="$1" suffix rel
+  local -a rels=()
   [ "$output_host" = "$default_candidates_host" ] || return 0
   for suffix in transcript.jsonl tree.sha256 subject-events.jsonl reviewer-events.jsonl turn-trees.jsonl evaluator-events.jsonl reviewer-output.json objective-checks.jsonl project-brief.json isolation.json json; do
     rel="tests/eval/candidates/$base_name.$suffix"
-    runtime_register "$ROOT" "$rel" eval_candidate \
-      || die "failed to bind canonical candidate artifact: $rel"
+    rels+=("$rel")
   done
+  printf '%s\0' "${rels[@]}" | runtime_register_batch "$ROOT" eval_candidate \
+    || die "failed to bind canonical candidate artifact bundle"
 }
 
 # Codex Desktop runs under PowerShell 7 and exports its PSModulePath. Passing
@@ -130,7 +133,7 @@ create_recovery_journal() {
           journal_stage:$journal_stage,acl_helper_state:$helper_state,acl_helper_state_stage:$helper_state_stage,
           acl_helper_continue:$helper_continue,
           acl_helper_abort:$helper_abort,acl_helper_recovery:$helper_recovery,
-          publication_lock:null,publication_stage:null}}
+          publication_lock:null,publication_stage:null,publication_bundle:null}}
     ')" || return 1
   HARNESS_EVAL_JOURNAL_PAYLOAD="$payload" python - "$recovery_journal" <<'PY' || return 1
 import os, sys
@@ -184,10 +187,12 @@ set_recovery_publication_paths() {
   local staged="$recovery_journal_stage"
   [ "$recovery_journal_active" = true ] || return 1
   [ ! -e "$staged" ] && [ ! -L "$staged" ] || return 1
-  jq --arg lock "$(cygpath -w "$publication_lock")" --arg stage_path "$(cygpath -w "$stage")" '
+  jq --arg lock "$(cygpath -w "$publication_lock")" --arg stage_path "$(cygpath -w "$stage")" \
+    --arg bundle "$(cygpath -w "$publication_bundle")" '
     .stage = "publication_paths_reserved"
     | .paths.publication_lock = $lock
     | .paths.publication_stage = $stage_path
+    | .paths.publication_bundle = $bundle
   ' "$recovery_journal" > "$staged" || { rm -f -- "$staged"; return 1; }
   python - "$staged" "$recovery_journal" <<'PY' || { rm -f -- "$staged"; return 1; }
 import os, stat, sys, time
@@ -687,7 +692,7 @@ if [ "$SYNTHETIC" = 0 ] && [ "$output_host" = "$default_results_host" ]; then
 fi
 
 for cmd in jq sha256sum find cp mktemp git python tar "$AGENT" "$REVIEWER"; do need "$cmd"; done
-for path in "$PUBLISHER" "$ATTESTER" "$ACL_RECOVERY" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$BRIEF_VALIDATOR" "$SUBJECT_EVENT_VALIDATOR" "$ISOLATION_VALIDATOR"; do
+for path in "$PUBLISHER" "$PUBLICATION_BUNDLE" "$ATTESTER" "$ACL_RECOVERY" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$BRIEF_VALIDATOR" "$SUBJECT_EVENT_VALIDATOR" "$ISOLATION_VALIDATOR"; do
   [ -f "$path" ] && [ ! -L "$path" ] || die "eval authority missing or unsafe: $path"
 done
 jq -e '.schema_version == 1 and (.agents.codex.publisher_subject | type == "string" and length > 0)
@@ -776,6 +781,8 @@ agent_lock="$OUTPUT_DIR/.eval-agent.lock"
 agent_lock_owned=false
 publication_lock=""
 publication_lock_owned=false
+publication_started=false
+publication_bundle=""
 stage=""
 stage_owned=false
 recovery_journal="$ROOT/.harness/eval-recovery-journal.json"
@@ -807,6 +814,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   mkdir -p "$work_root/runs"
   tmp="$work_root/runs/run.$recovery_nonce"
   controller="$tmp/controller"
+  publication_bundle="$controller/publication-bundle.json"
   recovery_journal_stage="$ROOT/.harness/.eval-recovery-journal.stage.$recovery_nonce"
   acl_owner_stage="$acl_lock/.owner.stage.$recovery_nonce"
   acl_helper_state="$ROOT/.harness/.eval-acl-helper.state.$recovery_nonce"
@@ -860,15 +868,15 @@ cleanup() {
   if [ "$SYNTHETIC" = 0 ] && [ "$restore_failed" = false ]; then
     retire_acl_helper_handshake || restore_failed=true
   fi
-  if [ "$restore_failed" = false ] && [ "$stage_owned" = true ]; then
+  if [ "$restore_failed" = false ] && [ "$stage_owned" = true ] && [ "$publication_started" = false ]; then
     cleanup_path="$(host_path "$stage")"
     case "$cleanup_path" in "$output_host"/.staging-*) rm -rf -- "$stage" || restore_failed=true ;; *) restore_failed=true ;; esac
     [ ! -e "$stage" ] && [ ! -L "$stage" ] && stage_owned=false
   fi
-  if [ "$restore_failed" = false ] && [ "$publication_lock_owned" = true ]; then
+  if [ "$restore_failed" = false ] && [ "$publication_lock_owned" = true ] && [ "$publication_started" = false ]; then
     rmdir "$publication_lock" >/dev/null 2>&1 && publication_lock_owned=false || restore_failed=true
   fi
-  if [ "$restore_failed" = false ] && [ "$agent_lock_owned" = true ]; then
+  if [ "$restore_failed" = false ] && [ "$agent_lock_owned" = true ] && [ "$publication_started" = false ]; then
     rmdir "$agent_lock" >/dev/null 2>&1 && agent_lock_owned=false || restore_failed=true
     if [ "$SYNTHETIC" = 0 ] && [ "$agent_lock_owned" = false ]; then update_recovery_journal agent_lock_released || restore_failed=true; fi
   fi
@@ -877,7 +885,7 @@ cleanup() {
     if [ "$restore_failed" = false ]; then rmdir "$acl_lock" >/dev/null 2>&1 && acl_lock_owned=false || restore_failed=true; fi
     if [ "$SYNTHETIC" = 0 ] && [ "$acl_lock_owned" = false ]; then update_recovery_journal acl_lock_released || restore_failed=true; fi
   fi
-  if [ "$restore_failed" = false ] && [ -n "${tmp:-}" ] && [ -d "$tmp" ]; then
+  if [ "$restore_failed" = false ] && [ "$publication_started" = false ] && [ -n "${tmp:-}" ] && [ -d "$tmp" ]; then
     cleanup_path="$(host_path "$tmp")"
     if [ "$SYNTHETIC" = 0 ]; then
       case "$cleanup_path" in "$(host_path "$work_root/runs")"/run.*) rm -rf -- "$tmp" || restore_failed=true ;; *) restore_failed=true ;; esac
@@ -1222,11 +1230,14 @@ harness-init-boundary.sh executor; that executor is the only mutation boundary.
 Every inspection command must be statically provable as read-only. Use only
 PowerShell Get-ChildItem/Get-Command/Get-Content/Get-Date/Get-FileHash/Get-Item/
 Get-Location/Test-Path/Resolve-Path/Select-String plus the formatting, selection,
-JSON conversion, sorting, and pipeline cmdlets needed to display those reads; or
-bare git status/log/diff/show/rev-parse/ls-files/ls-tree, rg, jq without in-place
-mode, sha256sum, and bash -lc composed only from cat/grep/head/rg/sed without -i,
-sort/wc/ls/pwd plus those same read-only git/jq/hash commands. Do not use command
-aliases, call or dot invocation, .NET method calls, redirection, substitutions,
+JSON conversion, sorting, and pipeline cmdlets needed to display those reads
+(ForEach-Object is not allowed); or bare rg, jq without in-place mode, sha256sum,
+cat, grep, head, sort, wc, ls, and pwd. For Git use rev-parse/ls-files/ls-tree,
+`git --no-optional-locks status`, or diff/log/show only with both --no-ext-diff
+and --no-textconv. A `bash -lc` inspection may contain exactly one of those bare
+read commands: no pipelines, separators, newlines, environment assignments,
+expansions, substitutions, callback options, or output options. Do not use command
+aliases, call or dot invocation, .NET method calls, redirection,
 temporary files, test runners, or any command outside that allowlist.
 
 <harness_companion_skill>
@@ -1808,7 +1819,7 @@ jq -n \
   --arg reviewer_verdict "$reviewer_verdict" --arg notes "$review_notes" \
   --arg case_sha256 "$case_sha" --arg skill_sha256 "$skill_sha" --arg runtime_manifest_sha256 "$runtime_manifest_sha" \
   --arg runner_sha256 "$runner_sha" --arg reviewer_schema_sha256 "$schema_sha" --arg canonical_rubric_sha256 "$rubric_sha" \
-  --arg attester_sha256 "$(sha "$ATTESTER")" --arg isolation_helper_sha256 "$(sha "$ACL_HELPER")" --arg isolation_recovery_sha256 "$(sha "$ACL_RECOVERY")" --arg isolation_probe_sha256 "$(sha "$ISOLATION_PROBE")" --arg probe_command_validator_sha256 "$(sha "$PROBE_COMMAND_VALIDATOR")" --arg executable_guard_sha256 "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha256 "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha256 "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha256 "$(sha "$PUBLISHER")" --arg project_brief_validator_sha256 "$(sha "$BRIEF_VALIDATOR")" --arg subject_event_validator_sha256 "$(sha "$SUBJECT_EVENT_VALIDATOR")" --arg isolation_validator_sha256 "$(sha "$ISOLATION_VALIDATOR")" \
+  --arg attester_sha256 "$(sha "$ATTESTER")" --arg isolation_helper_sha256 "$(sha "$ACL_HELPER")" --arg isolation_recovery_sha256 "$(sha "$ACL_RECOVERY")" --arg isolation_probe_sha256 "$(sha "$ISOLATION_PROBE")" --arg probe_command_validator_sha256 "$(sha "$PROBE_COMMAND_VALIDATOR")" --arg executable_guard_sha256 "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha256 "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha256 "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha256 "$(sha "$PUBLISHER")" --arg publication_bundle_sha256 "$(sha "$PUBLICATION_BUNDLE")" --arg project_brief_validator_sha256 "$(sha "$BRIEF_VALIDATOR")" --arg subject_event_validator_sha256 "$(sha "$SUBJECT_EVENT_VALIDATOR")" --arg isolation_validator_sha256 "$(sha "$ISOLATION_VALIDATOR")" \
   --arg subject_name "$AGENT" --arg subject_executable "$subject_executable" --arg subject_executable_sha256 "$subject_executable_sha" --arg subject_cli_version "$subject_version" --arg subject_model "$MODEL" \
   --arg reviewer_name "$REVIEWER" --arg reviewer_executable "$reviewer_executable" --arg reviewer_executable_sha256 "$reviewer_executable_sha" --arg reviewer_cli_version "$reviewer_version" --arg reviewer_model "$REVIEWER_MODEL" --arg reviewer_session_id "$reviewer_session" \
   --argjson subject_authenticode "$subject_authenticode" --argjson reviewer_authenticode "$reviewer_authenticode" \
@@ -1816,21 +1827,46 @@ jq -n \
   --argjson subject_session_ids "$subject_sessions" --argjson passed "$passed" --argjson synthetic "$([ "$SYNTHETIC" = 1 ] && echo true || echo false)" \
   --argjson release_eligible "$release_eligible" --argjson rubric_details "$rubric_details" --argjson artifact_hashes "$artifact_hashes" \
   --slurpfile objective_checks "$objective_checks" \
-  '{schema_version:3,case:$case,case_version:$case_version,spec_version:"2.0.0-rc.3",scenario_ref:$scenario_ref,timestamp:$timestamp,passed:$passed,synthetic:$synthetic,release_eligible:$release_eligible,rubric_score:$rubric_score,rubric_details:$rubric_details,objective_checks:$objective_checks,reviewer_verdict:$reviewer_verdict,notes:$notes,authority:{case_sha256:$case_sha256,skill_sha256:$skill_sha256,runtime_manifest_sha256:$runtime_manifest_sha256,runner_sha256:$runner_sha256,reviewer_schema_sha256:$reviewer_schema_sha256,canonical_rubric_sha256:$canonical_rubric_sha256,attester_sha256:$attester_sha256,isolation_helper_sha256:$isolation_helper_sha256,isolation_recovery_sha256:$isolation_recovery_sha256,isolation_probe_sha256:$isolation_probe_sha256,probe_command_validator_sha256:$probe_command_validator_sha256,executable_guard_sha256:$executable_guard_sha256,agent_publishers_sha256:$agent_publishers_sha256,agent_build_verifier_sha256:$agent_build_verifier_sha256,publisher_sha256:$publisher_sha256,project_brief_validator_sha256:$project_brief_validator_sha256,subject_event_validator_sha256:$subject_event_validator_sha256,isolation_validator_sha256:$isolation_validator_sha256},subject:{name:$subject_name,executable:$subject_executable,executable_sha256:$subject_executable_sha256,authenticode:$subject_authenticode,cli_version:$subject_cli_version,model:$subject_model,session_ids:$subject_session_ids},reviewer:{name:$reviewer_name,executable:$reviewer_executable,executable_sha256:$reviewer_executable_sha256,authenticode:$reviewer_authenticode,cli_version:$reviewer_cli_version,model:$reviewer_model,session_id:$reviewer_session_id,tools_disabled:true},agent_runtime:{components:$agent_runtime_components},isolation:{kind:(if $synthetic then "synthetic-fake-cli" else "windows-native-elevated-acl" end),source_workspace_denied:($synthetic|not),context_authority_denied:($synthetic|not),controller_denied:($synthetic|not),host_profile_environment_sanitized:($synthetic|not),host_temp_write_denied:($synthetic|not)},artifact_hashes:$artifact_hashes,attestation:{required:($synthetic|not),status:(if $synthetic then "not-applicable" else "pending" end),identity:null,namespace:null,signer_fingerprint:null}}' \
+  '{schema_version:3,case:$case,case_version:$case_version,spec_version:"2.0.0-rc.3",scenario_ref:$scenario_ref,timestamp:$timestamp,passed:$passed,synthetic:$synthetic,release_eligible:$release_eligible,rubric_score:$rubric_score,rubric_details:$rubric_details,objective_checks:$objective_checks,reviewer_verdict:$reviewer_verdict,notes:$notes,authority:{case_sha256:$case_sha256,skill_sha256:$skill_sha256,runtime_manifest_sha256:$runtime_manifest_sha256,runner_sha256:$runner_sha256,reviewer_schema_sha256:$reviewer_schema_sha256,canonical_rubric_sha256:$canonical_rubric_sha256,attester_sha256:$attester_sha256,isolation_helper_sha256:$isolation_helper_sha256,isolation_recovery_sha256:$isolation_recovery_sha256,isolation_probe_sha256:$isolation_probe_sha256,probe_command_validator_sha256:$probe_command_validator_sha256,executable_guard_sha256:$executable_guard_sha256,agent_publishers_sha256:$agent_publishers_sha256,agent_build_verifier_sha256:$agent_build_verifier_sha256,publisher_sha256:$publisher_sha256,publication_bundle_sha256:$publication_bundle_sha256,project_brief_validator_sha256:$project_brief_validator_sha256,subject_event_validator_sha256:$subject_event_validator_sha256,isolation_validator_sha256:$isolation_validator_sha256},subject:{name:$subject_name,executable:$subject_executable,executable_sha256:$subject_executable_sha256,authenticode:$subject_authenticode,cli_version:$subject_cli_version,model:$subject_model,session_ids:$subject_session_ids},reviewer:{name:$reviewer_name,executable:$reviewer_executable,executable_sha256:$reviewer_executable_sha256,authenticode:$reviewer_authenticode,cli_version:$reviewer_cli_version,model:$reviewer_model,session_id:$reviewer_session_id,tools_disabled:true},agent_runtime:{components:$agent_runtime_components},isolation:{kind:(if $synthetic then "synthetic-fake-cli" else "windows-native-elevated-acl" end),source_workspace_denied:($synthetic|not),context_authority_denied:($synthetic|not),controller_denied:($synthetic|not),host_profile_environment_sanitized:($synthetic|not),host_temp_write_denied:($synthetic|not)},artifact_hashes:$artifact_hashes,attestation:{required:($synthetic|not),status:(if $synthetic then "not-applicable" else "pending" end),identity:null,namespace:null,signer_fingerprint:null}}' \
   > "$stage/$base.json"
+
+candidate_suffixes=(transcript.jsonl tree.sha256 subject-events.jsonl reviewer-events.jsonl turn-trees.jsonl evaluator-events.jsonl reviewer-output.json objective-checks.jsonl project-brief.json isolation.json json)
+if [ "$SYNTHETIC" = 0 ]; then
+  python "$PUBLICATION_BUNDLE" create "$publication_bundle" eval_candidate "$base" "$stage" "$OUTPUT_DIR" "${candidate_suffixes[@]}" \
+    || die "could not persist candidate publication recovery manifest"
+  update_recovery_journal publication_ready || die "could not record candidate publication readiness"
+  contract_test_hold publication_ready
+fi
 
 publish_args=()
 for suffix in transcript.jsonl tree.sha256 subject-events.jsonl reviewer-events.jsonl turn-trees.jsonl evaluator-events.jsonl reviewer-output.json objective-checks.jsonl project-brief.json isolation.json; do
   publish_args+=("$stage/$base.$suffix" "$OUTPUT_DIR/$base.$suffix")
 done
+if [ "$SYNTHETIC" = 0 ]; then publication_started=true; fi
 python "$PUBLISHER" "${publish_args[@]}" || die "candidate companion publication failed; lock retained"
+if [ "$SYNTHETIC" = 0 ]; then
+  update_recovery_journal publication_companions_published || die "could not record companion publication"
+  contract_test_hold publication_companions_published
+fi
 python "$PUBLISHER" "$stage/$base.json" "$OUTPUT_DIR/$base.json" || die "candidate result publication failed; lock retained"
+if [ "$SYNTHETIC" = 0 ]; then
+  update_recovery_journal publication_published || die "could not record authoritative publication"
+  contract_test_hold publication_published
+fi
 register_candidate_bundle "$base"
-for suffix in transcript.jsonl tree.sha256 subject-events.jsonl reviewer-events.jsonl turn-trees.jsonl evaluator-events.jsonl reviewer-output.json objective-checks.jsonl project-brief.json isolation.json json; do rm -f -- "$stage/$base.$suffix"; done
+if [ "$SYNTHETIC" = 0 ]; then
+  update_recovery_journal publication_registered || die "could not record candidate registration"
+  contract_test_hold publication_registered
+fi
+for suffix in "${candidate_suffixes[@]}"; do rm -f -- "$stage/$base.$suffix"; done
 rmdir "$stage"
 stage_owned=false
+if [ "$SYNTHETIC" = 0 ]; then
+  rm -f -- "$publication_bundle" || die "could not retire candidate publication recovery manifest"
+fi
 rmdir "$publication_lock"
 publication_lock_owned=false
+publication_started=false
 rmdir "$agent_lock"
 agent_lock_owned=false
 if [ "$SYNTHETIC" = 0 ]; then update_recovery_journal agent_lock_released || die "could not update lifecycle recovery journal"; fi

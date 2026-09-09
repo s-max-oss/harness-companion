@@ -61,11 +61,20 @@ rubric check pass.
 The runner atomically publishes an unsigned candidate plus ten bound evidence
 files: dialog, final tree, raw subject and Reviewer events, per-turn trees,
 evaluator actions, structured Reviewer output, objective checks, raw
-`PROJECT_BRIEF.json`, and isolation evidence. The result binds the current case,
-Skill, minimal runtime, runner, attester, isolation helper, no-replace publisher,
-Reviewer schema, rubric, CLI executable/version/model, and fresh session IDs by
-exact value or SHA-256. The separate attester uses create-if-absent publication
-and writes the authoritative result last under `tests/eval/results/`.
+`PROJECT_BRIEF.json`, and isolation evidence. A controller-owned publication
+manifest binds every staged byte before publication. Recovery can idempotently
+finish an interrupted bundle, but it still publishes the authoritative JSON
+last and registers the complete canonical bundle in one runtime-manifest
+transaction. The same protocol protects result promotion. The result binds the
+current case, Skill, minimal runtime, runner, attester, isolation helper,
+no-replace publisher, publication-bundle verifier, Reviewer schema, rubric, CLI
+executable/version/model, and fresh session IDs by exact value or SHA-256.
+
+Subject command evidence is default-deny. The validator accepts only statically
+parseable, read-only commands with trusted executable boundaries; shell
+expansion, environment injection, output options, callbacks, redirection, and
+unrecognized parameters fail the result. Isolation evidence also binds the
+target and controller paths to the exact same run root.
 
 Run all versioned cases explicitly; the runner intentionally has no synthetic
 or batch shortcut:

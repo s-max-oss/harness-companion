@@ -25,6 +25,7 @@ EXECUTABLE_GUARD="$SCRIPT_DIR/windows-executable-guard.ps1"
 AGENT_PUBLISHERS="$SCRIPT_DIR/trust/agent-publishers.json"
 AGENT_BUILD_VERIFIER="$SCRIPT_DIR/verify-agent-build.sh"
 PUBLISHER="$SCRIPT_DIR/publish-no-replace.py"
+PUBLICATION_BUNDLE="$SCRIPT_DIR/publication-bundle.py"
 WINDOWS_POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 WINDOWS_WHOAMI="/c/Windows/System32/whoami.exe"
 TRUSTED_WINDOWS_ENV="/c/Program Files/Git/usr/bin/env.exe"
@@ -43,14 +44,123 @@ sha() { sha256sum "$1" | awk '{print $1}'; }
 
 register_result_bundle() {
   local base_name="$1" suffix rel
+  local -a rels=()
   [ "$candidates_host" = "$canonical_candidates_host" ] \
     && [ "$results_host" = "$canonical_results_host" ] \
     && [ "$allowed_signers_host" = "$canonical_allowed_signers_host" ] || return 0
   for suffix in transcript.jsonl tree.sha256 subject-events.jsonl reviewer-events.jsonl turn-trees.jsonl evaluator-events.jsonl reviewer-output.json objective-checks.jsonl project-brief.json isolation.json attestation.sig json; do
     rel="tests/eval/results/$base_name.$suffix"
-    runtime_register "$ROOT" "$rel" eval_result \
-      || die "failed to bind canonical result artifact: $rel"
+    rels+=("$rel")
   done
+  printf '%s\0' "${rels[@]}" | runtime_register_batch "$ROOT" eval_result \
+    || die "failed to bind canonical result artifact bundle"
+}
+
+recover_interrupted_result_publication() {
+  local manifest="$publication_lock/bundle.json" record recovered base_name stage stage_host promoted signature candidate_sha
+  local candidate_core result_core suffix key artifact
+  local -a rels=()
+  if [ -e "$candidate_lock" ] || [ -L "$candidate_lock" ]; then
+    [ -d "$candidate_lock" ] && [ ! -L "$candidate_lock" ] || die "stale candidate lock is unsafe"
+  else
+    mkdir "$candidate_lock" || die "could not serialize result publication recovery"
+  fi
+  if [ -e "$publication_lock" ] || [ -L "$publication_lock" ]; then
+    [ -d "$publication_lock" ] && [ ! -L "$publication_lock" ] || die "stale result publication lock is unsafe"
+  else
+    mkdir "$publication_lock" || die "could not serialize result publication recovery"
+  fi
+  base_name="${candidate_abs%.json}"
+  base_name="$(basename "$base_name")"
+  stage=""
+  if [ -f "$manifest" ] && [ ! -L "$manifest" ]; then
+    record="$(python "$PUBLICATION_BUNDLE" verify "$manifest")" || die "stale result publication manifest is invalid"
+    [ "$(jq -r '.kind' <<< "$record")" = eval_result ] || die "stale result publication kind is invalid"
+    [ "$(host_path "$(jq -r '.output' <<< "$record")")" = "$results_host" ] || die "stale result publication output is not authoritative"
+    [ "$(jq -r '.base' <<< "$record")" = "$base_name" ] || die "stale result publication belongs to another candidate"
+    [ "$(jq -c '.files | map(.suffix)' <<< "$record")" = '["transcript.jsonl","tree.sha256","subject-events.jsonl","reviewer-events.jsonl","turn-trees.jsonl","evaluator-events.jsonl","reviewer-output.json","objective-checks.jsonl","project-brief.json","isolation.json","attestation.sig","json"]' ] \
+      || die "stale result publication file set is invalid"
+    stage="$(jq -r '.stage' <<< "$record")"
+    stage_host="$(host_path "$stage")"
+    case "$stage_host" in "$results_host"/.attest.*) ;; *) die "stale result publication stage is outside the result directory" ;; esac
+  elif [ -e "$manifest" ] || [ -L "$manifest" ]; then
+    die "stale result publication manifest is unsafe"
+  fi
+  [ "$base_name.json" = "$(basename "$candidate_abs")" ] || die "stale result publication belongs to another candidate"
+  promoted="$RESULTS_DIR/$base_name.json"
+  signature="$RESULTS_DIR/$base_name.attestation.sig"
+  if [ -n "$stage" ]; then
+    [ -f "$promoted" ] && [ ! -L "$promoted" ] || promoted="$stage/$base_name.json"
+    [ -f "$signature" ] && [ ! -L "$signature" ] || signature="$stage/$base_name.attestation.sig"
+  fi
+  [ -f "$promoted" ] && [ ! -L "$promoted" ] && [ -f "$signature" ] && [ ! -L "$signature" ] \
+    || die "stale result publication is missing its signed authority"
+  candidate_sha="$(sha "$candidate_abs")"
+  [ "$(jq -r '.attestation.candidate_sha256 // empty' "$promoted")" = "$candidate_sha" ] \
+    || die "stale result publication is not bound to the selected candidate"
+  ssh-keygen -Y verify -q -f "$ALLOWED_SIGNERS" -I harness-eval-release -n harness-eval -s "$signature" < "$promoted" \
+    || die "stale result publication signature is invalid"
+  candidate_core="$(jq -cS . "$candidate_abs")"
+  result_core="$(jq -cS '
+    .release_eligible=false
+    | .reviewer_verdict="REVIEWED"
+    | .attestation={required:true,status:"pending",identity:null,namespace:null,signer_fingerprint:null}
+  ' "$promoted")"
+  [ "$candidate_core" = "$result_core" ] || die "stale result publication payload is not the selected candidate promotion"
+  while IFS=$'\t' read -r suffix key; do
+    artifact="$RESULTS_DIR/$base_name.$suffix"
+    if [ -n "$stage" ]; then [ -f "$artifact" ] && [ ! -L "$artifact" ] || artifact="$stage/$base_name.$suffix"; fi
+    [ -f "$artifact" ] && [ ! -L "$artifact" ] || die "stale result companion is missing: $suffix"
+    [ "$(jq -r --arg key "$key" '.artifact_hashes[$key] // empty' "$promoted")" = "$(sha "$artifact")" ] \
+      || die "stale result companion is not hash-bound: $suffix"
+  done <<'EOF'
+transcript.jsonl	transcript
+tree.sha256	tree
+subject-events.jsonl	subject_events
+reviewer-events.jsonl	reviewer_events
+turn-trees.jsonl	turn_trees
+evaluator-events.jsonl	evaluator_events
+reviewer-output.json	reviewer_output
+objective-checks.jsonl	objective_checks
+project-brief.json	project_brief
+isolation.json	isolation
+EOF
+  if [ -n "$stage" ]; then
+    recovered="$(python "$PUBLICATION_BUNDLE" recover "$manifest")" || die "stale result publication could not be completed"
+  else
+    recovered="$(jq -cn --arg base "$base_name" '{base:$base,files:["transcript.jsonl","tree.sha256","subject-events.jsonl","reviewer-events.jsonl","turn-trees.jsonl","evaluator-events.jsonl","reviewer-output.json","objective-checks.jsonl","project-brief.json","isolation.json","attestation.sig","json"]|map({suffix:.})}')"
+  fi
+  if [ "$candidates_host" = "$canonical_candidates_host" ] \
+    && [ "$results_host" = "$canonical_results_host" ] \
+    && [ "$allowed_signers_host" = "$canonical_allowed_signers_host" ]; then
+    while IFS= read -r suffix; do rels+=("tests/eval/results/$base_name.$suffix"); done \
+      < <(jq -r '.files[].suffix' <<< "$recovered")
+    printf '%s\0' "${rels[@]}" | runtime_register_batch "$ROOT" eval_result \
+      || die "recovered result bundle could not be registered atomically"
+  fi
+  if [ -n "$stage" ]; then
+    if [ -e "$stage" ] || [ -L "$stage" ]; then
+      python "$PUBLICATION_BUNDLE" remove-tree "$stage" "$RESULTS_DIR" '.attest.' \
+        || die "could not retire recovered result staging tree"
+    fi
+    rm -f -- "$manifest" || die "could not retire result publication recovery manifest"
+  fi
+  rmdir "$publication_lock" || die "could not release recovered result publication lock"
+  rmdir "$candidate_lock" || die "could not release recovered candidate lock"
+  echo "eval-attest: recovered_result=$RESULTS_DIR/$base_name.json"
+  exit 0
+}
+
+publication_test_stop() {
+  local boundary="$1"
+  [ -n "${HARNESS_EVAL_TEST_PUBLICATION_STOP_AFTER:-}" ] || return 0
+  [ "$HARNESS_EVAL_TEST_PUBLICATION_STOP_AFTER" = "$boundary" ] || return 0
+  [ "$allowed_signers_host" != "$canonical_allowed_signers_host" ] \
+    && [ "$candidates_host" != "$canonical_candidates_host" ] \
+    && [ "$results_host" != "$canonical_results_host" ] \
+    || die "publication stop hook is test-only"
+  echo "eval-attest: test publication stop after $boundary" >&2
+  exit 99
 }
 
 # Copy a candidate and every bound companion into private staging without
@@ -479,7 +589,7 @@ for arg in "$@"; do
 done
 
 for cmd in jq sha256sum python ssh-keygen mktemp cp find tr grep iconv base64; do need "$cmd"; done
-for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER" "$ALLOWED_SIGNERS" "$BRIEF_VALIDATOR" "$SUBJECT_EVENT_VALIDATOR" "$ISOLATION_VALIDATOR"; do
+for path in "$RUNNER" "$SCHEMA" "$ACL_HELPER" "$ACL_RECOVERY" "$ISOLATION_PROBE" "$PROBE_COMMAND_VALIDATOR" "$EXECUTABLE_GUARD" "$AGENT_PUBLISHERS" "$AGENT_BUILD_VERIFIER" "$PUBLISHER" "$PUBLICATION_BUNDLE" "$ALLOWED_SIGNERS" "$BRIEF_VALIDATOR" "$SUBJECT_EVENT_VALIDATOR" "$ISOLATION_VALIDATOR"; do
   [ -f "$path" ] && [ ! -L "$path" ] || die "authority missing or unsafe: $path"
 done
 [ -n "$SIGNING_KEY" ] && [ -f "$SIGNING_KEY" ] && [ ! -L "$SIGNING_KEY" ] || die "a regular non-symlink signing key is required"
@@ -521,28 +631,30 @@ else
     || die "custom trust anchors are test-only and cannot publish to canonical directories"
 fi
 candidate_lock="$CANDIDATES_DIR/.eval-agent.lock"
-if ! mkdir "$candidate_lock" 2>/dev/null; then
-  die "Agent evaluation is active or candidate lock is stale: $candidate_lock"
-fi
-candidate_lock_owned=true
 publication_lock="$RESULTS_DIR/.eval-write.lock"
-publication_started=false
-tmp=""
-cleanup() {
-  if [ -n "$tmp" ] && [ -d "$tmp" ]; then rm -rf -- "$tmp"; fi
-  if [ "$publication_started" = false ] && [ -d "$publication_lock" ]; then rmdir "$publication_lock" 2>/dev/null || true; fi
-  if [ "$candidate_lock_owned" = true ] && [ -d "$candidate_lock" ]; then rmdir "$candidate_lock" 2>/dev/null || true; fi
-}
-trap cleanup EXIT
-
 [ ! -e "$CANDIDATES_DIR/.eval-write.lock" ] && [ ! -L "$CANDIDATES_DIR/.eval-write.lock" ] || die "candidate publication is incomplete"
-if ! mkdir "$publication_lock" 2>/dev/null; then die "result publication lock exists: $publication_lock"; fi
-
 [ -f "$CANDIDATE" ] && [ ! -L "$CANDIDATE" ] || die "candidate missing or unsafe"
 candidate_abs="$(cd "$(dirname "$CANDIDATE")" && pwd -P)/$(basename "$CANDIDATE")"
 candidate_host="$(host_path "$candidate_abs")"
 case "$candidate_host" in "$candidates_host"/*.json) ;; *) die "candidate is outside the authoritative candidate directory" ;; esac
 case "$(basename "$candidate_abs")" in *.reviewer-output.json|*[!A-Za-z0-9._-]*) die "unsafe candidate name" ;; esac
+if [ -e "$publication_lock" ] || [ -L "$publication_lock" ] || [ -e "$candidate_lock" ] || [ -L "$candidate_lock" ]; then
+  recover_interrupted_result_publication
+fi
+if ! mkdir "$candidate_lock" 2>/dev/null; then
+  die "Agent evaluation is active or candidate lock is stale: $candidate_lock"
+fi
+candidate_lock_owned=true
+publication_started=false
+tmp=""
+cleanup() {
+  if [ "$publication_started" = false ] && [ -n "$tmp" ] && [ -d "$tmp" ]; then rm -rf -- "$tmp"; fi
+  if [ "$publication_started" = false ] && [ -d "$publication_lock" ]; then rmdir "$publication_lock" 2>/dev/null || true; fi
+  if [ "$publication_started" = false ] && [ "$candidate_lock_owned" = true ] && [ -d "$candidate_lock" ]; then rmdir "$candidate_lock" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+
+if ! mkdir "$publication_lock" 2>/dev/null; then die "result publication lock exists: $publication_lock"; fi
 
 tmp="$(mktemp -d "$RESULTS_DIR/.attest.XXXXXX")" || die "attestation staging failed"
 base="${candidate_abs%.json}"
@@ -834,7 +946,7 @@ jq -e \
   --arg name "$case_name" --arg version "$case_version" --arg scenario "$scenario" \
   --arg case_sha "$(sha "$case_file")" --arg skill_sha "$(sha "$ROOT/SKILL.md")" --arg runtime_sha "$(sha "$tmp/runtime.manifest")" \
   --arg runner_sha "$(sha "$RUNNER")" --arg schema_sha "$(sha "$SCHEMA")" --arg rubric_sha "$(sha "$tmp/rubric.json")" \
-  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg probe_command_validator_sha "$(sha "$PROBE_COMMAND_VALIDATOR")" --arg executable_guard_sha "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha "$(sha "$PUBLISHER")" --arg brief_validator_sha "$(sha "$BRIEF_VALIDATOR")" --arg subject_event_validator_sha "$(sha "$SUBJECT_EVENT_VALIDATOR")" --arg isolation_validator_sha "$(sha "$ISOLATION_VALIDATOR")" \
+  --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg probe_command_validator_sha "$(sha "$PROBE_COMMAND_VALIDATOR")" --arg executable_guard_sha "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha "$(sha "$PUBLISHER")" --arg publication_bundle_sha "$(sha "$PUBLICATION_BUNDLE")" --arg brief_validator_sha "$(sha "$BRIEF_VALIDATOR")" --arg subject_event_validator_sha "$(sha "$SUBJECT_EVENT_VALIDATOR")" --arg isolation_validator_sha "$(sha "$ISOLATION_VALIDATOR")" \
   --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$(jq -c '.agents.codex.approved_builds' "$AGENT_PUBLISHERS")" \
   --argjson input_count "$input_count" '
     .schema_version == 3 and .case == $name and .case_version == $version
@@ -854,6 +966,7 @@ jq -e \
     and .authority.agent_publishers_sha256 == $agent_publishers_sha
     and .authority.agent_build_verifier_sha256 == $agent_build_verifier_sha
     and .authority.publisher_sha256 == $publisher_sha
+    and .authority.publication_bundle_sha256 == $publication_bundle_sha
     and .authority.project_brief_validator_sha256 == $brief_validator_sha
     and .authority.subject_event_validator_sha256 == $subject_event_validator_sha
     and .authority.isolation_validator_sha256 == $isolation_validator_sha
@@ -938,13 +1051,24 @@ done
   || die "result destination already exists: $RESULTS_DIR/$base_name.attestation.sig"
 [ ! -e "$RESULTS_DIR/$base_name.json" ] && [ ! -L "$RESULTS_DIR/$base_name.json" ] \
   || die "result destination already exists: $RESULTS_DIR/$base_name.json"
+result_suffixes=("${artifact_suffixes[@]}" attestation.sig json)
+python "$PUBLICATION_BUNDLE" create "$publication_lock/bundle.json" eval_result "$base_name" "$tmp" "$RESULTS_DIR" "${result_suffixes[@]}" \
+  || die "could not persist result publication recovery manifest"
 publication_started=true
+publication_test_stop ready
 python "$PUBLISHER" "${publish_args[@]}" || die "result companion publication failed; lock retained"
+publication_test_stop companions
 python "$PUBLISHER" "$tmp/$base_name.attestation.sig" "$RESULTS_DIR/$base_name.attestation.sig" \
   || die "result signature publication failed; lock retained"
 python "$PUBLISHER" "$promoted" "$RESULTS_DIR/$base_name.json" \
   || die "authoritative result publication failed; lock retained"
+publication_test_stop authoritative
 register_result_bundle "$base_name"
+publication_test_stop registered
+python "$PUBLICATION_BUNDLE" remove-tree "$tmp" "$RESULTS_DIR" '.attest.' \
+  || die "could not retire result publication staging tree"
+tmp=""
+rm -f -- "$publication_lock/bundle.json" || die "could not retire result publication recovery manifest"
 rmdir "$publication_lock"
 publication_lock=""
 publication_started=false

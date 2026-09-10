@@ -345,18 +345,30 @@ def decode_command(command: str, authority: dict[str, str]) -> tuple[str, str]:
 def exact_boundary_elements(
     elements: list[dict[str, object]], authority: dict[str, str], has_input: bool
 ) -> bool:
-    if len(elements) != 8 or not has_input:
+    if len(elements) not in {8, 9, 11} or not has_input:
         return False
     values = [str(element.get("text", "")) for element in elements]
     if not all(bool(element.get("static")) for element in elements[1:]):
         return False
-    return (
+    prefix_ok = (
         basename(values[0]) in {"bash", "bash.exe"}
         and trusted_native_name(values[0], basename(values[0]))
         and normalize_windows_path(values[1]) == authority["boundary"]
         and normalize_windows_path(values[2]) == authority["target"]
         and values[3:7] == ["--decision", "approve", "--brief-stdin", "--non-interactive"]
         and values[7].casefold() in {"--host=claude", "--host=codex"}
+    )
+    if not prefix_ok:
+        return False
+    tail = values[8:]
+    return (
+        tail == []
+        or tail == ["--update"]
+        or (
+            len(tail) == 3
+            and tail[:2] == ["--update", "--apply"]
+            and re.fullmatch(r"--plan-token=[0-9a-f]{64}", tail[2]) is not None
+        )
     )
 
 
@@ -461,15 +473,26 @@ def exact_direct_boundary(command: str, authority: dict[str, str]) -> bool:
         invocation = shlex.split(invocation_raw, posix=True)
     except ValueError:
         return False
-    return (
+    if not (
         producer == ["printf", "%s", "$BRIEF"]
-        and len(invocation) == 8
+        and len(invocation) in {8, 9, 11}
         and basename(invocation[0]) in {"bash", "bash.exe"}
         and trusted_native_name(invocation[0], basename(invocation[0]))
         and normalize_windows_path(invocation[1]) == authority["boundary"]
         and normalize_windows_path(invocation[2]) == authority["target"]
         and invocation[3:7] == ["--decision", "approve", "--brief-stdin", "--non-interactive"]
         and invocation[7].casefold() in {"--host=claude", "--host=codex"}
+    ):
+        return False
+    tail = invocation[8:]
+    return (
+        tail == []
+        or tail == ["--update"]
+        or (
+            len(tail) == 3
+            and tail[:2] == ["--update", "--apply"]
+            and re.fullmatch(r"--plan-token=[0-9a-f]{64}", tail[2]) is not None
+        )
     )
 
 

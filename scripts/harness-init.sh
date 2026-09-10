@@ -510,10 +510,11 @@ brief_md=$brief_md_state"
     plan_material="$plan_material
 brief_input=$brief_input_sha"
   fi
-  if [ "$BRIEF_STDIN" = "true" ] && [ "$UPDATE" = "true" ]; then
-    echo "error: explicit --update does not support --brief-stdin; use a stable --brief file" >&2
-    return 2
-  fi
+  # Explicit update may receive the Brief through stdin. The plan material
+  # below includes the exact Brief payload hash, so the dry-run token is valid
+  # only when the apply invocation streams byte-identical JSON and the bound
+  # target state is unchanged. This gives sandboxed Agents a stable update
+  # path without creating an untrusted temporary Brief file.
   local plan="" wrote_any=false
   local k src desired sha_snap sha_now sha_tmpl
   SNAP_ENTRIES="$(jq -c '.templates' "$snap")" || return 2

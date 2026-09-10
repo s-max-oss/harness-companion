@@ -1254,12 +1254,20 @@ current project. Execute initialization only after explicit confirmation.
 Do not create, edit, move, or delete any file directly, including temporary
 Brief files. On approval, pass the exact Brief through stdin to the trusted
 harness-init-boundary.sh executor; that executor is the only mutation boundary.
-For that Codex Windows boundary call, use exactly one static PowerShell pipeline:
+For a fresh-project Codex Windows boundary call, use exactly one static PowerShell pipeline:
 Write-Output '<one-line compact JSON>' | bash '<boundary>' '<target>' --decision
 approve --brief-stdin --non-interactive --host=codex. Inside the single-quoted
 PowerShell string, write JSON double quotes literally, never as backslash-quote;
 double any JSON apostrophe as two PowerShell apostrophes. Do not use a here-string,
 variable, base64 wrapper, temporary file, or any other stdin producer.
+For an approved post-init Brief edit, never use that bare resume command. Stream
+the same compact JSON first to the same boundary command with a final --update
+argument. This is the mandatory no-write dry run. Check that its creates,
+updates, and preserved sets match the plan shown to the user. Then stream the
+byte-identical JSON again to the same boundary command with final arguments
+--update --apply --plan-token=<the 64-lowercase-hex token from the dry run>.
+These are two separate static PowerShell pipelines in the same Agent turn; do
+not combine them, use a dynamic variable, omit the token, or change the JSON.
 Every inspection command must be statically provable as read-only. Use only
 PowerShell Get-ChildItem/Get-Command/Get-Content/Get-Date/Get-FileHash/Get-Item/
 Get-Location/Test-Path/Resolve-Path/Select-String plus the formatting, selection,

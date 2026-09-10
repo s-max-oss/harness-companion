@@ -245,6 +245,27 @@ else
   bad "update apply" "executor exited non-zero"
 fi
 
+# 4b. A sandboxed Agent may stream one byte-identical Brief for explicit
+# update dry-run and apply. The token binds both the payload and target state.
+STDIN_UPDATE='{"goal":"Ship through the guarded stdin update"}'
+STDIN_BEFORE="$(tree_manifest "$T1")"
+STDIN_PLAN="$(printf '%s' "$STDIN_UPDATE" | bash "$INIT" "$T1" --brief-stdin --non-interactive --host=codex --update 2>/dev/null)"
+STDIN_TOKEN="$(printf '%s\n' "$STDIN_PLAN" | sed -n 's/^Plan token: //p' | tail -1)"
+check "stdin update dry-run emits a bound token" bash -c 'printf %s "$1" | grep -qE "^[0-9a-f]{64}$"' _ "$STDIN_TOKEN"
+check "stdin update dry-run writes zero target bytes" test "$STDIN_BEFORE" = "$(tree_manifest "$T1")"
+if printf '%s' "$STDIN_UPDATE" | bash "$INIT" "$T1" --brief-stdin --non-interactive --host=codex --update --apply --plan-token "$STDIN_TOKEN" >/dev/null 2>&1; then
+  check "stdin update applies the approved goal" test "$(jq -r .goal "$T1/.harness/PROJECT_BRIEF.json")" = "Ship through the guarded stdin update"
+  check "stdin update preserves user file" test "$(sha256sum "$T1/AGENTS.md" | awk '{print $1}')" = "$AGENTS_SHA"
+else
+  bad "stdin update apply" "executor exited non-zero"
+fi
+STALE_STDIN_BEFORE="$(tree_manifest "$T1")"
+if printf '%s' '{"goal":"Changed after dry-run"}' | bash "$INIT" "$T1" --brief-stdin --non-interactive --host=codex --update --apply --plan-token "$STDIN_TOKEN" >/dev/null 2>&1; then
+  bad "stdin update token rejects a changed payload"
+else
+  check "changed stdin payload leaves target unchanged" test "$STALE_STDIN_BEFORE" = "$(tree_manifest "$T1")"
+fi
+
 # 5. --force-config never overwrites non-config artifacts.
 printf '\nforce-protected\n' >> "$T1/init.sh"
 INIT_SHA="$(sha256sum "$T1/init.sh" | awk '{print $1}')"

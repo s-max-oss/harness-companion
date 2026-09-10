@@ -199,6 +199,13 @@ turn if they match. Stop and present the new difference only if the dry run
 introduces an unshown file action, conflict, or scope change. Never skip the
 dry run or apply without its token.
 
+In a sandbox that forbids temporary Brief files, stream the same compact JSON
+payload through the trusted boundary for both invocations: first with
+`--update` only, then with `--update --apply --plan-token <token>`. The token
+binds the stdin payload hash and target state. Do not use the bare managed
+resume shortcut, change the payload, or change transport between dry-run and
+apply.
+
 ## Preserve authority boundaries
 
 The Brief is advisory. Current-session instructions and host security policy

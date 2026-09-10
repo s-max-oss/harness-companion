@@ -111,7 +111,15 @@ with a lossy Brief and ask the user to repair it afterward.
 
 For resume on a managed-valid project, first perform a no-write 3-way comparison and explain which files are identical, template-only changes, user-modified, or missing. Offer **apply the template-only changes**, **keep all existing files**, or **cancel**. Only an approved exact plan may execute; user-modified files must be preserved. Use the same stable-Brief dry-run and plan-token apply sequence as explicit update below. If the user keeps all or cancels, do not apply the plan.
 
-For explicit `/harness:init --update`, store the confirmed Brief in a stable temporary file outside the target. On a legacy-unmanaged project, first explain which files predate Harness management, collect and confirm any missing Brief fields, and make clear that the new snapshot will claim only files this migration creates. Then:
+For explicit `/harness:init --update`, keep one stable confirmed Brief payload. A
+manual CLI caller may store it in a stable temporary file outside the target. A
+sandboxed Agent that is forbidden to create temporary files must stream the
+same compact one-line JSON through `harness-init-boundary.sh --brief-stdin` for
+both dry-run and apply; the plan token binds the exact stdin payload hash as
+well as the target state. Never switch payloads or transport between those two
+invocations. On a legacy-unmanaged project, first explain which files predate
+Harness management, collect and confirm any missing Brief fields, and make
+clear that the new snapshot will claim only files this migration creates. Then:
 
 When a managed project is already initialized and the user requests a concrete
 Brief edit while preserving everything else, begin from the on-disk confirmed
@@ -121,9 +129,15 @@ the displayed revised value is the requested value. Do not reuse the initial
 Approve/Edit/Cancel template with a stale Brief, and do not ask the user to
 reconfirm unchanged fields.
 
-1. Run `bash <skill-root>/scripts/harness-init.sh <target> --brief <temp-json> --non-interactive --host=<claude|codex> --update` as a no-write dry run.
+1. Run the trusted boundary as a no-write dry run, using either the stable
+   `--brief <temp-json>` payload or the exact `--brief-stdin` payload, and pass
+   `--non-interactive --host=<claude|codex> --update`. Never use the bare
+   managed-project `--brief` resume shortcut for an approved Brief edit.
 2. Explain the proposed creates, updates, and preserved user modifications. Ask whether to apply that exact plan.
-3. Only after approval, run `bash <skill-root>/scripts/harness-init.sh <target> --brief <temp-json> --non-interactive --host=<claude|codex> --update --apply --plan-token <token>`. A stale or missing token means stop and regenerate the plan; never bypass the check.
+3. Only after approval, invoke the trusted boundary again with the identical
+   Brief transport and payload plus `--update --apply --plan-token <token>`.
+   A stale or missing token means stop and regenerate the plan; never bypass
+   the check.
 
 Do not add a redundant approval round for the plan token. If the Agent has just
 displayed the exact intended Brief change and preservation guarantees, and the

@@ -179,6 +179,7 @@ else
   ok "double-quoted probe serializer rejects expansion-capable commands"
 fi
 check "production probe derives the observed system wrapper" grep -Fq 'codex_shell_wrapper_win="$system_root_win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"' "$EVAL/run-eval.sh"
+check "production probe permits only same-session async completion" grep -Fq 'keep waiting on that existing shell session until it exits; do not launch a second command' "$EVAL/run-eval.sh"
 check "production probe validator uses the observed system wrapper and build policy" bash -c 'grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1"' _ "$EVAL/run-eval.sh"
 check "production inner probe stays profile-free and binds a guarded script plus payload hash" bash -c 'grep -Fq -- "-NoProfile -ExecutionPolicy Bypass -File" "$1" && grep -Fq -- "-ExpectedPayloadSha256" "$1" && grep -Fq "probe_script_guard_win" "$1"' _ "$EVAL/run-eval.sh"
 check "failed access-boundary probes emit only a path-free boolean summary" bash -c 'grep -Fq "nonce_match:(.nonce == \$nonce)" "$1" && grep -Fq "payload_sha_match:(.payload_sha256 == \$payload_sha)" "$1" && grep -Fq "target_file_readable:(.target_file_readable == true)" "$1" && grep -Fq "source_workspace_readable:(.source_workspace_readable == true)" "$1" && grep -Fq "did not prove the required access boundary: \$probe_boundary_summary" "$1" && ! grep -Fq "did not prove the required access boundary: \$probe_result" "$1"' _ "$EVAL/run-eval.sh"

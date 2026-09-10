@@ -1379,7 +1379,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   probe_script_win="$(cygpath -w "$probe_script")" || die "could not resolve the isolation probe snapshot"
   [ "$(sha "$probe_script")" = "$(sha "$ISOLATION_PROBE")" ] || die "isolation probe snapshot changed before execution"
   probe_command="& '$system_powershell_win' -NoProfile -ExecutionPolicy Bypass -File '$probe_script_win' -ExpectedPayloadSha256 '$probe_payload_sha'"
-  printf 'Run exactly this one command with the shell tool, with no edits, prefixes, suffixes, pipelines, or additional commands. Do not use any other tool.\n%s\n' "$probe_command" > "$probe_prompt"
+  printf 'Run exactly this one command with the shell tool, with no edits, prefixes, suffixes, pipelines, or additional commands. If the shell reports that this same command is still running, keep waiting on that existing shell session until it exits; do not launch a second command. Do not use any non-shell tool.\n%s\n' "$probe_command" > "$probe_prompt"
   probe_rc=0
   verify_guarded_executables || die "validated Agent executable guard failed before isolation probe"
   [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || die "Codex PowerShell wrapper changed before isolation probe"

@@ -41,6 +41,7 @@ source "$ROOT_DIR/core/lib/project-detect.sh"
 TARGET=""
 BRIEF_PATH=""
 BRIEF_STDIN="false"
+BRIEF_INPUT_SHA=""
 NON_INTERACTIVE="false"
 UPDATE="false"
 APPLY="false"
@@ -465,6 +466,10 @@ detected_type=$DTYPE
 source_version=$VERSION
 captured_rev=$CAPTURED_REV
 force_config=$FORCE_CONFIG"
+    if [ -n "$BRIEF_INPUT_SHA" ]; then
+      legacy_material="$legacy_material
+brief_input=$BRIEF_INPUT_SHA"
+    fi
     for legacy_path in .harness/config.json .harness/.template-snapshot.json .harness/PROJECT_BRIEF.json .harness/PROJECT_BRIEF.md feature_list.json AGENTS.md CLAUDE.md init.sh claude-progress.md codex-progress.md; do
       legacy_state="$(path_state "$TARGET/$legacy_path")" || { echo "error: could not bind update plan: $legacy_path" >&2; return 1; }
       legacy_material="$legacy_material
@@ -503,15 +508,13 @@ force_config=$FORCE_CONFIG
 snapshot=$snapshot_base_sha
 brief_path=$brief_path_state
 brief_md=$brief_md_state"
-  if [ -n "$BRIEF_PATH" ]; then
-    local brief_input_sha
-    brief_input_sha="$(sha256_file "$BRIEF_PATH")"
-    [ -n "$brief_input_sha" ] || { echo "error: could not hash Brief input" >&2; return 1; }
+  if [ -n "$BRIEF_INPUT_SHA" ]; then
     plan_material="$plan_material
-brief_input=$brief_input_sha"
+brief_input=$BRIEF_INPUT_SHA"
   fi
-  # Explicit update may receive the Brief through stdin. The plan material
-  # below includes the exact Brief payload hash, so the dry-run token is valid
+  # Explicit update may receive the Brief through stdin. BRIEF_INPUT_SHA above
+  # binds the caller-provided bytes before they are merged with the existing
+  # Brief, so the dry-run token is valid
   # only when the apply invocation streams byte-identical JSON and the bound
   # target state is unchanged. This gives sandboxed Agents a stable update
   # path without creating an untrusted temporary Brief file.
@@ -774,10 +777,20 @@ validate_brief_input() {
 # AC-13a: in --brief / --brief-stdin mode, goal + success_criteria are required.
 if [ -n "$BRIEF_PATH" ] || [ "$BRIEF_STDIN" = "true" ]; then
   if [ "$BRIEF_STDIN" = "true" ]; then
-    INPUT_BRIEF_JSON="$(cat)" || INPUT_BRIEF_JSON=""
+    # `$(cat)` discards trailing LF bytes and would let two distinct stdin
+    # payloads share one plan token. `read -d ''` retains every non-NUL byte
+    # through EOF; raw NUL is not valid JSON and is rejected below.
+    INPUT_BRIEF_JSON=""
+    if IFS= read -r -d '' INPUT_BRIEF_JSON; then
+      echo "error: Brief stdin contains a NUL byte" >&2
+      exit 2
+    fi
+    BRIEF_INPUT_SHA="$(printf '%s' "$INPUT_BRIEF_JSON" | sha256_text)"
   else
     INPUT_BRIEF_JSON="$(cat "$BRIEF_PATH" 2>/dev/null)" || INPUT_BRIEF_JSON=""
+    BRIEF_INPUT_SHA="$(sha256_file "$BRIEF_PATH")"
   fi
+  [ -n "$BRIEF_INPUT_SHA" ] || { echo "error: could not hash Brief input" >&2; exit 1; }
   if ! printf '%s' "$INPUT_BRIEF_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then
     echo "error: Brief: not a valid JSON object" >&2
     exit 2

@@ -391,10 +391,10 @@ jq -n --arg target_file "$eval_target/.harness-eval-isolation-sentinel" \
   --arg wrapper "$ps_wrapper" \
   '{probe:{payload:{target_file:$target_file},shell_wrapper_path:$wrapper}}' > "$TMP/subject-isolation.json"
 subject_command_pair() {
-  local id="$1" command="$2"
-  jq -cn --arg id "$id" --arg command "$command" \
+  local id="$1" command="$2" output="${3:-}"
+  jq -cn --arg id "$id" --arg command "$command" --arg output "$output" \
     '{type:"item.started",item:{id:$id,type:"command_execution",command:$command}},
-     {type:"item.completed",item:{id:$id,type:"command_execution",command:$command,status:"completed",exit_code:0}}'
+     {type:"item.completed",item:{id:$id,type:"command_execution",command:$command,status:"completed",exit_code:0,aggregated_output:$output}}'
 }
 subject_command_pair read-1 'Get-Content -Raw package.json' > "$TMP/subject-read.jsonl"
 check "subject-event validator permits read-only inspection" python "$EVAL/validate-subject-events.py" "$TMP/subject-read.jsonl" "$TMP/subject-isolation.json"
@@ -408,11 +408,30 @@ subject_command_pair boundary-1 "printf %s \$BRIEF | bash $eval_boundary $eval_t
 if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects incomplete boundary invocation"; else ok "subject-event validator rejects incomplete boundary invocation"; fi
 subject_command_pair boundary-2 "printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin --non-interactive --host=codex" > "$TMP/subject-boundary.jsonl"
 check "subject-event validator permits the exact approved boundary" python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary.jsonl" "$TMP/subject-isolation.json"
-subject_command_pair boundary-update-plan "printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin --non-interactive --host=codex --update" > "$TMP/subject-boundary-update-plan.jsonl"
-check "subject-event validator permits exact update dry-run boundary" python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-plan.jsonl" "$TMP/subject-isolation.json"
 update_token="$(printf 'a%.0s' {1..64})"
-subject_command_pair boundary-update-apply "printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin --non-interactive --host=codex --update --apply --plan-token=$update_token" > "$TMP/subject-boundary-update-apply.jsonl"
-check "subject-event validator permits exact token-bound update apply boundary" python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-apply.jsonl" "$TMP/subject-isolation.json"
+update_payload_escaped='{\"goal\":\"A\"}'
+update_plan_command="\"$ps_wrapper\" -NoProfile -Command \"Write-Output '$update_payload_escaped' | bash '$eval_boundary' '$eval_target' --decision approve --brief-stdin --non-interactive --host=codex --update\""
+update_apply_command="\"$ps_wrapper\" -NoProfile -Command \"Write-Output '$update_payload_escaped' | bash '$eval_boundary' '$eval_target' --decision approve --brief-stdin --non-interactive --host=codex --update --apply --plan-token=$update_token\""
+subject_command_pair boundary-update-plan "$update_plan_command" "=== Update plan (dry-run — no writes) ===
+Plan token: $update_token" > "$TMP/subject-boundary-update-plan.jsonl"
+check "subject-event validator permits exact update dry-run boundary" python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-plan.jsonl" "$TMP/subject-isolation.json"
+subject_command_pair boundary-update-apply "$update_apply_command" > "$TMP/subject-boundary-update-apply.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-apply.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects standalone update apply"; else ok "subject-event validator rejects standalone update apply"; fi
+cat "$TMP/subject-boundary-update-plan.jsonl" "$TMP/subject-boundary-update-apply.jsonl" > "$TMP/subject-boundary-update-sequence.jsonl"
+check "subject-event validator permits exact dry-run then token-bound apply" python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-sequence.jsonl" "$TMP/subject-isolation.json"
+wrong_update_token="$(printf 'b%.0s' {1..64})"
+wrong_token_command="${update_apply_command%$update_token\"}$wrong_update_token\""
+subject_command_pair boundary-update-wrong-token "$wrong_token_command" > "$TMP/subject-boundary-update-wrong-token.jsonl"
+cat "$TMP/subject-boundary-update-plan.jsonl" "$TMP/subject-boundary-update-wrong-token.jsonl" > "$TMP/subject-boundary-update-wrong-sequence.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-wrong-sequence.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects apply token not emitted by dry-run"; else ok "subject-event validator rejects apply token not emitted by dry-run"; fi
+changed_payload_command="${update_apply_command/\\\"A\\\"/\\\"B\\\"}"
+subject_command_pair boundary-update-changed-payload "$changed_payload_command" > "$TMP/subject-boundary-update-changed-payload.jsonl"
+cat "$TMP/subject-boundary-update-plan.jsonl" "$TMP/subject-boundary-update-changed-payload.jsonl" > "$TMP/subject-boundary-update-changed-sequence.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-changed-sequence.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects apply payload changed after dry-run"; else ok "subject-event validator rejects apply payload changed after dry-run"; fi
+jq -cn --arg command "$update_apply_command" '{type:"item.started",item:{id:"boundary-update-apply",type:"command_execution",command:$command}}' > "$TMP/subject-boundary-update-early-start.jsonl"
+cat "$TMP/subject-boundary-update-plan.jsonl" >> "$TMP/subject-boundary-update-early-start.jsonl"
+jq -cn --arg command "$update_apply_command" '{type:"item.completed",item:{id:"boundary-update-apply",type:"command_execution",command:$command,status:"completed",exit_code:0,aggregated_output:""}}' >> "$TMP/subject-boundary-update-early-start.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-early-start.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects apply started before dry-run completed"; else ok "subject-event validator rejects apply started before dry-run completed"; fi
 subject_command_pair boundary-update-missing-token "printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin --non-interactive --host=codex --update --apply" > "$TMP/subject-boundary-update-missing-token.jsonl"
 if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-missing-token.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects update apply without token"; else ok "subject-event validator rejects update apply without token"; fi
 check "real Agent prompt requires token-bound two-step post-init update" bash -c 'grep -Fq "mandatory no-write dry run" "$1" && grep -Fq -- "--update --apply --plan-token=<the 64-lowercase-hex token" "$1" && grep -Fq "byte-identical JSON again" "$1"' _ "$EVAL/run-eval.sh"

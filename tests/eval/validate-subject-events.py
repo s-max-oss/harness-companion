@@ -342,11 +342,11 @@ def decode_command(command: str, authority: dict[str, str]) -> tuple[str, str]:
     return "shell", command
 
 
-def exact_boundary_elements(
+def boundary_details_from_elements(
     elements: list[dict[str, object]], authority: dict[str, str], has_input: bool
-) -> bool:
+) -> dict[str, str] | None:
     if len(elements) not in {8, 9, 11} or not has_input:
-        return False
+        return None
     values = [str(element.get("text", "")) for element in elements]
     if not all(bool(element.get("static")) for element in elements[1:]):
         return False
@@ -359,17 +359,23 @@ def exact_boundary_elements(
         and values[7].casefold() in {"--host=claude", "--host=codex"}
     )
     if not prefix_ok:
-        return False
+        return None
     tail = values[8:]
-    return (
-        tail == []
-        or tail == ["--update"]
-        or (
-            len(tail) == 3
-            and tail[:2] == ["--update", "--apply"]
-            and re.fullmatch(r"--plan-token=[0-9a-f]{64}", tail[2]) is not None
-        )
-    )
+    if tail == []:
+        return {"mode": "fresh", "host": values[7].casefold(), "token": ""}
+    if tail == ["--update"]:
+        return {"mode": "update-plan", "host": values[7].casefold(), "token": ""}
+    if (
+        len(tail) == 3
+        and tail[:2] == ["--update", "--apply"]
+        and re.fullmatch(r"--plan-token=[0-9a-f]{64}", tail[2]) is not None
+    ):
+        return {
+            "mode": "update-apply",
+            "host": values[7].casefold(),
+            "token": tail[2].split("=", 1)[1],
+        }
+    return None
 
 
 def validate_shell_script(source: str) -> None:
@@ -396,7 +402,7 @@ def validate_shell_script(source: str) -> None:
 
 def validate_native(
     command: dict[str, object], authority: dict[str, str]
-) -> tuple[bool, bool]:
+) -> dict[str, str] | None:
     name_value = str(command.get("name", ""))
     name = basename(name_value)
     elements = command.get("elements")
@@ -404,38 +410,41 @@ def validate_native(
         fail("PowerShell command has invalid elements")
     if str(command.get("invocation", "")) not in {"Unknown", ""}:
         fail("PowerShell call or dot invocation is not permitted")
-    if exact_boundary_elements(elements, authority, bool(command.get("has_pipeline_input"))):
-        return True, True
+    boundary = boundary_details_from_elements(
+        elements, authority, bool(command.get("has_pipeline_input"))
+    )
+    if boundary is not None:
+        return boundary
     if not all(bool(element.get("static")) for element in elements):
         fail("PowerShell command contains a dynamic command or argument")
     if name in {"bash", "bash.exe"}:
         require_trusted_native_name(name_value, name)
         values = [str(element.get("text", "")) for element in elements]
         if len(values) == 2 and values[1] == "--version":
-            return True, False
+            return None
         if len(values) == 3 and values[1] == "-lc":
             validate_shell_script(values[2])
-            return True, False
+            return None
         fail("bash command is not an exact read-only inspection or init boundary")
     values = [str(element.get("text", "")) for element in elements]
     args = values[1:]
     if name == "git":
         require_trusted_native_name(name_value, name)
         validate_native_args(name, args)
-        return True, False
+        return None
     if name in READ_ONLY_NATIVE:
         require_trusted_native_name(name_value, name)
         validate_native_args(name, args)
-        return True, False
+        return None
     if name in READ_ONLY_POWERSHELL:
         validate_powershell_args(name, args)
-        return True, False
+        return None
     fail(f"PowerShell command is not in the read-only allowlist: {name or '<dynamic>'}")
 
 
 def validate_powershell(
     analysis: dict[str, object], source: str, authority: dict[str, str]
-) -> None:
+) -> dict[str, str] | None:
     if analysis.get("parse_errors"):
         fail("PowerShell inspection does not parse exactly")
     if any(
@@ -454,25 +463,49 @@ def validate_powershell(
     commands = analysis.get("commands")
     if not isinstance(commands, list) or not commands:
         fail("PowerShell inspection contains no statically identifiable command")
-    boundaries = 0
+    boundaries: list[tuple[int, dict[str, str]]] = []
     for command in commands:
         if not isinstance(command, dict):
             fail("PowerShell command analysis is invalid")
-        _, boundary = validate_native(command, authority)
-        boundaries += int(boundary)
-    if boundaries > 1:
+        boundary = validate_native(command, authority)
+        if boundary is not None:
+            boundaries.append((len(boundaries), boundary))
+    if len(boundaries) > 1:
         fail("more than one init boundary invocation appears in one command")
+    if not boundaries:
+        return None
+    if len(commands) != 2:
+        fail("init boundary must have exactly one static stdin producer")
+    producer = commands[0]
+    boundary_command = commands[1]
+    if not isinstance(producer, dict) or not isinstance(boundary_command, dict):
+        fail("init boundary pipeline analysis is invalid")
+    producer_elements = producer.get("elements")
+    if (
+        basename(str(producer.get("name", ""))) != "write-output"
+        or str(producer.get("invocation", "")) not in {"Unknown", ""}
+        or bool(producer.get("has_pipeline_input"))
+        or not isinstance(producer_elements, list)
+        or len(producer_elements) != 2
+        or not all(bool(element.get("static")) for element in producer_elements)
+        or not bool(boundary_command.get("has_pipeline_input"))
+    ):
+        fail("init boundary must receive one static Write-Output payload")
+    boundary = boundaries[0][1]
+    boundary["transport"] = "powershell"
+    boundary["payload"] = str(producer_elements[1].get("text", ""))
+    return boundary
 
 
-def exact_direct_boundary(command: str, authority: dict[str, str]) -> bool:
+def direct_boundary_details(command: str, authority: dict[str, str]) -> dict[str, str] | None:
     if command.count("|") != 1 or any(token in command for token in (";", "&&", "||", "\n", "\r", ">", "<")):
-        return False
+        return None
     producer_raw, invocation_raw = (part.strip() for part in command.split("|", 1))
     try:
         producer = shlex.split(producer_raw, posix=True)
         invocation = shlex.split(invocation_raw, posix=True)
     except ValueError:
-        return False
+        return None
     if not (
         producer == ["printf", "%s", "$BRIEF"]
         and len(invocation) in {8, 9, 11}
@@ -483,25 +516,31 @@ def exact_direct_boundary(command: str, authority: dict[str, str]) -> bool:
         and invocation[3:7] == ["--decision", "approve", "--brief-stdin", "--non-interactive"]
         and invocation[7].casefold() in {"--host=claude", "--host=codex"}
     ):
-        return False
+        return None
     tail = invocation[8:]
-    return (
-        tail == []
-        or tail == ["--update"]
-        or (
-            len(tail) == 3
-            and tail[:2] == ["--update", "--apply"]
-            and re.fullmatch(r"--plan-token=[0-9a-f]{64}", tail[2]) is not None
-        )
-    )
+    details = {
+        "transport": "shell",
+        "payload": producer[2],
+        "host": invocation[7].casefold(),
+        "token": "",
+    }
+    if tail == []:
+        details["mode"] = "fresh"
+        return details
+    # Direct shell uses a runtime variable as its stdin producer, so its actual
+    # bytes cannot be proven from the event text. Post-init updates are accepted
+    # only through the literal PowerShell Write-Output transport analyzed above.
+    return None
 
 
-def validate_direct_shell(command: str, authority: dict[str, str]) -> None:
-    if exact_direct_boundary(command, authority):
-        return
+def validate_direct_shell(command: str, authority: dict[str, str]) -> dict[str, str] | None:
+    boundary = direct_boundary_details(command, authority)
+    if boundary is not None:
+        return boundary
     if BOUNDARY_TEXT.search(command):
         fail("direct shell command is not the exact authoritative init boundary")
     validate_shell_script(command)
+    return None
 
 
 def main() -> int:
@@ -516,7 +555,7 @@ def main() -> int:
         fail("event stream is missing or unsafe")
     pending: dict[str, str] = {}
     completed_commands = 0
-    occurrences: list[tuple[str, str, int]] = []
+    occurrences: list[tuple[str, str, int, dict[str, object]]] = []
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         try:
             event = json.loads(raw)
@@ -546,7 +585,7 @@ def main() -> int:
                 fail(f"line {number} has no identical started command")
             del pending[item_id]
             completed_commands += 1
-        occurrences.append((event_type, command, number))
+        occurrences.append((event_type, command, number, item))
     if pending:
         fail("event stream ends with an unfinished command")
     if not occurrences:
@@ -554,18 +593,71 @@ def main() -> int:
         return 0
 
     authority = load_authority(Path(sys.argv[2]))
-    decoded = [decode_command(command, authority) for _, command, _ in occurrences]
+    decoded = [decode_command(command, authority) for _, command, _, _ in occurrences]
     powershell_sources = [source for kind, source in decoded if kind == "powershell"]
     analyses = iter(analyze_powershell(powershell_sources))
-    for (event_type, _command, number), (kind, source) in zip(occurrences, decoded):
+    boundary_occurrences: list[
+        tuple[str, dict[str, str], dict[str, object], int]
+    ] = []
+    for (event_type, _command, number, item), (kind, source) in zip(occurrences, decoded):
         try:
             if kind == "powershell":
-                validate_powershell(next(analyses), source, authority)
+                boundary = validate_powershell(next(analyses), source, authority)
             else:
-                validate_direct_shell(source, authority)
+                boundary = validate_direct_shell(source, authority)
         except SystemExit:
             print(f"subject-event-validator: rejected {event_type} at line {number}", file=sys.stderr)
             raise
+        if boundary is not None:
+            boundary_occurrences.append((event_type, boundary, item, number))
+
+    pending_plan: dict[str, str] | None = None
+    active_applies: set[str] = set()
+    for event_type, boundary, item, number in boundary_occurrences:
+        mode = boundary["mode"]
+        if mode == "fresh":
+            # Starting a writer invalidates any earlier plan even if that writer
+            # later fails; its partial effects cannot be proven absent here.
+            if event_type == "item.started":
+                pending_plan = None
+            elif item.get("status") != "completed" or item.get("exit_code") != 0:
+                fail(f"line {number} has a non-successful init boundary")
+            continue
+        if mode == "update-plan":
+            if event_type == "item.started":
+                continue
+            if item.get("status") != "completed" or item.get("exit_code") != 0:
+                fail(f"line {number} has a non-successful update dry-run")
+            output = item.get("aggregated_output")
+            if not isinstance(output, str):
+                fail(f"line {number} update dry-run has no captured output")
+            tokens = re.findall(r"(?m)^Plan token: ([0-9a-f]{64})\r?$", output)
+            if len(tokens) != 1:
+                fail(f"line {number} update dry-run has no unique plan token")
+            pending_plan = {
+                "transport": boundary["transport"],
+                "payload": boundary["payload"],
+                "host": boundary["host"],
+                "token": tokens[0],
+            }
+            continue
+        item_id = str(item["id"])
+        if event_type == "item.started":
+            if pending_plan is None:
+                fail(f"line {number} update apply starts before a successful dry-run")
+            if any(
+                boundary[field] != pending_plan[field]
+                for field in ("transport", "payload", "host", "token")
+            ):
+                fail(f"line {number} update apply does not match its dry-run payload and token")
+            active_applies.add(item_id)
+            pending_plan = None
+            continue
+        if item_id not in active_applies:
+            fail(f"line {number} update apply has no authorized start")
+        active_applies.remove(item_id)
+        if item.get("status") != "completed" or item.get("exit_code") != 0:
+            fail(f"line {number} has a non-successful update apply")
 
     print(json.dumps({"valid": True, "completed_commands": completed_commands}, separators=(",", ":")))
     return 0

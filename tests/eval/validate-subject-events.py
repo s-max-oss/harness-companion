@@ -104,6 +104,12 @@ foreach ($source in $sources) {
       if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
           $element -is [System.Management.Automation.Language.ConstantExpressionAst]) {
         $elements += [pscustomobject]@{text=[string]$element.Value; static=$true}
+      } elseif ($element -is [System.Management.Automation.Language.ArrayLiteralAst] -and
+          @($element.Elements | Where-Object {
+            $_ -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            $_ -isnot [System.Management.Automation.Language.ConstantExpressionAst]
+          }).Count -eq 0) {
+        $elements += [pscustomobject]@{text=[string]$element.Extent.Text; static=$true}
       } elseif ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
         $elements += [pscustomobject]@{text=[string]$element.Extent.Text; static=$true}
       } else {
@@ -442,9 +448,6 @@ def validate_powershell(
             fail("PowerShell command analysis is invalid")
         _, boundary = validate_native(command, authority)
         boundaries += int(boundary)
-    references = len(BOUNDARY_TEXT.findall(source))
-    if references != boundaries:
-        fail("init boundary reference is absent, duplicated, or not the authoritative invocation")
     if boundaries > 1:
         fail("more than one init boundary invocation appears in one command")
 

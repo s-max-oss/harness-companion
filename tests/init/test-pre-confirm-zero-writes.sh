@@ -67,6 +67,23 @@ else
   fail "guided approval produces executor artifact"
 fi
 
+# Windows Codex may preserve the native -Command wrapper's one extra escaping
+# layer. The trusted boundary removes exactly one layer only when it decodes to
+# a JSON object, then delegates the same production executor path.
+ESCAPED="$TMP/escaped-approved"
+mkdir -p "$ESCAPED"
+sed 's/"/\\"/g' "$TMP/brief.json" | tr -d '\n' > "$TMP/brief.escaped"
+if cat "$TMP/brief.escaped" | bash "$BOUNDARY" "$ESCAPED" --decision approve --brief-stdin --non-interactive --host=codex >/dev/null 2>&1; then
+  pass "guided approval accepts one native Windows JSON escaping layer"
+else
+  fail "guided approval accepts one native Windows JSON escaping layer"
+fi
+if jq -e '.goal == "Approved goal"' "$ESCAPED/.harness/PROJECT_BRIEF.json" >/dev/null 2>&1; then
+  pass "Windows transport normalization preserves the exact Brief object"
+else
+  fail "Windows transport normalization preserves the exact Brief object"
+fi
+
 MALFORMED="$TMP/malformed-approval"
 mkdir -p "$MALFORMED"
 printf 'sentinel\n' > "$MALFORMED/sentinel"

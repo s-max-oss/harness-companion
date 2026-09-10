@@ -70,6 +70,21 @@ case "$DECISION" in
       echo "error: approve requires exactly one resolved Brief (--brief or --brief-stdin)" >&2
       exit 2
     }
+    # Windows Codex launches PowerShell through a native -Command wrapper. In
+    # that transport, a static single-quoted JSON producer can arrive with one
+    # extra JSON-string escaping layer (for example {\"goal\":...}). Accept
+    # exactly that representation only when the decoded value is a JSON object;
+    # all other malformed input is passed through for the executor to reject.
+    if printf '%s\n' "$@" | grep -Fxq -- '--brief-stdin'; then
+      brief_payload="$(cat)" || brief_payload=""
+      if printf '%s' "$brief_payload" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        normalized_brief="$brief_payload"
+      else
+        normalized_brief="$(printf '"%s"' "$brief_payload" | jq -ce 'fromjson | select(type == "object")' 2>/dev/null)" || normalized_brief="$brief_payload"
+      fi
+      printf '%s' "$normalized_brief" | bash "$EXECUTOR" "$TARGET" "$@"
+      exit $?
+    fi
     exec bash "$EXECUTOR" "$TARGET" "$@"
     ;;
   reject|cancel)

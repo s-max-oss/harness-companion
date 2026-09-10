@@ -999,6 +999,8 @@ agent_runtime_policy='null'
 component_launch_paths=()
 component_launch_shas=()
 codex_shell_environment_flags=()
+subject_codex_isolation_flags=()
+reviewer_codex_isolation_flags=()
 subject_launch=("$subject_launch_executable")
 reviewer_launch=("$reviewer_launch_executable")
 if [ "$SYNTHETIC" = 0 ]; then
@@ -1181,6 +1183,8 @@ if [ "$SYNTHETIC" = 0 ]; then
   # disposable, ACL-contained roots; do not load the user's config.toml.
   subject_project_trust_config="projects.'$target_win'.trust_level=\"trusted\""
   reviewer_project_trust_config="projects.'$review_root_win'.trust_level=\"trusted\""
+  subject_codex_isolation_flags=(-c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c "$subject_project_trust_config" -c 'allow_login_shell=false')
+  reviewer_codex_isolation_flags=(-c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c "$reviewer_project_trust_config" -c 'allow_login_shell=false')
   subject_launch=("$TRUSTED_WINDOWS_ENV" "PATH=$sandbox_path" "$subject_launch_executable")
   if [ "$REVIEWER" = codex ]; then reviewer_launch=("$TRUSTED_WINDOWS_ENV" "PATH=$sandbox_path" "$reviewer_launch_executable"); fi
   context_authority="$real_user_home/.agents/skills/harness-companion/SKILL.md"
@@ -1279,7 +1283,7 @@ EOF
   if [ "$AGENT" = codex ]; then
     (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
       "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
-      -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c "$subject_project_trust_config" -c 'allow_login_shell=false' \
+      "${subject_codex_isolation_flags[@]}" \
       "${codex_shell_environment_flags[@]}" --add-dir "$agent_scratch" \
       --disable browser_use --disable in_app_browser --disable computer_use \
       --disable apps --disable plugins --disable skill_search --disable multi_agent \
@@ -1398,7 +1402,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || die "Codex PowerShell wrapper changed before isolation probe"
   (cd "$target" && HARNESS_EVAL_PROBE_PAYLOAD="$probe_payload_b64" "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
     "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
-    -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c "$subject_project_trust_config" -c 'allow_login_shell=false' \
+    "${subject_codex_isolation_flags[@]}" \
     "${codex_shell_environment_flags[@]}" --add-dir "$agent_scratch" \
     -c "shell_environment_policy.set.HARNESS_EVAL_PROBE_PAYLOAD=\"$probe_payload_b64\"" \
     --disable browser_use --disable in_app_browser --disable computer_use \
@@ -1730,7 +1734,7 @@ if [ "$REVIEWER" = codex ]; then
   verify_guarded_executables || die "validated Agent executable guard failed before reviewer"
   (cd "$review_root" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
     "${reviewer_launch[@]}" exec --ephemeral --cd "$review_root" --sandbox read-only --skip-git-repo-check \
-    -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c "$reviewer_project_trust_config" -c 'allow_login_shell=false' \
+    "${reviewer_codex_isolation_flags[@]}" \
     "${codex_shell_environment_flags[@]}" \
     --disable shell_tool --disable unified_exec --disable browser_use --disable in_app_browser \
     --disable computer_use --disable apps --disable plugins --disable skill_search --disable multi_agent \

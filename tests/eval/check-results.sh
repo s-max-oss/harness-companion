@@ -344,13 +344,24 @@ release_gate_lock() {
   release_lock "$publication_lock" "$publication_lock_token" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || [ "$rc" -eq 8 ]
 }
-if [ -e "$publication_lock" ] || [ -L "$publication_lock" ] \
-  || ! acquire_lock "$publication_lock" 0 >/dev/null; then
+for incomplete_marker in "$publication_lock/lifecycle.json" "$publication_lock/bundle.json"; do
+  if [ -e "$incomplete_marker" ] || [ -L "$incomplete_marker" ]; then
+    echo "eval-gate: result publication is incomplete or another gate is active" >&2
+    exit 1
+  fi
+done
+if ! acquire_lock "$publication_lock" 1 >/dev/null; then
   echo "eval-gate: result publication is incomplete or another gate is active" >&2
   exit 1
 fi
 publication_lock_token="$LOCK_REGISTRY_TOKEN"
 gate_lock_owned=true
+for incomplete_marker in "$publication_lock/lifecycle.json" "$publication_lock/bundle.json"; do
+  if [ -e "$incomplete_marker" ] || [ -L "$incomplete_marker" ]; then
+    echo "eval-gate: interrupted result publication requires attester recovery" >&2
+    exit 1
+  fi
+done
 tmp="$(mktemp -d)" || { release_gate_lock || true; exit 2; }
 cleanup() {
   local original_rc=$? release_rc=0

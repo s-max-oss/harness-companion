@@ -41,6 +41,8 @@ sha() { sha256sum "$1" | awk '{print $1}'; }
 . "$ROOT/core/lib/lock-registry.sh" || die "runtime lock support is unavailable"
 # shellcheck source=../../core/lib/runtime-manifest.sh
 . "$ROOT/core/lib/runtime-manifest.sh" || die "runtime manifest support is unavailable"
+# shellcheck source=../../scripts/runtime-register-batch.sh
+. "$ROOT/scripts/runtime-register-batch.sh" || die "runtime batch registration support is unavailable"
 
 register_result_bundle() {
   local base_name="$1" suffix rel

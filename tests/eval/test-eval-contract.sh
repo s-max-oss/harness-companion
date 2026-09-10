@@ -1147,7 +1147,7 @@ set -euo pipefail
 lock_path="$2"
 ready_file="$3"
 release_file="$4"
-acquire_lock "$lock_path" 0 >/dev/null
+acquire_lock "$lock_path" 1 >/dev/null
 lock_token="$LOCK_REGISTRY_TOKEN"
 : > "$ready_file"
 while [ ! -e "$release_file" ]; do sleep 0.05; done

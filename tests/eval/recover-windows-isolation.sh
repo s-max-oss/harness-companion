@@ -26,6 +26,8 @@ TRUSTED_WINDOWS_ENV="/c/Program Files/Git/usr/bin/env.exe"
 . "$ROOT/core/lib/lock-registry.sh" || { echo "eval-recover: runtime lock support is unavailable" >&2; exit 2; }
 # shellcheck source=../../core/lib/runtime-manifest.sh
 . "$ROOT/core/lib/runtime-manifest.sh" || { echo "eval-recover: runtime manifest support is unavailable" >&2; exit 2; }
+# shellcheck source=../../scripts/runtime-register-batch.sh
+. "$ROOT/scripts/runtime-register-batch.sh" || { echo "eval-recover: runtime batch registration support is unavailable" >&2; exit 2; }
 
 die() { echo "eval-recover: $*" >&2; exit 2; }
 recovery_test_crash() {

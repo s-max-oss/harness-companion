@@ -60,14 +60,13 @@ if ! type validate_feature_registry_json >/dev/null 2>&1; then
     || { echo "dirty-worktree-manifest: cannot source validate-feature-registry.sh" >&2; }
 fi
 
+source "${BASH_SOURCE[0]%/*}/../../scripts/dirty-worktree-runtime-support.sh" || return 2
 DWM_MUTABLE=(
   ".harness/logs/runs/"
   ".harness/reviews/"
   ".harness/acceptance/"
-  "tests"
-  "tests/eval"
-  "tests/eval/candidates/"
-  "tests/eval/results/"
+  "tests" "tests/eval"
+  "tests/eval/candidates/" "tests/eval/results/"
   ".harness/registry-journal.ndjson"
   ".harness/runtime-manifest.jsonl"
   ".harness/.registry.lock/"
@@ -78,23 +77,6 @@ DWM_MUTABLE=(
   "clean-state-checklist.md"
   "checklist.sh"
 )
-
-# Forward-eval output is runtime evidence, not source.  Only the canonical,
-# flat, run-id-bound filenames emitted by run-eval.sh / attest-result.sh enter
-# this namespace; locks, staging paths, nested paths, and arbitrary files are
-# rejected even though the two parent directories are mutable.
-dwm_eval_artifact_kind() {
-  local p="$1"
-  if [[ "$p" =~ ^tests/eval/candidates/[A-Za-z0-9][A-Za-z0-9_-]*\.[0-9]+\.[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+\.(transcript\.jsonl|tree\.sha256|subject-events\.jsonl|reviewer-events\.jsonl|turn-trees\.jsonl|evaluator-events\.jsonl|reviewer-output\.json|objective-checks\.jsonl|project-brief\.json|isolation\.json|json)$ ]]; then
-    printf '%s\n' eval_candidate
-    return 0
-  fi
-  if [[ "$p" =~ ^tests/eval/results/[A-Za-z0-9][A-Za-z0-9_-]*\.[0-9]+\.[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+\.(transcript\.jsonl|tree\.sha256|subject-events\.jsonl|reviewer-events\.jsonl|turn-trees\.jsonl|evaluator-events\.jsonl|reviewer-output\.json|objective-checks\.jsonl|project-brief\.json|isolation\.json|attestation\.sig|json)$ ]]; then
-    printf '%s\n' eval_result
-    return 0
-  fi
-  return 1
-}
 
 # ---- dwm_is_mutable --------------------------------------------------------
 # 0 if path is in the mutable runtime namespace (dir namespaces match by
@@ -734,7 +716,7 @@ dwm_compare_manifest() {
 
     # First walk the trusted registry so a deleted or type-replaced artifact
     # cannot disappear from a current-manifest-driven loop.
-    local cpath centry ckind expected_kind rsha rsize actual
+    local cpath centry ckind rsha rsize actual
     while IFS= read -r centry; do
       [ -n "$centry" ] || continue
       cpath="$(printf '%s' "$centry" | jq -r '.path // empty')"
@@ -742,23 +724,9 @@ dwm_compare_manifest() {
       rsha="$(printf '%s' "$centry" | jq -r '.sha256 // empty')"
       rsize="$(printf '%s' "$centry" | jq -r '.size // -1')"
       [ -n "$cpath" ] || continue
-      case "$cpath" in
-        ".harness/logs/runs/"*.ndjson) expected_kind="ndjson" ;;
-        ".harness/logs/runs/"*.log) expected_kind="log" ;;
-        ".harness/reviews/"*.jsonl) expected_kind="verdict" ;;
-        ".harness/acceptance/"*/acceptance.json) expected_kind="acceptance" ;;
-        ".harness/acceptance/"*/A-G.log) expected_kind="log" ;;
-        tests/eval/candidates/*|tests/eval/results/*)
-          expected_kind="$(dwm_eval_artifact_kind "$cpath" 2>/dev/null || true)"
-          [ -n "$expected_kind" ] || continue
-          ;;
-        *) continue ;;
-      esac
-      if [ "$ckind" != "$expected_kind" ]; then
-        mutable_violations+=("$(jq -nc --arg p "$cpath" --arg e "$expected_kind" --arg a "$ckind" \
-          '{path:$p, reason:"runtime_artifact_kind_mismatch", expected:$e, actual:$a}')")
-        continue
-      fi
+      actual="$(dwm_runtime_artifact_kind "$cpath" 2>/dev/null || true)"
+      [ -n "$actual" ] && [ "$actual" != eval_invalid ] || continue
+      [ "$ckind" = "$actual" ] || { mutable_violations+=("$(jq -nc --arg p "$cpath" --arg e "$actual" --arg a "$ckind" '{path:$p, reason:"runtime_artifact_kind_mismatch", expected:$e, actual:$a}')"); continue; }
       if [ -L "$project_dir/$cpath" ] || [ ! -f "$project_dir/$cpath" ]; then
         mutable_violations+=("$(jq -nc --arg p "$cpath" '{path:$p, reason:"runtime_artifact_missing_or_not_regular"}')")
         continue
@@ -788,22 +756,9 @@ dwm_compare_manifest() {
     # additions (including symlink replacements).
     while IFS= read -r cpath; do
       [ -n "$cpath" ] || continue
-      case "$cpath" in
-        ".harness/logs/runs/"*.ndjson) ckind="ndjson" ;;
-        ".harness/logs/runs/"*.log)    ckind="log" ;;
-        ".harness/reviews/"*.jsonl)    ckind="verdict" ;;
-        ".harness/acceptance/"*/acceptance.json) ckind="acceptance" ;;
-        ".harness/acceptance/"*/A-G.log)          ckind="log" ;;
-        tests/eval/candidates/*|tests/eval/results/*)
-          ckind="$(dwm_eval_artifact_kind "$cpath" 2>/dev/null || true)"
-          if [ -z "$ckind" ]; then
-            mutable_violations+=("$(jq -nc --arg p "$cpath" \
-              '{path:$p, reason:"runtime_artifact_path_invalid"}')")
-            continue
-          fi
-          ;;
-        *) continue ;;
-      esac
+      ckind="$(dwm_runtime_artifact_kind "$cpath" 2>/dev/null || true)"
+      [ "$ckind" != eval_invalid ] || { mutable_violations+=("$(jq -nc --arg p "$cpath" '{path:$p, reason:"runtime_artifact_path_invalid"}')"); continue; }
+      [ -n "$ckind" ] || continue
       centry="$(printf '%s' "$reg_json" | jq -c --arg p "$cpath" 'map(select(.path == $p)) | .[0] // null' 2>/dev/null)"
       if [ "$centry" = "null" ] || [ -z "$centry" ]; then
         # rc6 final: unregistered runtime artifact = hard violation (previously
@@ -827,32 +782,16 @@ dwm_compare_manifest() {
     mutable_violations+=("$(jq -nc --arg p ".harness/runtime-manifest.jsonl" '{path:$p, reason:"runtime_manifest_missing"}')")
   fi
 
-  # Feed potentially large result sets through files rather than --argjson.
-  # Windows has a comparatively small command-line limit, and repositories
-  # with many immutable eval artifacts can legitimately exceed it.
-  local mv_file am_file fa_file ccm_file final jq_rc
-  mv_file="$(mktemp)" || { rm -f "$cur_file"; return 2; }
-  am_file="$(mktemp)" || { rm -f "$cur_file" "$mv_file"; return 2; }
-  fa_file="$(mktemp)" || { rm -f "$cur_file" "$mv_file" "$am_file"; return 2; }
-  ccm_file="$(mktemp)" || { rm -f "$cur_file" "$mv_file" "$am_file" "$fa_file"; return 2; }
+  rm -f "$cur_file"
 
-  printf '%s\n' "${mutable_violations[@]}" | jq -c 'select(length > 0)' >"$mv_file" || {
-    rm -f "$cur_file" "$mv_file" "$am_file" "$fa_file" "$ccm_file"
-    return 2
-  }
-  printf '%s\n' "${appended_mutable[@]}" | jq -R -c 'select(length > 0)' >"$am_file"
-  printf '%s\n' "${feature_advanced[@]}" | jq -R -c 'select(length > 0)' >"$fa_file"
-  printf '%s\n' "${content_changed_mutable[@]}" | jq -R -c 'select(length > 0)' >"$ccm_file"
-
+  local final
   final="$(printf '%s\n' "$result" | jq -c \
-    --slurpfile mv "$mv_file" \
-    --slurpfile am "$am_file" \
-    --slurpfile fa "$fa_file" \
-    --slurpfile ccm "$ccm_file" \
-    '.violations = (.violations + $mv) | .appended_mutable = $am | .feature_revision_advanced = $fa | .content_changed_mutable = $ccm | .valid = ((.violations | length) == 0 and (.new_non_mutable | length) == 0)')"
-  jq_rc=$?
-  rm -f "$cur_file" "$mv_file" "$am_file" "$fa_file" "$ccm_file"
-  [ "$jq_rc" -eq 0 ] || return 2
+    --argjson mv "$(printf '%s\n' "${mutable_violations[@]}" | jq -R -s 'split("\n") | map(select(length>0) | fromjson)' 2>/dev/null || printf '[]')" \
+    --argjson am "$(printf '%s\n' "${appended_mutable[@]}" | jq -R -s 'split("\n") | map(select(length>0))')" \
+    --argjson fa "$(printf '%s\n' "${feature_advanced[@]}" | jq -R -s 'split("\n") | map(select(length>0))')" \
+    --argjson ccm "$(printf '%s\n' "${content_changed_mutable[@]}" | jq -R -s 'split("\n") | map(select(length>0))')" \
+    '.violations = (.violations + $mv) | .appended_mutable = $am | .feature_revision_advanced = $fa | .content_changed_mutable = $ccm | .valid = ((.violations | length) == 0 and (.new_non_mutable | length) == 0)')" \
+    || final="$(dwm_finalize_result_streaming "$result")" || return 2
   printf '%s\n' "$final"
   if [ "$(printf '%s' "$final" | jq -r '.valid')" = "true" ]; then
     return 0

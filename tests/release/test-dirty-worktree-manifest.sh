@@ -38,6 +38,8 @@ set -uo pipefail
 
 TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$TEST_DIR/../.." && pwd)"
+# shellcheck source=../../scripts/runtime-register-batch.sh
+. "$ROOT_DIR/scripts/runtime-register-batch.sh"
 
 # shellcheck source=../../core/lib/dirty-worktree-manifest.sh
 source "$ROOT_DIR/core/lib/dirty-worktree-manifest.sh"

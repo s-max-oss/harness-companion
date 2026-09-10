@@ -44,6 +44,8 @@ release_eval_lock() {
 . "$ROOT/core/lib/lock-registry.sh" || die "runtime lock support is unavailable"
 # shellcheck source=../../core/lib/runtime-manifest.sh
 . "$ROOT/core/lib/runtime-manifest.sh" || die "runtime manifest support is unavailable"
+# shellcheck source=../../scripts/runtime-register-batch.sh
+. "$ROOT/scripts/runtime-register-batch.sh" || die "runtime batch registration support is unavailable"
 
 register_candidate_bundle() {
   local base_name="$1" suffix rel
@@ -919,7 +921,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   update_recovery_journal acl_lock_acquired || die "could not update lifecycle recovery journal"
   contract_test_hold acl_lock_acquired
 fi
-if ! acquire_lock "$agent_lock" 0 >/dev/null; then die "another eval Agent run is active or stale: $agent_lock"; fi
+if ! acquire_lock "$agent_lock" 1 >/dev/null; then die "another eval Agent run is active or stale: $agent_lock"; fi
 agent_lock_token="$LOCK_REGISTRY_TOKEN"
 agent_lock_owned=true
 if [ "$SYNTHETIC" = 0 ]; then

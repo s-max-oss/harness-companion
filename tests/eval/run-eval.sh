@@ -1155,6 +1155,8 @@ if [ "$SYNTHETIC" = 0 ]; then
   shell_temp_win="$(cygpath -w "$agent_scratch/temp")"
   shell_appdata_win="$(cygpath -w "$agent_scratch/appdata")"
   shell_localappdata_win="$(cygpath -w "$agent_scratch/localappdata")"
+  target_win="$(cygpath -w "$target")"
+  review_root_win="$(cygpath -w "$review_root")"
   shell_home_config="${shell_home_win//\\//}"
   shell_temp_config="${shell_temp_win//\\//}"
   shell_appdata_config="${shell_appdata_win//\\//}"
@@ -1174,6 +1176,11 @@ if [ "$SYNTHETIC" = 0 ]; then
     -c 'shell_environment_policy.set.LANG="C.UTF-8"'
     -c 'shell_environment_policy.set.LC_ALL="C.UTF-8"'
   )
+  # Codex 0.153+ fails closed on shell commands when --ignore-user-config
+  # removes the per-project trust entry. Reintroduce trust only for these two
+  # disposable, ACL-contained roots; do not load the user's config.toml.
+  subject_project_trust_config="projects.'$target_win'.trust_level=\"trusted\""
+  reviewer_project_trust_config="projects.'$review_root_win'.trust_level=\"trusted\""
   subject_launch=("$TRUSTED_WINDOWS_ENV" "PATH=$sandbox_path" "$subject_launch_executable")
   if [ "$REVIEWER" = codex ]; then reviewer_launch=("$TRUSTED_WINDOWS_ENV" "PATH=$sandbox_path" "$reviewer_launch_executable"); fi
   context_authority="$real_user_home/.agents/skills/harness-companion/SKILL.md"
@@ -1265,8 +1272,8 @@ EOF
   verify_guarded_executables || die "validated Agent executable guard failed before subject turn $subject_turn"
   if [ "$AGENT" = codex ]; then
     (cd "$target" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
-      "${subject_launch[@]}" exec --ephemeral --cd "$target" --approve-for-me \
-      -c 'allow_login_shell=false' \
+      "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
+      -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c "$subject_project_trust_config" -c 'allow_login_shell=false' \
       "${codex_shell_environment_flags[@]}" --add-dir "$agent_scratch" \
       --disable browser_use --disable in_app_browser --disable computer_use \
       --disable apps --disable plugins --disable skill_search --disable multi_agent \
@@ -1384,8 +1391,8 @@ if [ "$SYNTHETIC" = 0 ]; then
   verify_guarded_executables || die "validated Agent executable guard failed before isolation probe"
   [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || die "Codex PowerShell wrapper changed before isolation probe"
   (cd "$target" && HARNESS_EVAL_PROBE_PAYLOAD="$probe_payload_b64" "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
-    "${subject_launch[@]}" exec --ephemeral --cd "$target" --approve-for-me \
-    -c 'allow_login_shell=false' \
+    "${subject_launch[@]}" exec --ephemeral --cd "$target" --sandbox workspace-write \
+    -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c "$subject_project_trust_config" -c 'allow_login_shell=false' \
     "${codex_shell_environment_flags[@]}" --add-dir "$agent_scratch" \
     -c "shell_environment_policy.set.HARNESS_EVAL_PROBE_PAYLOAD=\"$probe_payload_b64\"" \
     --disable browser_use --disable in_app_browser --disable computer_use \
@@ -1717,7 +1724,7 @@ if [ "$REVIEWER" = codex ]; then
   verify_guarded_executables || die "validated Agent executable guard failed before reviewer"
   (cd "$review_root" && "$TIMEOUT_BIN" --kill-after=30s "${TURN_TIMEOUT_SECONDS}s" \
     "${reviewer_launch[@]}" exec --ephemeral --cd "$review_root" --sandbox read-only --skip-git-repo-check \
-    -c 'approval_policy="never"' -c 'allow_login_shell=false' \
+    -c 'approval_policy="never"' -c 'windows.sandbox="elevated"' -c "$reviewer_project_trust_config" -c 'allow_login_shell=false' \
     "${codex_shell_environment_flags[@]}" \
     --disable shell_tool --disable unified_exec --disable browser_use --disable in_app_browser \
     --disable computer_use --disable apps --disable plugins --disable skill_search --disable multi_agent \

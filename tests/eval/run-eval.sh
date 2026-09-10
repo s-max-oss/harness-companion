@@ -497,7 +497,7 @@ start_executable_guard() {
   local manifest="$controller/executable-guard.manifest.json"
   local ready="$controller/executable-guard.ready.json"
   local stderr="$controller/executable-guard.stderr"
-  local subject_win reviewer_win codex_powershell_guard_win system_powershell_guard_win system_whoami_guard_win probe_script_guard_win component_path ready_json ready_fd ready_file_json state_json
+  local subject_win reviewer_win codex_powershell_guard_win system_powershell_guard_win system_whoami_guard_win probe_script_guard_win trusted_jq_guard_win component_path ready_json ready_fd ready_file_json state_json
   local -a guard_paths
   subject_win="$(cygpath -w "$subject_launch_executable")" || return 1
   reviewer_win="$(cygpath -w "$reviewer_launch_executable")" || return 1
@@ -505,7 +505,8 @@ start_executable_guard() {
   system_powershell_guard_win="$(cygpath -w "$system_powershell")" || return 1
   system_whoami_guard_win="$(cygpath -w "$system_whoami")" || return 1
   probe_script_guard_win="$(cygpath -w "$probe_script")" || return 1
-  guard_paths=("$subject_win" "$reviewer_win" "$codex_powershell_guard_win" "$system_powershell_guard_win" "$system_whoami_guard_win" "$probe_script_guard_win")
+  trusted_jq_guard_win="$(cygpath -w "$trusted_jq")" || return 1
+  guard_paths=("$subject_win" "$reviewer_win" "$codex_powershell_guard_win" "$system_powershell_guard_win" "$system_whoami_guard_win" "$probe_script_guard_win" "$trusted_jq_guard_win")
   for component_path in "${component_launch_paths[@]}"; do
     guard_paths+=("$(cygpath -w "$component_path")") || return 1
   done
@@ -934,7 +935,7 @@ review_root="$tmp/reviewer"
 exec_root="$tmp/agent-bin"
 agent_scratch="$tmp/agent-scratch"
 mkdir -p "$target" "$skill_root/core/lib" "$review_root" "$exec_root" \
-  "$agent_scratch/home" "$agent_scratch/temp" "$agent_scratch/appdata" \
+  "$agent_scratch/home" "$agent_scratch/temp" "$agent_scratch/appdata" "$agent_scratch/tools" \
   "$agent_scratch/localappdata" "$OUTPUT_DIR"
 probe_script="$exec_root/isolation-probe.ps1"
 if [ "$SYNTHETIC" = 0 ]; then
@@ -998,6 +999,8 @@ agent_runtime_components='{}'
 agent_runtime_policy='null'
 component_launch_paths=()
 component_launch_shas=()
+trusted_jq=""
+user_executable=""
 codex_shell_environment_flags=()
 subject_codex_isolation_flags=()
 reviewer_codex_isolation_flags=()
@@ -1039,6 +1042,11 @@ if [ "$SYNTHETIC" = 0 ]; then
   snapshot_executable "$reviewer_executable" "$reviewer_launch_executable" || die "could not safely snapshot reviewer executable"
   codex_powershell="$exec_root/codex-powershell.exe"
   snapshot_executable "$codex_powershell_source" "$codex_powershell" || die "could not safely snapshot the Codex PowerShell wrapper"
+  user_executable="$(canonical_executable jq)" || die "could not resolve the user-profile executable probe"
+  case "$(host_path "$user_executable")" in "$(host_path "$real_user_home")"/*) ;; *) die "user executable probe must be under the real user profile" ;; esac
+  trusted_jq="$agent_scratch/tools/jq.exe"
+  snapshot_executable "$user_executable" "$trusted_jq" || die "could not safely snapshot jq for the isolated executor"
+  [ "$(sha "$trusted_jq")" = "$(sha "$user_executable")" ] || die "isolated jq snapshot hash mismatch"
   codex_powershell_win="$(cygpath -w "$codex_powershell")"
   [ "$(sha "$codex_powershell")" = "$codex_powershell_sha" ] || die "Codex PowerShell wrapper snapshot hash mismatch"
   codex_powershell_authenticode="$(official_runtime_tool_identity codex_powershell "$codex_powershell")" \
@@ -1144,7 +1152,7 @@ if [ "$SYNTHETIC" = 0 ]; then
   [ "$(host_path "$discovered_whoami")" = "$(host_path "$system_whoami")" ] || die "machine whoami path does not match the versioned trust policy"
   [ "$(host_path "$system_powershell")" = "$(host_path "$WINDOWS_POWERSHELL")" ] || die "machine PowerShell path does not match the trusted absolute path"
   [ "$(host_path "$system_whoami")" = "$(host_path "$WINDOWS_WHOAMI")" ] || die "machine whoami path does not match the trusted absolute path"
-  sandbox_path="$system_root_posix/System32/WindowsPowerShell/v1.0:$system_root_posix/System32:$system_root_posix:$program_files_posix/Git/bin:$program_files_posix/Git/usr/bin"
+  sandbox_path="$agent_scratch/tools:$system_root_posix/System32/WindowsPowerShell/v1.0:$system_root_posix/System32:$system_root_posix:$program_files_posix/Git/bin:$program_files_posix/Git/usr/bin"
   for tool_dir in "$system_root_posix/System32/WindowsPowerShell/v1.0" "$system_root_posix/System32" "$program_files_posix/Git/bin" "$program_files_posix/Git/usr/bin"; do
     [ -d "$tool_dir" ] && [ ! -L "$tool_dir" ] || die "system tool directory missing or unsafe: $tool_dir"
   done
@@ -1190,8 +1198,6 @@ if [ "$SYNTHETIC" = 0 ]; then
   context_authority="$real_user_home/.agents/skills/harness-companion/SKILL.md"
   [ -f "$context_authority" ] && [ ! -L "$context_authority" ] \
     || die "installed harness-companion context authority is missing or unsafe"
-  user_executable="$(canonical_executable jq)" || die "could not resolve the user-profile executable probe"
-  case "$(host_path "$user_executable")" in "$(host_path "$real_user_home")"/*) ;; *) die "user executable probe must be under the real user profile" ;; esac
   host_temp_win="$(windows_powershell -NoProfile -Command '[IO.Path]::GetTempPath().TrimEnd([IO.Path]::DirectorySeparatorChar)' | tr -d '\r')"
   [ -n "$host_temp_win" ] || die "could not resolve the token-backed host temp root"
   host_temp="$(cygpath -u "$host_temp_win")"

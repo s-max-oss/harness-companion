@@ -250,7 +250,7 @@ if python "$EVAL/validate-probe-command.py" --identify "$(printf '%s\r' "$probe_
 else
   ok "probe command validator rejects forbidden control bytes"
 fi
-check "real executable guard includes both PowerShell runtimes, inner whoami, and the probe script" bash -c 'grep -Fq -- "guard_paths=(\"\$subject_win\" \"\$reviewer_win\" \"\$codex_powershell_guard_win\" \"\$system_powershell_guard_win\" \"\$system_whoami_guard_win\" \"\$probe_script_guard_win\")" "$1" && grep -Fq -- "sha \"\$system_powershell\"" "$1" && grep -Fq -- "sha \"\$system_whoami\"" "$1" && grep -Fq -- "codex_powershell_locked_authenticode" "$1"' _ "$EVAL/run-eval.sh"
+check "real executable guard includes Agent runtimes, system tools, probe, and isolated jq" bash -c 'grep -Fq -- "guard_paths=(\"\$subject_win\" \"\$reviewer_win\" \"\$codex_powershell_guard_win\" \"\$system_powershell_guard_win\" \"\$system_whoami_guard_win\" \"\$probe_script_guard_win\" \"\$trusted_jq_guard_win\")" "$1" && grep -Fq -- "snapshot_executable \"\$user_executable\" \"\$trusted_jq\"" "$1" && grep -Fq -- "sandbox_path=\"\$agent_scratch/tools:" "$1" && grep -Fq -- "sha \"\$system_powershell\"" "$1" && grep -Fq -- "sha \"\$system_whoami\"" "$1" && grep -Fq -- "codex_powershell_locked_authenticode" "$1"' _ "$EVAL/run-eval.sh"
 approved_version="$(jq -r '.agents.codex.approved_builds[0].cli_version' "$EVAL/trust/agent-publishers.json")"
 approved_digest="$(jq -r '.agents.codex.approved_builds[0].sha256' "$EVAL/trust/agent-publishers.json")"
 check "shared production build verifier accepts the exact approved tuple" bash "$EVAL/verify-agent-build.sh" "$EVAL/trust/agent-publishers.json" codex "$approved_version" "$approved_digest"

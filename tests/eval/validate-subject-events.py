@@ -368,7 +368,13 @@ def boundary_details_from_elements(
     if (
         len(tail) == 3
         and tail[:2] == ["--update", "--apply"]
-        and re.fullmatch(r"--plan-token=[0-9a-f]{64}", tail[2]) is not None
+        and (
+            re.fullmatch(r"--plan-token=[0-9a-f]{64}", tail[2]) is not None
+            # Codex redacts secret-looking argv values in its JSONL event stream.
+            # The completed boundary result below is therefore the authoritative
+            # proof that the executor accepted the dry-run token in this case.
+            or tail[2] == "--plan-token=[REDACTED_SECRET]"
+        )
     ):
         return {
             "mode": "update-apply",
@@ -612,7 +618,7 @@ def main() -> int:
             boundary_occurrences.append((event_type, boundary, item, number))
 
     pending_plan: dict[str, str] | None = None
-    active_applies: set[str] = set()
+    active_applies: dict[str, bool] = {}
     for event_type, boundary, item, number in boundary_occurrences:
         mode = boundary["mode"]
         if mode == "fresh":
@@ -645,19 +651,22 @@ def main() -> int:
         if event_type == "item.started":
             if pending_plan is None:
                 fail(f"line {number} update apply starts before a successful dry-run")
+            token_redacted = boundary["token"] == "[REDACTED_SECRET]"
             if any(
                 boundary[field] != pending_plan[field]
-                for field in ("transport", "payload", "host", "token")
-            ):
+                for field in ("transport", "payload", "host")
+            ) or (not token_redacted and boundary["token"] != pending_plan["token"]):
                 fail(f"line {number} update apply does not match its dry-run payload and token")
-            active_applies.add(item_id)
+            active_applies[item_id] = token_redacted
             pending_plan = None
             continue
         if item_id not in active_applies:
             fail(f"line {number} update apply has no authorized start")
-        active_applies.remove(item_id)
+        token_redacted = active_applies.pop(item_id)
         if item.get("status") != "completed" or item.get("exit_code") != 0:
             fail(f"line {number} has a non-successful update apply")
+        if token_redacted and item.get("aggregated_output") != "=== Update applied ===\n":
+            fail(f"line {number} redacted update apply has no successful executor receipt")
 
     print(json.dumps({"valid": True, "completed_commands": completed_commands}, separators=(",", ":")))
     return 0

@@ -419,6 +419,14 @@ subject_command_pair boundary-update-apply "$update_apply_command" > "$TMP/subje
 if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-apply.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects standalone update apply"; else ok "subject-event validator rejects standalone update apply"; fi
 cat "$TMP/subject-boundary-update-plan.jsonl" "$TMP/subject-boundary-update-apply.jsonl" > "$TMP/subject-boundary-update-sequence.jsonl"
 check "subject-event validator permits exact dry-run then token-bound apply" python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-sequence.jsonl" "$TMP/subject-isolation.json"
+redacted_update_command="${update_apply_command%$update_token\"}[REDACTED_SECRET]\""
+subject_command_pair boundary-update-redacted "$redacted_update_command" "=== Update applied ===
+" > "$TMP/subject-boundary-update-redacted.jsonl"
+cat "$TMP/subject-boundary-update-plan.jsonl" "$TMP/subject-boundary-update-redacted.jsonl" > "$TMP/subject-boundary-update-redacted-sequence.jsonl"
+check "subject-event validator accepts Codex-redacted token after successful executor receipt" python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-redacted-sequence.jsonl" "$TMP/subject-isolation.json"
+subject_command_pair boundary-update-redacted-no-receipt "$redacted_update_command" > "$TMP/subject-boundary-update-redacted-no-receipt.jsonl"
+cat "$TMP/subject-boundary-update-plan.jsonl" "$TMP/subject-boundary-update-redacted-no-receipt.jsonl" > "$TMP/subject-boundary-update-redacted-no-receipt-sequence.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-update-redacted-no-receipt-sequence.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects redacted apply without executor receipt"; else ok "subject-event validator rejects redacted apply without executor receipt"; fi
 wrong_update_token="$(printf 'b%.0s' {1..64})"
 wrong_token_command="${update_apply_command%$update_token\"}$wrong_update_token\""
 subject_command_pair boundary-update-wrong-token "$wrong_token_command" > "$TMP/subject-boundary-update-wrong-token.jsonl"

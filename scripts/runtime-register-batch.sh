@@ -4,8 +4,15 @@
 # available. Keeping this recovery-oriented extension outside core/lib honors
 # the frozen core change budget while preserving one-lock atomic publication.
 
+# Use the same canonical eval-artifact classifier as the dirty-worktree gate;
+# registration must never create a binding that the verifier later skips.
+if ! type dwm_runtime_artifact_kind >/dev/null 2>&1; then
+  # shellcheck source=dirty-worktree-runtime-support.sh
+  . "${BASH_SOURCE[0]%/*}/dirty-worktree-runtime-support.sh" || return 2
+fi
+
 runtime_register_batch() {
-  local project_dir="$1" kind="$2" rel seen f mf tmp backup="" rc=0 changed=0 release_rc=0 retain_backup=0
+  local project_dir="$1" kind="$2" rel seen f mf tmp backup="" rc=0 changed=0 release_rc=0 retain_backup=0 expected_kind
   local -a rels=()
   case "$kind" in
     eval_candidate|eval_result) ;;
@@ -34,6 +41,11 @@ runtime_register_batch() {
   fi
 
   for rel in "${rels[@]}"; do
+    expected_kind="$(dwm_runtime_artifact_kind "$rel" 2>/dev/null || true)"
+    if [ "$expected_kind" != "$kind" ]; then
+      echo "runtime-manifest: noncanonical path or kind mismatch: $rel" >&2
+      return 1
+    fi
     f="$project_dir/$rel"
     if [ -L "$f" ] || [ ! -f "$f" ]; then
       echo "runtime-manifest: refusing to batch-register missing file: $rel" >&2
@@ -47,9 +59,19 @@ runtime_register_batch() {
   }
 
   tmp="${mf}.batch.$$"
-  if ! _runtime_verify_registry_anchor "$project_dir" "$mf" \
-     || ! _runtime_validate_registry "$project_dir" "$mf"; then
-    echo "runtime-manifest: existing registry or dedicated anchor is invalid" >&2
+  if ! _runtime_verify_registry_anchor "$project_dir" "$mf"; then
+    # A previous process may have died after atomically publishing the working
+    # registry but before its alternate-index/private-ref anchor transaction
+    # completed. Restore only from the already trusted private ref, fail this
+    # invocation, and require the caller to retry the batch from clean state.
+    if _runtime_restore_registry_from_anchor "$project_dir" "$mf"; then
+      echo "runtime-manifest: recovered interrupted batch publication; retry required" >&2
+    else
+      echo "runtime-manifest: existing registry or dedicated anchor is invalid" >&2
+    fi
+    rc=1
+  elif ! _runtime_validate_registry "$project_dir" "$mf"; then
+    echo "runtime-manifest: existing registry is invalid" >&2
     rc=1
   fi
   if [ "$rc" -eq 0 ]; then

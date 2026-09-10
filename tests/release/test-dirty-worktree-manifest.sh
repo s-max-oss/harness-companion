@@ -1668,14 +1668,24 @@ HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
 RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null 2>&1
 MF="$D/.harness/runtime-manifest.jsonl"
 mkdir -p "$D/tests/eval/candidates"
-for n in 1 2 3; do
-  printf 'candidate-%s\n' "$n" >"$D/tests/eval/candidates/c$n.json"
-done
+T57_C1="tests/eval/candidates/vague-goal.1.20260910T010101Z-1-1.json"
+T57_C2="tests/eval/candidates/partial-information.1.20260910T010102Z-1-2.json"
+T57_C3="tests/eval/candidates/only-defaults-needed.1.20260910T010103Z-1-3.json"
+printf 'candidate-1\n' >"$D/$T57_C1"
+printf 'candidate-2\n' >"$D/$T57_C2"
+printf 'candidate-3\n' >"$D/$T57_C3"
 T57_BEFORE_SHA="$(_runtime_file_sha256 "$MF")"
-printf 'tests/eval/candidates/c1.json\0tests/eval/candidates/missing.json\0' \
+printf '%s\0%s\0' "$T57_C1" "tests/eval/candidates/vague-goal.1.20260910T010104Z-1-4.json" \
   | runtime_register_batch "$D" eval_candidate >/dev/null 2>&1
 check "T57a: a missing batch source fails closed" 1 "$?"
 check "T57b: rejected batch preserves registry bytes" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$MF")"
+printf 'candidate-invalid\n' >"$D/tests/eval/candidates/c1.json"
+printf 'tests/eval/candidates/c1.json\0' | runtime_register_batch "$D" eval_candidate >/dev/null 2>&1
+check "T57b-1: noncanonical eval path fails closed" 1 "$?"
+check "T57b-2: noncanonical rejection preserves registry bytes" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$MF")"
+printf '%s\0' "$T57_C1" | runtime_register_batch "$D" eval_result >/dev/null 2>&1
+check "T57b-3: exact path-kind mismatch fails closed" 1 "$?"
+check "T57b-4: path-kind rejection preserves registry bytes" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$MF")"
 ANCHOR_ORIGINAL="$(declare -f _runtime_anchor_registry)"
 eval "$(printf '%s\n' "$ANCHOR_ORIGINAL" | sed '1s/_runtime_anchor_registry/_t57_original_anchor_registry/')"
 T57_ANCHOR_CALLS=0
@@ -1684,7 +1694,7 @@ _runtime_anchor_registry() {
   _t57_original_anchor_registry "$@"
 }
 runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
-  < <(printf 'tests/eval/candidates/c1.json\0tests/eval/candidates/c2.json\0tests/eval/candidates/c3.json\0')
+  < <(printf '%s\0%s\0%s\0' "$T57_C1" "$T57_C2" "$T57_C3")
 check "T57c: valid batch registration succeeds" 0 "$?"
 check "T57d: all batch records are present" 3 "$(jq -s '[.[] | select(.kind? == "eval_candidate")] | length' "$MF")"
 check "T57e: batch publication preserves the dedicated anchor" 0 "$(_runtime_verify_registry_anchor "$D" "$MF" >/dev/null 2>&1; echo $?)"
@@ -1694,20 +1704,20 @@ eval "$ANCHOR_ORIGINAL"
 
 T57_REGISTERED_SHA="$(_runtime_file_sha256 "$MF")"
 runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
-  < <(printf 'tests/eval/candidates/c1.json\0')
+  < <(printf '%s\0' "$T57_C1")
 check "T57g: exact batch re-registration remains idempotent" 0 "$?"
 check "T57h: exact batch re-registration preserves registry bytes" "$T57_REGISTERED_SHA" "$(_runtime_file_sha256 "$MF")"
-printf 'drift\n' >> "$D/tests/eval/candidates/c1.json"
+printf 'drift\n' >> "$D/$T57_C1"
 runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
-  < <(printf 'tests/eval/candidates/c1.json\0')
+  < <(printf '%s\0' "$T57_C1")
 check "T57i: existing batch path with byte drift fails closed" 1 "$?"
 check "T57j: drift rejection preserves registry bytes" "$T57_REGISTERED_SHA" "$(_runtime_file_sha256 "$MF")"
 runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
-  < <(printf 'tests/eval/candidates/c2.json\0tests/eval/candidates/c2.json\0')
+  < <(printf '%s\0%s\0' "$T57_C2" "$T57_C2")
 check "T57k: duplicate input path fails closed" 1 "$?"
 check "T57l: duplicate rejection preserves registry bytes" "$T57_REGISTERED_SHA" "$(_runtime_file_sha256 "$MF")"
 runtime_register_batch "$D" arbitrary_kind >/dev/null 2>&1 \
-  < <(printf 'tests/eval/candidates/c2.json\0')
+  < <(printf '%s\0' "$T57_C2")
 check "T57m: unsupported batch kind fails closed" 1 "$?"
 check "T57n: kind rejection preserves registry bytes" "$T57_REGISTERED_SHA" "$(_runtime_file_sha256 "$MF")"
 
@@ -1719,14 +1729,15 @@ HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
 RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null 2>&1
 MF="$D/.harness/runtime-manifest.jsonl"
 mkdir -p "$D/tests/eval/candidates"
-printf 'candidate\n' > "$D/tests/eval/candidates/c1.json"
+T57_RECOVERY_C="tests/eval/candidates/vague-goal.1.20260910T020101Z-2-1.json"
+printf 'candidate\n' > "$D/$T57_RECOVERY_C"
 T57_BEFORE_SHA="$(_runtime_file_sha256 "$MF")"
 ANCHOR_ORIGINAL="$(declare -f _runtime_anchor_registry)"
 ROLLBACK_ORIGINAL="$(declare -f _runtime_rollback_registry)"
 _runtime_anchor_registry() { return 1; }
 _runtime_rollback_registry() { return 1; }
 runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
-  < <(printf 'tests/eval/candidates/c1.json\0')
+  < <(printf '%s\0' "$T57_RECOVERY_C")
 T57_RECOVERY_RC=$?
 unset -f _runtime_anchor_registry _runtime_rollback_registry
 eval "$ANCHOR_ORIGINAL"
@@ -1736,6 +1747,29 @@ check "T57o: anchor plus rollback failure propagates" 1 "$T57_RECOVERY_RC"
 check "T57p: uncertain recovery retains one backup" 1 "$(find "$D/.git" -maxdepth 1 -type f -name 'runtime-manifest-backup.*' 2>/dev/null | wc -l | tr -d '[:space:]')"
 check "T57q: retained backup is the exact pre-publication registry" "$T57_BEFORE_SHA" "$(_runtime_file_sha256 "$T57_BACKUP")"
 
+# Simulate a hard death after the working registry was published but before
+# the alternate-index/private-ref anchor advanced. The first retry must restore
+# trusted bytes and fail; a second retry may then publish the batch normally.
+D="$(mktemp -d "$TMPDIR/t57-hard-death-XXXX")"
+setup_repo "$D"
+HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null 2>&1
+MF="$D/.harness/runtime-manifest.jsonl"
+mkdir -p "$D/tests/eval/candidates"
+T57_DEATH_C="tests/eval/candidates/vague-goal.1.20260910T030101Z-3-1.json"
+printf 'candidate\n' > "$D/$T57_DEATH_C"
+T57_TRUSTED_SHA="$(_runtime_file_sha256 "$MF")"
+T57_DEATH_SHA="$(_runtime_file_sha256 "$D/$T57_DEATH_C")"
+T57_DEATH_SIZE="$(wc -c < "$D/$T57_DEATH_C" | tr -d '[:space:]')"
+jq -cn --arg p "$T57_DEATH_C" --arg h "$T57_DEATH_SHA" --argjson s "$T57_DEATH_SIZE" \
+  '{path:$p,kind:"eval_candidate",sha256:$h,size:$s}' >> "$MF"
+runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 < <(printf '%s\0' "$T57_DEATH_C")
+check "T57q-1: interrupted publication recovery requires an explicit retry" 1 "$?"
+check "T57q-2: recovery restores the trusted registry bytes" "$T57_TRUSTED_SHA" "$(_runtime_file_sha256 "$MF")"
+runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 < <(printf '%s\0' "$T57_DEATH_C")
+check "T57q-3: retry after recovery publishes the exact batch" 0 "$?"
+check "T57q-4: recovered retry preserves the dedicated anchor" 0 "$(_runtime_verify_registry_anchor "$D" "$MF" >/dev/null 2>&1; echo $?)"
+
 # Lock acquisition failure must not create a backup or mutate the registry.
 D="$(mktemp -d "$TMPDIR/t57-lock-XXXX")"
 setup_repo "$D"
@@ -1743,12 +1777,13 @@ HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
 RUNTIME_MANIFEST_GENESIS="$HEAD_SHA" runtime_register "$D" ".harness/logs/runs/run-1.ndjson" ndjson >/dev/null 2>&1
 MF="$D/.harness/runtime-manifest.jsonl"
 mkdir -p "$D/tests/eval/candidates"
-printf 'candidate\n' > "$D/tests/eval/candidates/c1.json"
+T57_LOCK_C="tests/eval/candidates/vague-goal.1.20260910T040101Z-4-1.json"
+printf 'candidate\n' > "$D/$T57_LOCK_C"
 T57_BEFORE_SHA="$(_runtime_file_sha256 "$MF")"
 ACQUIRE_ORIGINAL="$(declare -f _runtime_acquire)"
 _runtime_acquire() { return 1; }
 runtime_register_batch "$D" eval_candidate >/dev/null 2>&1 \
-  < <(printf 'tests/eval/candidates/c1.json\0')
+  < <(printf '%s\0' "$T57_LOCK_C")
 T57_LOCK_RC=$?
 unset -f _runtime_acquire
 eval "$ACQUIRE_ORIGINAL"

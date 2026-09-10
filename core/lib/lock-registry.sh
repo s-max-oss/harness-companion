@@ -692,10 +692,12 @@ _lr_flock_acquire() {
 
   # Try to acquire exclusive flock with the deadline. flock -w 1 waits at
   # most 1s; we loop until the deadline so we surface a clear timeout error.
-  local rc=1
+  local rc=1 first_attempt=1
   local deadline
   deadline=$(( $(_lr_now) + timeout_s ))
-  while [ "$(_lr_now)" -lt "$deadline" ] && [ "$rc" -ne 0 ]; do
+  while { [ "$first_attempt" -eq 1 ] || [ "$(_lr_now)" -lt "$deadline" ]; } \
+      && [ "$rc" -ne 0 ]; do
+    first_attempt=0
     flock -w 1 -x "$fd" && rc=0 || rc=$?
   done
 

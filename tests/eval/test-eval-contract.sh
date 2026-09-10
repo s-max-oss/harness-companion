@@ -10,6 +10,18 @@ PASS=0; FAIL=0
 ok() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "FAIL: $1" >&2; FAIL=$((FAIL + 1)); }
 check() { local label="$1"; shift; if "$@"; then ok "$label"; else bad "$label"; fi; }
+eval_lock_owner_present() {
+  local d="$1"
+  { [ -f "$d/.claim" ] && [ ! -L "$d/.claim" ]; } \
+    || { [ -f "$d/.lr_owner" ] && [ ! -L "$d/.lr_owner" ]; }
+}
+eval_lock_released() {
+  local d="$1" marker
+  for marker in .claim .lr_owner lifecycle.json bundle.json; do
+    [ ! -e "$d/$marker" ] && [ ! -L "$d/$marker" ] || return 1
+  done
+  return 0
+}
 tag_ci_gate_wired() {
   local prelude tag_env branch_env
   prelude="$(python - "$ROOT/.github/workflows/ci.yml" <<'PY'
@@ -1186,14 +1198,14 @@ for active_role in runner gate; do
     > "$TMP/active-$active_role-attest.log" 2>&1 || active_attest_rc=$?
   active_owner_intact=false
   if [ "$active_attest_rc" -ne 0 ] && kill -0 "$active_holder_pid" 2>/dev/null \
-      && [ -f "$active_lock/.claim" ]; then
+      && eval_lock_owner_present "$active_lock"; then
     active_owner_intact=true
   fi
   : > "$active_release"
   active_holder_rc=0
   wait "$active_holder_pid" || active_holder_rc=$?
   if [ "$active_owner_intact" = true ] && [ "$active_holder_rc" -eq 0 ] \
-      && [ ! -e "$active_lock" ]; then
+      && eval_lock_released "$active_lock"; then
     ok "attester refuses the active $active_role identity lock without stealing it"
   else
     sed "s/^/  active-$active_role: /" "$TMP/active-$active_role-attest.log" >&2
@@ -1225,8 +1237,8 @@ if bash "$EVAL/attest-result.sh" "$recovery_attest_candidate" \
   --results-dir="$TMP/recovery-attested-results" --allowed-signers="$TMP/test-release-signers" \
   > "$TMP/recovery-attest-retry.log" 2>&1 \
   && [ -f "$TMP/recovery-attested-results/$(basename "$recovery_attest_candidate")" ] \
-  && [ ! -e "$TMP/recovery-attested-results/.eval-write.lock" ] \
-  && [ ! -e "$TMP/recovery-attest-candidates/.eval-agent.lock" ]; then
+  && eval_lock_released "$TMP/recovery-attested-results/.eval-write.lock" \
+  && eval_lock_released "$TMP/recovery-attest-candidates/.eval-agent.lock"; then
   ok "production attester retry completes and retires interrupted publication"
 else
   sed 's/^/  recovery-retry: /' "$TMP/recovery-attest-retry.log" >&2
@@ -1269,8 +1281,8 @@ for crash_boundary in candidate_lock result_lock stage_planned stage_created res
       --results-dir="$crash_results" --allowed-signers="$TMP/test-release-signers" \
       > "$TMP/crash-$crash_boundary-retry.log" 2>&1 \
     && [ -f "$crash_results/$(basename "$attest_candidate")" ] \
-    && [ ! -e "$crash_results/.eval-write.lock" ] \
-    && [ ! -e "$crash_candidates/.eval-agent.lock" ] \
+    && eval_lock_released "$crash_results/.eval-write.lock" \
+    && eval_lock_released "$crash_candidates/.eval-agent.lock" \
     && ! find "$crash_results" -mindepth 1 -maxdepth 1 -name '.attest.*' -print -quit | grep -q .; then
     ok "attester safely retries after hard interruption at $crash_boundary"
   else
@@ -1469,7 +1481,8 @@ if bash "$EVAL/attest-result.sh" "$attest_candidate" \
   --results-dir="$TMP/attested-results" --allowed-signers="$TMP/test-release-signers" \
   >/dev/null 2>&1; then
   bad "attester refuses to replace an existing result"
-elif [ "$attested_sha" = "$(sha256sum "$attested" | cut -d ' ' -f 1)" ] && [ ! -e "$TMP/attested-results/.eval-write.lock" ]; then
+elif [ "$attested_sha" = "$(sha256sum "$attested" | cut -d ' ' -f 1)" ] \
+  && eval_lock_released "$TMP/attested-results/.eval-write.lock"; then
   ok "attester refuses replacement and releases a clean pre-publication lock"
 else
   bad "attester refuses replacement and releases a clean pre-publication lock"
@@ -1488,7 +1501,10 @@ HOOK
 chmod +x "$TMP/swap-after-snapshot.sh"
 if HARNESS_EVAL_TEST_AFTER_SNAPSHOT_HOOK="$TMP/swap-after-snapshot.sh" bash "$EVAL/attest-result.sh" "$swap_candidate" --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/swap-candidates" --results-dir="$TMP/swap-results" --allowed-signers="$TMP/test-release-signers" > "$TMP/swap-attest.log" 2>&1; then
   bad "attester rejects a candidate swap after private snapshot"
-elif grep -Fq 'candidate input drifted after validation' "$TMP/swap-attest.log" && [ ! -e "$TMP/swap-results/$(basename "$attested")" ] && [ ! -e "$TMP/swap-results/.eval-write.lock" ] && [ ! -e "$TMP/swap-candidates/.eval-agent.lock" ]; then
+elif grep -Fq 'candidate input drifted after validation' "$TMP/swap-attest.log" \
+  && [ ! -e "$TMP/swap-results/$(basename "$attested")" ] \
+  && eval_lock_released "$TMP/swap-results/.eval-write.lock" \
+  && eval_lock_released "$TMP/swap-candidates/.eval-agent.lock"; then
   ok "attester rejects a candidate swap after private snapshot"
 else
   sed 's/^/  swap-attester: /' "$TMP/swap-attest.log" >&2
@@ -1511,7 +1527,10 @@ HOOK
 chmod +x "$TMP/swap-during-recheck.sh"
 if HARNESS_EVAL_TEST_DURING_RECHECK_HOOK="$TMP/swap-during-recheck.sh" bash "$EVAL/attest-result.sh" "$recheck_candidate" --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/recheck-candidates" --results-dir="$TMP/recheck-results" --allowed-signers="$TMP/test-release-signers" > "$TMP/recheck-attest.log" 2>&1; then
   bad "attester detects pathname replacement during final recheck"
-elif grep -Fq 'recheck source path changed after reading' "$TMP/recheck-attest.log" && [ ! -e "$TMP/recheck-results/$(basename "$attested")" ] && [ ! -e "$TMP/recheck-results/.eval-write.lock" ] && [ ! -e "$TMP/recheck-candidates/.eval-agent.lock" ]; then
+elif grep -Fq 'recheck source path changed after reading' "$TMP/recheck-attest.log" \
+  && [ ! -e "$TMP/recheck-results/$(basename "$attested")" ] \
+  && eval_lock_released "$TMP/recheck-results/.eval-write.lock" \
+  && eval_lock_released "$TMP/recheck-candidates/.eval-agent.lock"; then
   ok "attester detects pathname replacement during final recheck"
 else
   sed 's/^/  recheck-attester: /' "$TMP/recheck-attest.log" >&2
@@ -1525,7 +1544,10 @@ for f in "$attest_base".*; do cp "$f" "$TMP/set-recheck-candidates/"; done
 set_recheck_candidate="$TMP/set-recheck-candidates/$(basename "$attest_candidate")"
 if HARNESS_EVAL_TEST_AFTER_FIRST_RECHECK_HOOK="$TMP/swap-during-recheck.sh" bash "$EVAL/attest-result.sh" "$set_recheck_candidate" --signing-key="$TMP/test-signing-key" --candidates-dir="$TMP/set-recheck-candidates" --results-dir="$TMP/set-recheck-results" --allowed-signers="$TMP/test-release-signers" > "$TMP/set-recheck-attest.log" 2>&1; then
   bad "attester detects early-source replacement during later set verification"
-elif grep -Fq 'candidate input set changed after final recheck' "$TMP/set-recheck-attest.log" && [ ! -e "$TMP/set-recheck-results/$(basename "$attested")" ] && [ ! -e "$TMP/set-recheck-results/.eval-write.lock" ] && [ ! -e "$TMP/set-recheck-candidates/.eval-agent.lock" ]; then
+elif grep -Fq 'candidate input set changed after final recheck' "$TMP/set-recheck-attest.log" \
+  && [ ! -e "$TMP/set-recheck-results/$(basename "$attested")" ] \
+  && eval_lock_released "$TMP/set-recheck-results/.eval-write.lock" \
+  && eval_lock_released "$TMP/set-recheck-candidates/.eval-agent.lock"; then
   ok "attester detects early-source replacement during later set verification"
 else
   sed 's/^/  set-recheck-attester: /' "$TMP/set-recheck-attest.log" >&2

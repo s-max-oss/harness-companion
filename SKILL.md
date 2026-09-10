@@ -79,6 +79,18 @@ Load `references/conversational-principles.md` and `references/post-init-explana
 
    Treat the command as illustrative argument binding, not permission to interpolate untrusted shell text. Use the host's structured process API or safely quoted arguments in a real invocation.
 
+   In a Codex Windows PowerShell shell, send the Brief as one compact JSON
+   string with this static pipeline shape:
+
+   ```powershell
+   Write-Output '<compact JSON>' | bash '<skill-root>/scripts/harness-init-boundary.sh' '<target>' --decision approve --brief-stdin --non-interactive --host=codex
+   ```
+
+   The surrounding PowerShell string is single-quoted, so JSON double quotes
+   are literal: write `"goal"`, never `\"goal\"`. Represent an apostrophe in a
+   JSON string as two PowerShell apostrophes (`''`). Do not use a variable,
+   base64 wrapper, or PowerShell here-string for this consent-boundary call.
+
    Approval freezes the exact human Brief that was just presented. Build the
    executor JSON by copying its goal, success-criterion strings, and other
    decisions exactly; never regenerate, paraphrase, personalize (for example,

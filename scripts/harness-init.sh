@@ -14,6 +14,8 @@
 #   update  : --update [--apply --plan-token <sha256>] — 3-way SHA compare.
 #             Dry-run prints the token that binds a later apply to the same inputs.
 #   render  : --render-brief — regenerate PROJECT_BRIEF.md from PROJECT_BRIEF.json.
+#   validate: --validate-brief-only --brief-stdin — validate caller JSON and
+#             exit before staging or writing any target file.
 #
 # Output manifest (§6.2a): #1-#11 minimal; #12-#14 only with --full.
 #
@@ -49,6 +51,7 @@ RENDER_BRIEF="false"
 HOST="claude"
 MODE="minimal"
 FORCE_CONFIG="false"
+VALIDATE_BRIEF_ONLY="false"
 PLAN_TOKEN=""
 STAGE_DIR=""
 CHANGED_PATHS=()
@@ -635,6 +638,7 @@ while [ $# -gt 0 ]; do
     --minimal)          MODE="minimal" ;;
     --full)             MODE="full" ;;
     --force-config)     FORCE_CONFIG="true" ;;
+    --validate-brief-only) VALIDATE_BRIEF_ONLY="true" ;;
     --plan-token=*)     PLAN_TOKEN="${arg#--plan-token=}" ;;
     --plan-token)
       shift
@@ -824,6 +828,16 @@ if [ -n "$BRIEF_PATH" ] || [ "$BRIEF_STDIN" = "true" ]; then
     echo "error: Brief: schema or enum validation failed" >&2
     exit 2
   fi
+fi
+
+if [ "$VALIDATE_BRIEF_ONLY" = "true" ]; then
+  if [ "$BRIEF_STDIN" != "true" ] || [ -n "$BRIEF_PATH" ] || [ "$UPDATE" = "true" ] \
+    || [ "$APPLY" = "true" ] || [ "$RENDER_BRIEF" = "true" ] || [ "$FORCE_CONFIG" = "true" ]; then
+    echo "error: --validate-brief-only requires only --brief-stdin and performs no mutation" >&2
+    exit 2
+  fi
+  printf '{"valid":true}\n'
+  exit 0
 fi
 
 # On the resolved Brief path, template/config selection is Brief-driven. Repo

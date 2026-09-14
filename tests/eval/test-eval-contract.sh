@@ -25,7 +25,19 @@ brief_input_contract_documented() {
     && grep -Fq 'Execution-critical conflicts' "$contract" \
     && grep -Fq '`markers_seen` (an array of strings)' "$contract" \
     && grep -Fq '`notes` (a string of at most 500' "$contract" \
+    && grep -Fq 'Supported conflict pointers are' "$contract" \
+    && grep -Fq -- '--validate-brief-only' "$contract" \
     && grep -Fq 'first approved boundary invocation must be schema-valid' "$runner"
+}
+brief_input_examples_validate() {
+  local validator="$1" root="$2" known mixed
+  local target="$root/brief-input-target"
+  mkdir -p "$target" || return 1
+  known="$(jq -cn '{schema_version:1,goal:"Create a local report",success_criteria:["The report is generated"],detected_type:"python",stack:"python",test_framework:"pytest",cadence:"stable",deadline:null,secrets_handling:"unspecified",external_network:"ask",prohibitions:[],initial_project_state:{is_git_repo:false,has_existing_tests:false,existing_harness_files:[],detection_summary:"Empty fixture"},operation_preferences:{commit:"ask",push:"ask",merge:"ask",release:"ask",install_packages:"ask",external_mutation:"ask",destructive_ops:false},defaults_applied:[{field:"/cadence",value:"stable",rationale:"Documented stable default",source:"spec_default"}],conflicts_resolved:[],type_evidence:null,provenance:{"/goal":{source:"conversation"},"/cadence":{source:"spec_default"}}}')" || return 1
+  mixed="$(jq -cn '{schema_version:1,goal:"Keep both runtimes",success_criteria:["Both test suites remain runnable"],detected_type:"mixed",stack:"mixed",test_framework:"pytest-and-jest",cadence:"stable",deadline:null,secrets_handling:"unspecified",external_network:"denied",prohibitions:["No outbound network"],initial_project_state:{is_git_repo:false,has_existing_tests:true,existing_harness_files:[],detection_summary:"Node and Python markers"},operation_preferences:{commit:"denied",push:"denied",merge:"denied",release:"denied",install_packages:"denied",external_mutation:"denied",destructive_ops:false},defaults_applied:[],conflicts_resolved:[{field:"/external_network",repo_evidence:"Policy denies outbound access",user_input:"Keep it disabled",resolution:"user",resolved_value:"denied"}],type_evidence:{markers_seen:["package.json","pyproject.toml"],notes:"Both runtime markers are present."},provenance:{"/goal":{source:"conversation"},"/detected_type":{source:"repo"}}}')" || return 1
+  printf '%s' "$known" | bash "$validator" "$target" --brief-stdin --validate-brief-only --non-interactive --host=codex >/dev/null \
+    && printf '%s' "$mixed" | bash "$validator" "$target" --brief-stdin --validate-brief-only --non-interactive --host=codex >/dev/null \
+    && [ -z "$(find "$target" -mindepth 1 -print -quit)" ]
 }
 eval_lock_owner_present() {
   local d="$1"
@@ -236,6 +248,7 @@ check "attester and result gate bind source ACL evidence to live roots and accou
 check "guided init keeps approved defaults losslessly machine-representable" bash -c 'grep -Fq "Every decision presented for approval must be represented losslessly" "$1" && grep -Fq "apply only the documented Brief defaults" "$1" && grep -Fiq "do not invent product or implementation defaults" "$1"' _ "$ROOT/SKILL.md"
 check "guided init aligns default provenance with exact default pointers" bash -c 'grep -Fq "exact same JSON pointer as its matching" "$1" && grep -Fq "Do not record leaf defaults" "$1"' _ "$ROOT/SKILL.md"
 check "guided init exposes one exact pre-mutation Brief input contract" brief_input_contract_documented "$ROOT/SKILL.md" "$ROOT/references/conversational-principles.md" "$EVAL/run-eval.sh" "$ROOT/references/project-brief-input.md"
+check "documented Brief variants pass the authoritative read-only input validator" brief_input_examples_validate "$ROOT/scripts/harness-init.sh" "$TMP"
 check "conversation guidance does not turn sensible defaults into product architecture" bash -c 'grep -Fq "documented Project Brief defaults" "$1" && grep -Fq "framework," "$1" && grep -Fq "database," "$1" && grep -Fq "explicitly deferred" "$1"' _ "$ROOT/references/conversational-principles.md"
 check "guided init defers optional authentication mechanisms once success is observable" bash -c 'grep -Fq "authentication goal requires observable success criteria" "$1" && grep -Fq "sessions, tokens, or API keys" "$1" && grep -Fq "should be deferred" "$1" && grep -Fq "do not re-ask an unanswered optional" "$1"' _ "$ROOT/references/conversational-principles.md"
 check "conversation guidance asks each conflict once and isolates one field per menu" bash -c 'grep -Fq "Ask that resolution question exactly once" "$1" && grep -Fq "every menu choice to that field alone" "$1" && grep -Fq "Do not offer" "$1" && grep -Fq "composite alternatives" "$1"' _ "$ROOT/references/conversational-principles.md"
@@ -437,10 +450,10 @@ jq -n --arg target_file "$eval_target/.harness-eval-isolation-sentinel" \
   --arg wrapper "$ps_wrapper" \
   '{probe:{payload:{target_file:$target_file},shell_wrapper_path:$wrapper}}' > "$TMP/subject-isolation.json"
 subject_command_pair() {
-  local id="$1" command="$2" output="${3:-}"
-  jq -cn --arg id "$id" --arg command "$command" --arg output "$output" \
+  local id="$1" command="$2" output="${3:-}" exit_code="${4:-0}"
+  jq -cn --arg id "$id" --arg command "$command" --arg output "$output" --argjson exit_code "$exit_code" \
     '{type:"item.started",item:{id:$id,type:"command_execution",command:$command}},
-     {type:"item.completed",item:{id:$id,type:"command_execution",command:$command,status:"completed",exit_code:0,aggregated_output:$output}}'
+     {type:"item.completed",item:{id:$id,type:"command_execution",command:$command,status:"completed",exit_code:$exit_code,aggregated_output:$output}}'
 }
 subject_command_pair read-1 'Get-Content -Raw package.json' > "$TMP/subject-read.jsonl"
 check "subject-event validator permits read-only inspection" python "$EVAL/validate-subject-events.py" "$TMP/subject-read.jsonl" "$TMP/subject-isolation.json"
@@ -454,6 +467,10 @@ subject_command_pair boundary-1 "printf %s \$BRIEF | bash $eval_boundary $eval_t
 if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects incomplete boundary invocation"; else ok "subject-event validator rejects incomplete boundary invocation"; fi
 subject_command_pair boundary-2 "printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin --non-interactive --host=codex" > "$TMP/subject-boundary.jsonl"
 check "subject-event validator permits the exact approved boundary" python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary.jsonl" "$TMP/subject-isolation.json"
+subject_command_pair boundary-failed "printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin --non-interactive --host=codex" "schema rejected" 1 > "$TMP/subject-boundary-failed.jsonl"
+subject_command_pair boundary-retry "printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin --non-interactive --host=codex" "initialized" 0 > "$TMP/subject-boundary-retry.jsonl"
+cat "$TMP/subject-boundary-failed.jsonl" "$TMP/subject-boundary-retry.jsonl" > "$TMP/subject-boundary-failed-then-success.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-boundary-failed-then-success.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects failed boundary probing before a successful retry"; else ok "subject-event validator rejects failed boundary probing before a successful retry"; fi
 update_token="$(printf 'a%.0s' {1..64})"
 update_payload_escaped='{\"goal\":\"A\"}'
 update_plan_command="\"$ps_wrapper\" -NoProfile -Command \"Write-Output '$update_payload_escaped' | bash '$eval_boundary' '$eval_target' --decision approve --brief-stdin --non-interactive --host=codex --update\""

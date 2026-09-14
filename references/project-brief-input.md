@@ -54,6 +54,18 @@ Use this exact top-level vocabulary for a complete guided Brief:
 Replace the example values with the confirmed values; preserve the field names
 and shapes. In particular:
 
+- `goal` is a non-empty string of at most 500 characters.
+  `success_criteria` is an array of one to seven non-empty strings.
+- `detected_type` and `stack` each use exactly one of `node`, `python`, `rust`,
+  `go`, `shell`, `electron`, `mixed`, `docs`, or `unknown`.
+- `test_framework` is a non-empty string of at most 50 characters. Use the
+  repository's canonical identifier (for example `pytest`, `jest`, or `none`),
+  not a display-name variant.
+- `cadence` is one of `stable`, `weekly`, `daily`, or `oneoff`. `deadline` is
+  `null` or a real `YYYY-MM-DD` date. `secrets_handling` is one of `env-file`,
+  `vault`, `keyring`, or `unspecified`. `external_network` is one of `ask`,
+  `allowed`, or `denied`. `prohibitions` is an array of at most 20 non-empty
+  strings, each at most 200 characters.
 - Use `detected_type`, not `project_type`.
 - Use top-level `secrets_handling`, `external_network`, and `prohibitions`; do
   not wrap them in `constraints`.
@@ -61,7 +73,8 @@ and shapes. In particular:
   `is_git_repo`, `has_existing_tests`, `existing_harness_files`, and
   `detection_summary`.
 - The exact operation member names are `commit`, `push`, `merge`, `release`,
-  `install_packages`, `external_mutation`, and `destructive_ops`.
+  `install_packages`, `external_mutation`, and `destructive_ops`. The first six
+  each use exactly `ask`, `auto`, or `denied`; `destructive_ops` is a boolean.
 - Each `defaults_applied` item uses `field`, `value`, `rationale`, and `source`;
   it never uses `path`.
 - `provenance` is an object keyed by JSON pointers, not an array. Its `source`
@@ -86,6 +99,12 @@ and shapes. In particular:
   }
   ```
 
+  Supported conflict pointers are `/detected_type`, `/goal`,
+  `/success_criteria`, `/cadence`, `/deadline`, `/stack`, `/test_framework`,
+  `/secrets_handling`, `/external_network`, `/prohibitions`, each of the four
+  `/initial_project_state/<member>` pointers listed above, and each of the
+  seven `/operation_preferences/<member>` pointers listed above.
+
 - `type_evidence` is required for `mixed` or `unknown` and contains
   `markers_seen` (an array of strings) plus `notes` (a string of at most 500
   characters); it may be `null` for a known type. Example:
@@ -105,3 +124,13 @@ and shapes. In particular:
 The executable validation in `scripts/harness-init.sh` remains authoritative.
 If this reference and that validator disagree, stop before invoking the
 boundary and report the contract mismatch.
+
+For a read-only preflight, pipe the exact compact JSON to:
+
+```text
+scripts/harness-init.sh <existing-target> --brief-stdin --validate-brief-only --non-interactive --host=<claude|codex>
+```
+
+This path returns `{"valid":true}`
+without staging or writing target files; it is not the mutation boundary and
+does not count as approval or initialization.

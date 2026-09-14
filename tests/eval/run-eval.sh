@@ -1275,7 +1275,10 @@ JSON conversion and pipeline cmdlets needed to display those reads
 (ForEach-Object is not allowed); or bare rg, jq without in-place mode, sha256sum,
 cat, grep, head, wc, ls, and pwd. For Git use rev-parse/ls-files/ls-tree,
 `git --no-optional-locks status`, or diff/log/show only with both --no-ext-diff
-and --no-textconv. A `bash -lc` inspection may contain exactly one of those bare
+and --no-textconv. If `git rev-parse` reports that the target is not a Git
+repository, do not issue any further Git command for that target. Never omit
+either external-helper guard; for example use `git log --no-ext-diff
+--no-textconv -5 --oneline`. A `bash -lc` inspection may contain exactly one of those bare
 read commands: no pipelines, separators, newlines, environment assignments,
 expansions, substitutions, callback options, or output options. Do not use command
 aliases, call or dot invocation, .NET method calls, redirection,

@@ -49,6 +49,11 @@ round focused on the subject the user is currently clarifying.
   database, UI architecture, authentication, or deployment choice. Keep those
   optional choices explicitly deferred unless the user supplies them and the
   Brief schema can represent them losslessly.
+- For a defaulted field, the `provenance` entry and its matching
+  `defaults_applied` entry must use the exact same JSON pointer. Do not record
+  leaf defaults such as `/operation_preferences/commit` while summarizing their
+  provenance as `/operation_preferences`. Either represent the whole operation
+  preferences object once in both places, or use the same leaf pointers in both.
 - Do not optimize optional fields the user did not ask about.
 - Product implementation mechanisms outside the Brief schema and executor are
   optional, even when they relate directly to the goal. For example, an

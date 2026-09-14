@@ -116,6 +116,22 @@ check "minimal gitignore contains registry lock entry" grep -Fxq '.harness/.regi
 check "minimal feature registry starts at revision 1" test "$(jq -r '.revision' "$T1/feature_list.json")" = 1
 check "minimal init.sh is executable" test -x "$T1/init.sh"
 check "minimal Claude output manifest is exact (path, kind, executable mode)" test "$(shape_manifest "$T1")" = "$EXPECTED_MINIMAL_CLAUDE"
+
+# Optional product choices may be tracked as bounded provenance-only deferred
+# topics even though they are not executable Brief fields.
+T1_DEFERRED="$TMP/brief-deferred"; mkdir -p "$T1_DEFERRED"
+jq '.provenance["/deferred/shipping_endpoint_details"]={source:"conversation"}' "$TMP/python.json" > "$TMP/python-deferred.json"
+if bash "$INIT" "$T1_DEFERRED" --brief "$TMP/python-deferred.json" --non-interactive >/dev/null 2>&1; then
+  check "deferred topic provenance survives canonical Brief generation" jq -e '.provenance["/deferred/shipping_endpoint_details"].source == "conversation"' "$T1_DEFERRED/.harness/PROJECT_BRIEF.json"
+else
+  bad "deferred topic provenance survives canonical Brief generation" "executor exited non-zero"
+fi
+jq '.provenance["/deferred/unsafe/path"]={source:"conversation"}' "$TMP/python.json" > "$TMP/python-bad-deferred.json"
+if bash "$INIT" "$TMP/bad-deferred" --brief "$TMP/python-bad-deferred.json" --non-interactive >/dev/null 2>&1; then
+  bad "deferred topic provenance rejects nested path injection"
+else
+  ok "deferred topic provenance rejects nested path injection"
+fi
 check "minimal Brief persists all categories and advisory marker" jq -e '
   .schema_version == 1 and .advisory == true
   and (.goal | type == "string" and test("[^[:space:]]"))

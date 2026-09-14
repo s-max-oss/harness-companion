@@ -732,6 +732,8 @@ validate_brief_input() {
       );
     def execution_critical_pointer:
       IN("/goal", "/success_criteria", "/detected_type", "/initial_project_state/is_git_repo");
+    def deferred_pointer:
+      test("^/deferred/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
     type == "object"
     and ((has("schema_version") | not) or .schema_version == 1)
     and (.goal | type == "string" and test("[^[:space:]]") and length <= 500)
@@ -769,7 +771,11 @@ validate_brief_input() {
          and (if .resolution=="deferred" then .resolved_value==null else .resolved_value!=null end))))
     and ((has("provenance") | not) or (.provenance | type == "object" and all(to_entries[];
          (.key|startswith("/")) and (.value|type=="object")
-         and (.value.source|IN("conversation","repo","environment","cli","spec_default","legacy_placeholder","existing_brief")))))
+         and (.value.source|IN("conversation","repo","environment","cli","spec_default","legacy_placeholder","existing_brief"))
+         and (if (.key | startswith("/deferred/")) then
+                (.key | deferred_pointer)
+                and (.value.source | IN("conversation","repo","environment","cli","existing_brief"))
+              else true end))))
     and (if (.detected_type // "") | IN("mixed","unknown")
          then (.type_evidence | type == "object")
            and (.type_evidence.markers_seen | type == "array" and all(.[]; type=="string"))

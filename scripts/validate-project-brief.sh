@@ -38,6 +38,8 @@ jq -e --arg version "$EXPECTED_VERSION" '
        and $d <= ([31,(if (($y%4==0 and $y%100!=0) or $y%400==0) then 29 else 28 end),31,30,31,30,31,31,30,31,30,31][$m-1]));
   def pointer_path:
     split("/")[1:] | map(gsub("~1"; "/") | gsub("~0"; "~"));
+  def deferred_pointer:
+    test("^/deferred/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
   def allowed_pointer:
     IN(
       "/schema_version", "/advisory", "/generated_by", "/source_version",
@@ -54,7 +56,7 @@ jq -e --arg version "$EXPECTED_VERSION" '
       "/operation_preferences/external_mutation",
       "/operation_preferences/destructive_ops", "/defaults_applied",
       "/conflicts_resolved", "/type_evidence", "/provenance"
-    );
+    ) or deferred_pointer;
   def default_pointer:
     IN(
       "/cadence", "/deadline", "/secrets_handling", "/external_network",
@@ -158,12 +160,16 @@ jq -e --arg version "$EXPECTED_VERSION" '
                 ($entry.value | keys | sort | IN(["source"],["marker","source"]))
                 and (($entry.value | has("marker") | not) or ($entry.value.marker | nonblank))
               else ($entry.value | keys) == ["source"] end)
-         and (($brief | getpath($entry.key | pointer_path)) != null or
-              ($entry.key | IN("/deadline","/type_evidence")))
-         and (if ($entry.value.source | IN("spec_default","legacy_placeholder")) then
-                any($brief.defaults_applied[];
-                  .field == $entry.key and .source == $entry.value.source)
-              else true end)))
+         and (if ($entry.key | deferred_pointer) then
+                ($entry.value.source | IN("conversation","repo","environment","cli","existing_brief"))
+              else
+                (($brief | getpath($entry.key | pointer_path)) != null or
+                 ($entry.key | IN("/deadline","/type_evidence")))
+                and (if ($entry.value.source | IN("spec_default","legacy_placeholder")) then
+                       any($brief.defaults_applied[];
+                         .field == $entry.key and .source == $entry.value.source)
+                     else true end)
+              end)))
 ' "$BRIEF" >/dev/null 2>&1 \
   || { echo "brief-validator: canonical schema validation failed" >&2; exit 1; }
 

@@ -83,6 +83,9 @@ POWERSHELL_PARAMETERS = {
     "where-object": {"-inputobject", "-filterScript", "-property", "-value", "-eq", "-ceq", "-ne", "-cne", "-gt", "-cgt", "-lt", "-clt", "-ge", "-cge", "-le", "-cle", "-like", "-clike", "-notlike", "-cnotlike", "-match", "-cmatch", "-notmatch", "-cnotmatch", "-contains", "-ccontains", "-notcontains", "-cnotcontains", "-in", "-cin", "-notin", "-cnotin", "-is", "-isnot"},
     "write-output": {"-inputobject", "-noenumerate"},
 }
+POWERSHELL_COMMON_PARAMETER_VALUES = {
+    "-erroraction": {"continue", "ignore", "silentlycontinue", "stop"},
+}
 
 
 POWERSHELL_ANALYZER = r"""
@@ -248,12 +251,28 @@ def validate_native_args(name: str, args: list[str]) -> None:
 
 def validate_powershell_args(name: str, args: list[str]) -> None:
     allowed = {value.casefold() for value in POWERSHELL_PARAMETERS.get(name, set())}
-    for arg in args:
+    common = set(POWERSHELL_COMMON_PARAMETER_VALUES)
+    index = 0
+    while index < len(args):
+        arg = args[index]
         if not arg.startswith("-"):
+            index += 1
             continue
-        parameter = arg.split(":", 1)[0].casefold()
-        if parameter not in allowed:
+        parameter, separator, inline_value = arg.partition(":")
+        parameter = parameter.casefold()
+        if parameter not in allowed and parameter not in common:
             fail(f"PowerShell read command uses an unrecognized parameter: {arg}")
+        if parameter in common:
+            if separator:
+                value = inline_value
+            elif index + 1 < len(args) and not args[index + 1].startswith("-"):
+                index += 1
+                value = args[index]
+            else:
+                fail(f"PowerShell common parameter requires a value: {arg}")
+            if value.casefold() not in POWERSHELL_COMMON_PARAMETER_VALUES[parameter]:
+                fail(f"PowerShell common parameter uses an unsafe value: {arg} {value}")
+        index += 1
 
 
 def load_authority(isolation_path: Path) -> dict[str, str]:

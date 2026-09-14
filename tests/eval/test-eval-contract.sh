@@ -474,6 +474,14 @@ subject_command_pair read-boundary-1 "\"$ps_wrapper\" -NoProfile -Command \"Get-
 check "subject-event validator permits reading the trusted boundary source" python "$EVAL/validate-subject-events.py" "$TMP/subject-read-boundary.jsonl" "$TMP/subject-isolation.json"
 subject_command_pair read-context-1 "\"$ps_wrapper\" -NoProfile -Command \"Select-String -LiteralPath '$eval_boundary' -Pattern 'decision' -Context 2,3\"" > "$TMP/subject-read-context.jsonl"
 check "subject-event validator permits literal numeric arrays for read-only parameters" python "$EVAL/validate-subject-events.py" "$TMP/subject-read-context.jsonl" "$TMP/subject-isolation.json"
+subject_command_pair read-error-action-1 "\"$ps_wrapper\" -NoProfile -Command \"Get-ChildItem -Force -Name '$eval_target' -ErrorAction SilentlyContinue\"" > "$TMP/subject-read-error-action.jsonl"
+check "subject-event validator permits bounded ErrorAction on read-only commands" python "$EVAL/validate-subject-events.py" "$TMP/subject-read-error-action.jsonl" "$TMP/subject-isolation.json"
+subject_command_pair read-error-action-inline-1 "\"$ps_wrapper\" -NoProfile -Command \"Get-ChildItem -Force -Name '$eval_target' -ErrorAction:Stop\"" > "$TMP/subject-read-error-action-inline.jsonl"
+check "subject-event validator permits bounded inline ErrorAction on read-only commands" python "$EVAL/validate-subject-events.py" "$TMP/subject-read-error-action-inline.jsonl" "$TMP/subject-isolation.json"
+subject_command_pair read-error-action-unsafe-1 "\"$ps_wrapper\" -NoProfile -Command \"Get-ChildItem -Force -Name '$eval_target' -ErrorAction Inquire\"" > "$TMP/subject-read-error-action-unsafe.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-read-error-action-unsafe.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects interactive ErrorAction values"; else ok "subject-event validator rejects interactive ErrorAction values"; fi
+subject_command_pair read-error-action-missing-1 "\"$ps_wrapper\" -NoProfile -Command \"Get-ChildItem -Force -Name '$eval_target' -ErrorAction\"" > "$TMP/subject-read-error-action-missing.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-read-error-action-missing.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects ErrorAction without a value"; else ok "subject-event validator rejects ErrorAction without a value"; fi
 subject_command_pair write-1 'brief=$(mktemp) && jq . input.json > $brief && rm $brief' > "$TMP/subject-transient-write.jsonl"
 if python "$EVAL/validate-subject-events.py" "$TMP/subject-transient-write.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects transient direct writes"; else ok "subject-event validator rejects transient direct writes"; fi
 subject_command_pair boundary-1 "printf %s \$BRIEF | bash $eval_boundary $eval_target --decision approve --brief-stdin" > "$TMP/subject-boundary.jsonl"

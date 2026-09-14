@@ -59,6 +59,27 @@ PY
   fi
 }
 
+subject_prompt_backticks_escaped() {
+  python - "$1" <<'PY'
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
+start = next(i for i, line in enumerate(lines) if 'cat > "$prompt" <<EOF' in line)
+end = next(i for i in range(start + 1, len(lines)) if lines[i] == "EOF")
+for line in lines[start + 1:end]:
+    for index, char in enumerate(line):
+        if char != chr(96):
+            continue
+        backslashes = 0
+        cursor = index - 1
+        while cursor >= 0 and line[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            raise SystemExit(1)
+PY
+}
+
 mapfile -t cases < <(find "$EVAL/cases" -maxdepth 1 -type f -name '*.json' | LC_ALL=C sort)
 check "exactly 14 versioned forward-eval cases" test "${#cases[@]}" -eq 14
 
@@ -120,7 +141,7 @@ check "release gate is syntactically valid" bash -n "$EVAL/check-results.sh"
 check "real eval sanitizes cross-edition PSModulePath through a trusted absolute env" grep -Fq '"$TRUSTED_WINDOWS_ENV" -u PSModulePath "$WINDOWS_POWERSHELL" "$@"' "$EVAL/run-eval.sh"
 check "all eval ACL invocations use the sanitized PowerShell wrapper" bash -c '! grep -Eq "^[[:space:]]*powershell[.]exe[[:space:]]" "$1"' _ "$EVAL/run-eval.sh"
 check "real eval fails closed unless the elevated Codex sandbox is provisioned" bash -c 'grep -Fq "sandbox backend" "$1" && grep -Fq "sandbox provisioning" "$1"' _ "$EVAL/run-eval.sh"
-check "real eval restores trust only for its disposable roots while ignoring user config" bash -c 'grep -Fq "subject_codex_isolation_flags=(-c" "$1" && grep -Fq "reviewer_codex_isolation_flags=(-c" "$1" && grep -Fq -- "-c \"\$subject_project_trust_config\"" "$1" && grep -Fq -- "-c \"\$reviewer_project_trust_config\"" "$1" && [ "$(grep -Fc -- "\"\${subject_codex_isolation_flags[@]}\"" "$1")" -eq 2 ] && [ "$(grep -Fc -- "\"\${reviewer_codex_isolation_flags[@]}\"" "$1")" -eq 1 ] && [ "$(grep -Fc -- "--ignore-user-config --ignore-rules" "$1")" -eq 3 ] && ! grep -Fq -- "--approve-for-me" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval restores trust only for its disposable roots while ignoring user config" bash -c 'grep -Fq "subject_codex_isolation_flags=(-c" "$1" && grep -Fq "reviewer_codex_isolation_flags=(-c" "$1" && grep -Fq -- "-c \"\$subject_project_trust_config\"" "$1" && grep -Fq -- "-c \"\$reviewer_project_trust_config\"" "$1" && [ "$(grep -Fc -- "\"\${subject_codex_isolation_flags[@]}\"" "$1")" -eq 2 ] && [ "$(grep -Fc -- "\"\${reviewer_codex_isolation_flags[@]}\"" "$1")" -eq 2 ] && [ "$(grep -Fc -- "--ignore-user-config --ignore-rules" "$1")" -eq 4 ] && ! grep -Fq -- "--approve-for-me" "$1"' _ "$EVAL/run-eval.sh"
 check "real eval pins the Windows Brief stdin producer to literal compact JSON" bash -c 'grep -Fq "Write-Output '\''<one-line compact JSON>'\''" "$1" && grep -Fq "Do not use a here-string" "$1" && grep -Fq "never as backslash-quote" "$1"' _ "$EVAL/run-eval.sh"
 check "real eval authenticates snapshotted Agent executables independently of PATH" bash -c 'grep -Fq "Get-AuthenticodeSignature" "$1" && grep -Fq ".subject == \$expected_subject" "$1" && grep -Fq "subject executable snapshot is not an authentic" "$1"' _ "$EVAL/run-eval.sh"
 check "Windows command resolution binds the actual regular exe rather than a PATHEXT alias" bash -c 'grep -Fq "MINGW*|MSYS*|CYGWIN*" "$1" && grep -Fq "[ -f \"\$p.exe\" ] && p=\"\$p.exe\"" "$1" && grep -Fq "[ -f \"\$p\" ] && [ ! -L \"\$p\" ]" "$1"' _ "$EVAL/run-eval.sh"
@@ -185,8 +206,13 @@ check "production probe permits only same-session async completion" grep -Fq 'ke
 check "production probe validator uses the observed system wrapper and build policy" bash -c 'grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1"' _ "$EVAL/run-eval.sh"
 check "production inner probe stays profile-free and binds a guarded script plus payload hash" bash -c 'grep -Fq -- "-NoProfile -ExecutionPolicy Bypass -File" "$1" && grep -Fq -- "-ExpectedPayloadSha256" "$1" && grep -Fq "probe_script_guard_win" "$1"' _ "$EVAL/run-eval.sh"
 check "failed access-boundary probes emit only a path-free boolean summary" bash -c 'grep -Fq "nonce_match:(.nonce == \$nonce)" "$1" && grep -Fq "payload_sha_match:(.payload_sha256 == \$payload_sha)" "$1" && grep -Fq "target_file_readable:(.target_file_readable == true)" "$1" && grep -Fq "source_workspace_readable:(.source_workspace_readable == true)" "$1" && grep -Fq "did not prove the required access boundary: \$probe_boundary_summary" "$1" && ! grep -Fq "did not prove the required access boundary: \$probe_result" "$1"' _ "$EVAL/run-eval.sh"
-check "all real Codex exec calls disable login shells" bash -c '[ "$(grep -c "allow_login_shell=false" "$1")" -eq 2 ] && [ "$(grep -Fc -- "\"\${subject_codex_isolation_flags[@]}\"" "$1")" -eq 2 ] && [ "$(grep -Fc -- "\"\${reviewer_codex_isolation_flags[@]}\"" "$1")" -eq 1 ]' _ "$EVAL/run-eval.sh"
+check "all real Codex exec calls disable login shells" bash -c '[ "$(grep -c "allow_login_shell=false" "$1")" -eq 2 ] && [ "$(grep -Fc -- "\"\${subject_codex_isolation_flags[@]}\"" "$1")" -eq 2 ] && [ "$(grep -Fc -- "\"\${reviewer_codex_isolation_flags[@]}\"" "$1")" -eq 2 ]' _ "$EVAL/run-eval.sh"
 check "real Agent inspection stops Git probing after a non-repository result" bash -c 'grep -Fq "do not issue any further Git command" "$1" && grep -Fq "git log --no-ext-diff" "$1" && grep -Fq -- "--no-textconv -5 --oneline" "$1"' _ "$EVAL/run-eval.sh"
+check "subject prompt renders Git examples literally instead of executing backticks" subject_prompt_backticks_escaped "$EVAL/run-eval.sh"
+check "Agent transport is configurable without a hard-coded proxy endpoint" bash -c 'grep -Fq "HARNESS_EVAL_AGENT_TRANSPORT_MODE" "$1" && grep -Fq "HARNESS_EVAL_AGENT_PROXY_URL" "$1" && grep -Fq "configure_agent_transport" "$1" && ! grep -Eq "127[.]0[.]0[.]1:[0-9]+" "$1"' _ "$EVAL/run-eval.sh"
+check "Agent proxy settings stay on the CLI transport and out of the isolated tool shell" bash -c 'grep -Fq "shell_environment_policy.inherit=\"none\"" "$1" && ! grep -Fq "shell_environment_policy.set.HTTP_PROXY" "$1" && ! grep -Fq "shell_environment_policy.set.HTTPS_PROXY" "$1"' _ "$EVAL/run-eval.sh"
+check "real eval performs a bounded Agent transport preflight before ACL isolation" bash -c 'grep -Fq "HARNESS_EVAL_AGENT_PREFLIGHT_SECONDS:-30" "$1" && grep -Fq "run_agent_transport_preflight" "$1" && awk '\''/run_agent_transport_preflight$/ { call=NR } /workspace_root=.*ROOT/ { root=NR } END { exit !(call && root && call < root) }'\'' "$1"' _ "$EVAL/run-eval.sh"
+check "assistant evidence matching tolerates Markdown inline-code formatting" bash -c 'grep -Fq "tr -d '\''\\140'\''" "$1"' _ "$EVAL/run-eval.sh"
 check "attester binds the exact serializer variant to the evidence and build policy" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1"' _ "$EVAL/attest-result.sh"
 check "result gate binds the exact serializer variant without a host PowerShell call" bash -c 'grep -Fq ".probe.shell_wrapper_argv_variant" "$1" && grep -Fq -- "--identify" "$1" && grep -Fq "probe_shell_variants_b64" "$1" && ! grep -Fq "observed_probe_wrapper" "$1" && ! grep -Fq "windows_powershell()" "$1"' _ "$EVAL/check-results.sh"
 check "attester and result gate bind source ACL evidence to live roots and account SIDs" bash -c 'for f in "$@"; do grep -Fq "windows_sandbox_accounts_json" "$f" && grep -Fq "canonical_source_host" "$f" && grep -Fq "canonical_workspace_host" "$f" && grep -Fq "live_sandbox_accounts" "$f" || exit 1; done' _ "$EVAL/attest-result.sh" "$EVAL/check-results.sh"

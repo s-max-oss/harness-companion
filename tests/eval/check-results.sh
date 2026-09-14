@@ -399,9 +399,9 @@ subject_event_validator_sha="$(sha "$SUBJECT_EVENT_VALIDATOR")"
 isolation_validator_sha="$(sha "$ISOLATION_VALIDATOR")"
 allowed_signers_sha="$(sha "$ALLOWED_SIGNERS")"
 codex_publisher_subject="$(jq -r '.agents.codex.publisher_subject // empty' "$AGENT_PUBLISHERS")"
-codex_publisher_thumbprints="$(jq -c '.agents.codex.publisher_thumbprints // []' "$AGENT_PUBLISHERS")"
-codex_approved_builds="$(jq -c '.agents.codex.approved_builds // []' "$AGENT_PUBLISHERS")"
-[ -n "$codex_publisher_subject" ] && [ "$codex_publisher_thumbprints" != '[]' ] && [ "$codex_approved_builds" != '[]' ] || { echo "eval-gate: Agent publisher policy is invalid" >&2; exit 2; }
+[ -n "$codex_publisher_subject" ] \
+  && jq -e '.agents.codex.compatible_runtime.components | type == "array" and length > 0' "$AGENT_PUBLISHERS" >/dev/null \
+  || { echo "eval-gate: Agent publisher policy is invalid" >&2; exit 2; }
 trusted_fingerprint="$(awk '$1 == "harness-eval-release" {print $2, $3; exit}' "$ALLOWED_SIGNERS" | ssh-keygen -lf - -E sha256 | awk '{print $2}')"
 [ -n "$trusted_fingerprint" ] || { echo "eval-gate: trusted signer fingerprint unavailable" >&2; exit 2; }
 canonical_source_host="$(host_path "$ROOT/SKILL.md")" \
@@ -489,16 +489,10 @@ while IFS= read -r case_file; do
   probe_subject_name="$(jq -r '.subject.name // empty' "$latest" 2>/dev/null || true)"
   probe_subject_version="$(jq -r '.subject.cli_version // empty' "$latest" 2>/dev/null || true)"
   probe_subject_sha="$(jq -r '.subject.executable_sha256 // empty' "$latest" 2>/dev/null || true)"
-  probe_shell_variants_b64="$(jq -r \
-    --arg agent "$probe_subject_name" --arg version "$probe_subject_version" --arg sha "$probe_subject_sha" '
-    [.agents[$agent].approved_builds[]? | select(
-      .cli_version == $version and (.sha256 | ascii_downcase) == ($sha | ascii_downcase)
-    )] as $builds
-    | if ($builds | length) == 1
-      then ($builds[0].shell_wrapper_argv_variants | tojson | @base64)
-      else empty
-      end
-  ' "$AGENT_PUBLISHERS" 2>/dev/null || true)"
+  probe_runtime_policy="$(bash "$AGENT_BUILD_VERIFIER" --resolve-runtime-policy \
+    "$AGENT_PUBLISHERS" "$probe_subject_name" "$probe_subject_version" "$probe_subject_sha" 2>/dev/null || true)"
+  probe_shell_variants_b64="$(jq -r '.shell_wrapper_argv_variants | tojson | @base64' \
+    <<< "$probe_runtime_policy" 2>/dev/null || true)"
   identified_probe_variant="$(python "$PROBE_COMMAND_VALIDATOR" --identify \
     "$recorded_probe_b64" "$expected_probe_b64" "$probe_wrapper_path" \
     "$probe_shell_variants_b64" 2>/dev/null || true)"
@@ -613,7 +607,7 @@ while IFS= read -r case_file; do
     --arg case_sha "$(sha "$case_file")" --arg skill_sha "$skill_sha" --arg runtime_sha "$runtime_sha" \
     --arg runner_sha "$runner_sha" --arg schema_sha "$schema_sha" --arg rubric_sha "$(sha "$tmp/rubric.json")" --arg signer_fingerprint "$trusted_fingerprint" \
     --arg attester_sha "$attester_sha" --arg isolation_helper_sha "$isolation_helper_sha" --arg isolation_recovery_sha "$isolation_recovery_sha" --arg isolation_probe_sha "$isolation_probe_sha" --arg probe_command_validator_sha "$probe_command_validator_sha" --arg executable_guard_sha "$executable_guard_sha" --arg agent_publishers_sha "$agent_publishers_sha" --arg agent_build_verifier_sha "$agent_build_verifier_sha" --arg publisher_sha "$publisher_sha" --arg publication_bundle_sha "$publication_bundle_sha" --arg brief_validator_sha "$brief_validator_sha" --arg subject_event_validator_sha "$subject_event_validator_sha" --arg isolation_validator_sha "$isolation_validator_sha" \
-    --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$codex_approved_builds" \
+    --arg codex_publisher_subject "$codex_publisher_subject" --arg runtime_version "$probe_subject_version" --arg runtime_sha "$probe_subject_sha" \
     --argjson input_count "$input_count" '
       .schema_version == 3 and .case == $name and .case_version == $version
       and .spec_version == "2.0.0-rc.3" and .scenario_ref == $scenario
@@ -655,9 +649,8 @@ while IFS= read -r case_file; do
       and (.subject.executable_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
       and (.subject.authenticode.status == "Valid")
       and .subject.authenticode.subject == $codex_publisher_subject
-      and (.subject.authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
-      and (.subject.cli_version | type == "string" and length > 0)
-      and (.subject as $agent | any($approved_builds[]; .cli_version == $agent.cli_version and (.sha256 | ascii_downcase) == $agent.executable_sha256))
+      and (.subject.authenticode.thumbprint | type == "string" and length > 0)
+      and .subject.cli_version == $runtime_version and .subject.executable_sha256 == $runtime_sha
       and (.subject.model | type == "string" and length > 0)
       and (.subject.session_ids | type == "array" and length == $input_count and (unique|length) == $input_count and all(.[]; type == "string" and length > 0))
       and .reviewer.name == "codex"
@@ -665,9 +658,8 @@ while IFS= read -r case_file; do
       and (.reviewer.executable_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
       and (.reviewer.authenticode.status == "Valid")
       and .reviewer.authenticode.subject == $codex_publisher_subject
-      and (.reviewer.authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
-      and (.reviewer.cli_version | type == "string" and length > 0)
-      and (.reviewer as $agent | any($approved_builds[]; .cli_version == $agent.cli_version and (.sha256 | ascii_downcase) == $agent.executable_sha256))
+      and (.reviewer.authenticode.thumbprint | type == "string" and length > 0)
+      and .reviewer.cli_version == $runtime_version and .reviewer.executable_sha256 == $runtime_sha
       and (.reviewer.model | type == "string" and length > 0)
       and (.reviewer.session_id | type == "string" and length > 0)
       and .reviewer.tools_disabled == true

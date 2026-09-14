@@ -382,6 +382,8 @@ compatible_daily_bundle="$(jq -cn --argjson identity "$rotated_identity" --slurp
     }
 ')"
 check "daily bundle verifier accepts one complete compatible signed runtime" bash "$EVAL/verify-agent-build.sh" --verify-daily-bundle "$EVAL/trust/agent-publishers.json" "$compatible_daily_bundle"
+printf '%s\n' "$compatible_daily_bundle" > "$TMP/compatible-bundle-candidate.json"
+check "release bundle verifier accepts one complete compatible signed runtime" bash "$EVAL/verify-agent-build.sh" --verify-bundle-evidence "$EVAL/trust/agent-publishers.json" "$TMP/compatible-bundle-candidate.json"
 for daily_mutation in missing extra different_bundle bad_signer; do
   case "$daily_mutation" in
     missing) mutated_daily_bundle="$(jq 'del(.agent_runtime.components[.agent_runtime.components | keys[0]])' <<< "$compatible_daily_bundle")" ;;
@@ -395,6 +397,11 @@ for daily_mutation in missing extra different_bundle bad_signer; do
     ok "daily bundle verifier rejects $daily_mutation evidence"
   fi
 done
+check "release gates reuse the shared approved-or-signed-compatible runtime policy" bash -c '
+  for f in "$@"; do
+    grep -Fq -- "--resolve-runtime-policy" "$f" || exit 1
+  done
+' _ "$EVAL/attest-result.sh" "$EVAL/check-results.sh" "$EVAL/validate-isolation-evidence.sh"
 check "real eval launches only handle-locked executable snapshots" bash -c 'grep -Fq "snapshot_executable \"\$subject_executable\" \"\$subject_launch_executable\"" "$1" && grep -Fq "start_executable_guard" "$1" && grep -Fq "verify_guarded_executables" "$1" && grep -Fq "FileShare]::Read" "$2"' _ "$EVAL/run-eval.sh" "$EVAL/windows-executable-guard.ps1"
 check "real eval behaviorally admits only a complete approved or compatible Codex runtime bundle" bash -c 'grep -Fq "approved or compatible Codex runtime components are missing" "$1" && grep -Fq "component_launch_paths" "$1" && grep -Fq -- "--verify-daily-bundle" "$1"' _ "$EVAL/run-eval.sh"
 check "probe invokes only hash-bound absolute system executables" bash -c 'grep -Fq "WINDOWS_POWERSHELL=\"/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe\"" "$1" && grep -Fq "WINDOWS_WHOAMI=\"/c/Windows/System32/whoami.exe\"" "$1" && grep -Fq "probe.executables" "$2" && ! grep -Fq "cmd.exe /d /c" "$1" && ! grep -Fq "& whoami.exe" "$3"' _ "$EVAL/run-eval.sh" "$EVAL/attest-result.sh" "$EVAL/windows-isolation-probe.ps1"

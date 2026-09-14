@@ -16,9 +16,10 @@ TRUST_POLICY="$6"
 COMMAND_VALIDATOR="$7"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROBE_SCRIPT="$SCRIPT_DIR/windows-isolation-probe.ps1"
+AGENT_BUILD_VERIFIER="$SCRIPT_DIR/verify-agent-build.sh"
 
 sha() { sha256sum "$1" | awk '{print $1}'; }
-for path in "$EVIDENCE" "$CANDIDATE" "$TRUST_POLICY" "$COMMAND_VALIDATOR" "$PROBE_SCRIPT"; do
+for path in "$EVIDENCE" "$CANDIDATE" "$TRUST_POLICY" "$COMMAND_VALIDATOR" "$PROBE_SCRIPT" "$AGENT_BUILD_VERIFIER"; do
   [ -f "$path" ] && [ ! -L "$path" ] || exit 1
 done
 
@@ -46,10 +47,8 @@ python "$COMMAND_VALIDATOR" --same-windows-path "$wrapper" "$powershell_path" >/
 agent="$(jq -r '.subject.name' "$CANDIDATE")"
 version="$(jq -r '.subject.cli_version' "$CANDIDATE")"
 agent_sha="$(jq -r '.subject.executable_sha256 | ascii_downcase' "$CANDIDATE")"
-variants="$(jq -r --arg agent "$agent" --arg version "$version" --arg sha "$agent_sha" '
-  [.agents[$agent].approved_builds[]? | select(.cli_version == $version and (.sha256 | ascii_downcase) == $sha)]
-  | if length == 1 then (.[0].shell_wrapper_argv_variants | tojson | @base64) else empty end
-' "$TRUST_POLICY")"
+runtime_policy="$(bash "$AGENT_BUILD_VERIFIER" --resolve-runtime-policy "$TRUST_POLICY" "$agent" "$version" "$agent_sha")" || exit 1
+variants="$(jq -r '.shell_wrapper_argv_variants | tojson | @base64' <<< "$runtime_policy")"
 [ -n "$variants" ] || exit 1
 identified="$(python "$COMMAND_VALIDATOR" --identify "$recorded_b64" "$expected_b64" "$wrapper" "$variants" 2>/dev/null)" || exit 1
 [ "$identified" = "$(jq -r '.probe.shell_wrapper_argv_variant' "$EVIDENCE")" ] || exit 1

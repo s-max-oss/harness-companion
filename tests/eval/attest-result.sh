@@ -464,11 +464,8 @@ windows_powershell() {
 }
 
 official_agent_identity() {
-  local agent="$1" executable="$2" executable_win identity policy expected_subject expected_thumbprints
+  local agent="$1" executable="$2" executable_win identity
   [ -f "$executable" ] && [ -x "$executable" ] && [ ! -L "$executable" ] || return 1
-  policy="$(jq -ce --arg agent "$agent" '.agents[$agent]' "$AGENT_PUBLISHERS")" || return 1
-  expected_subject="$(jq -r '.publisher_subject' <<< "$policy")" || return 1
-  expected_thumbprints="$(jq -c '.publisher_thumbprints' <<< "$policy")" || return 1
   executable_win="$(cygpath -w "$executable")" || return 1
   identity="$(HARNESS_EVAL_AUTH_PATH="$executable_win" windows_powershell -NoProfile -Command '
     $sig = Get-AuthenticodeSignature -LiteralPath $env:HARNESS_EVAL_AUTH_PATH
@@ -476,11 +473,8 @@ official_agent_identity() {
     $thumbprint = if ($null -ne $sig.SignerCertificate) { $sig.SignerCertificate.Thumbprint } else { "" }
     [ordered]@{status=[string]$sig.Status;subject=$subject;thumbprint=$thumbprint} | ConvertTo-Json -Compress
   ' | tr -d '\r')" || return 1
-  jq -e --arg expected_subject "$expected_subject" --argjson expected_thumbprints "$expected_thumbprints" '
-    .status == "Valid"
-    and .subject == $expected_subject
-    and (.thumbprint as $thumbprint | ($expected_thumbprints | index($thumbprint)) != null)
-  ' <<< "$identity" >/dev/null || return 1
+  bash "$AGENT_BUILD_VERIFIER" --verify-publisher-identity \
+    "$AGENT_PUBLISHERS" "$agent" "$identity" >/dev/null 2>&1 || return 1
   printf '%s\n' "$identity"
 }
 
@@ -522,7 +516,8 @@ verify_runtime_tool_evidence() {
 }
 
 official_agent_build() {
-  bash "$AGENT_BUILD_VERIFIER" "$AGENT_PUBLISHERS" "$1" "$2" "$3"
+  bash "$AGENT_BUILD_VERIFIER" --resolve-runtime-policy \
+    "$AGENT_PUBLISHERS" "$1" "$2" "$3" 2>/dev/null
 }
 
 official_agent_component_build() {
@@ -541,6 +536,21 @@ verify_agent_component_evidence() {
     && official_agent_component_build "$agent" "$version" "$component" "$expected_sha" \
     && jq -en --argjson expected "$expected_identity" --argjson actual "$actual_identity" '$actual == $expected' >/dev/null \
     || return 1
+  printf '%s\n' "$actual_identity"
+}
+
+verify_resolved_agent_component_evidence() {
+  local agent="$1" component="$2" executable="$3" expected_sha="$4" expected_identity="$5" policy_sha="$6" actual_identity
+  [[ "$component" =~ ^codex-[a-z0-9-]+[.]exe$ ]] || return 1
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+  jq -e 'type == "object" and keys == ["status","subject","thumbprint"]
+    and all(.status,.subject,.thumbprint; type == "string" and length > 0)' <<< "$expected_identity" >/dev/null \
+    || return 1
+  actual_identity="$(official_agent_identity "$agent" "$executable")" || return 1
+  [ "$(sha "$executable")" = "$expected_sha" ] \
+    && jq -en --argjson expected "$expected_identity" --argjson actual "$actual_identity" '$actual == $expected' >/dev/null \
+    || return 1
+  if [ "$policy_sha" != "null" ] && [ "$expected_sha" != "$policy_sha" ]; then return 1; fi
   printf '%s\n' "$actual_identity"
 }
 
@@ -819,16 +829,9 @@ powershell_path="$(jq -r '.probe.executables.powershell.path // empty' "$snapsho
 probe_subject_name="$(jq -r '.subject.name // empty' "$snapshot_candidate")"
 probe_subject_version="$(jq -r '.subject.cli_version // empty' "$snapshot_candidate")"
 probe_subject_sha="$(jq -r '.subject.executable_sha256 // empty' "$snapshot_candidate")"
-probe_shell_variants_b64="$(jq -r \
-  --arg agent "$probe_subject_name" --arg version "$probe_subject_version" --arg sha "$probe_subject_sha" '
-  [.agents[$agent].approved_builds[]? | select(
-    .cli_version == $version and (.sha256 | ascii_downcase) == ($sha | ascii_downcase)
-  )] as $builds
-  | if ($builds | length) == 1
-    then ($builds[0].shell_wrapper_argv_variants | tojson | @base64)
-    else empty
-    end
-' "$AGENT_PUBLISHERS")"
+probe_runtime_policy="$(official_agent_build "$probe_subject_name" "$probe_subject_version" "$probe_subject_sha")" \
+  || die "candidate Agent runtime policy is missing or ambiguous"
+probe_shell_variants_b64="$(jq -r '.shell_wrapper_argv_variants | tojson | @base64' <<< "$probe_runtime_policy")"
 [ -n "$probe_shell_variants_b64" ] || die "candidate probe serializer policy is missing or ambiguous"
 python "$PROBE_COMMAND_VALIDATOR" --same-windows-path "$probe_wrapper_path" "$powershell_path" >/dev/null 2>&1 \
   || die "recorded Codex shell wrapper does not match the trusted system PowerShell"
@@ -839,6 +842,10 @@ identified_probe_variant="$(python "$PROBE_COMMAND_VALIDATOR" --identify \
 [ -n "$recorded_probe_variant" ] && [ "$identified_probe_variant" = "$recorded_probe_variant" ] \
   || die "effective isolation probe serializer variant was not evidence-bound"
 executable_snapshot_manifests=()
+runtime_agent="$(jq -r '.subject.name // empty' "$snapshot_candidate")"
+runtime_version="$(jq -r '.subject.cli_version // empty' "$snapshot_candidate")"
+runtime_sha="$(jq -r '.subject.executable_sha256 // empty' "$snapshot_candidate")"
+
 if [ "$production_trust" = true ]; then
   trusted_powershell_path="$(jq -r '.windows_system_tools.powershell.path' "$AGENT_PUBLISHERS")"
   trusted_whoami_path="$(jq -r '.windows_system_tools.whoami.path' "$AGENT_PUBLISHERS")"
@@ -999,23 +1006,18 @@ if [ "$production_trust" = true ]; then
     [ "$agent_version" = "$snapshot_version" ] || die "$role executable version mismatch"
     jq -en --arg version "$snapshot_version" --arg pattern "$version_pattern" '$version | test($pattern)' >/dev/null \
       || die "$role executable version identity is invalid"
-    official_agent_build "$agent_name" "$snapshot_version" "$agent_sha" \
-      || die "$role executable is not an approved $agent_name build"
+    official_agent_build "$agent_name" "$snapshot_version" "$agent_sha" >/dev/null \
+      || die "$role executable is not an approved or signed-compatible $agent_name build"
     jq -e --arg role "$role" --argjson actual "$actual_identity" '.[$role].authenticode == $actual' "$snapshot_candidate" >/dev/null \
       || die "$role Authenticode identity mismatch"
   done
-  runtime_agent="$(jq -r '.subject.name // empty' "$snapshot_candidate")"
-  runtime_version="$(jq -r '.subject.cli_version // empty' "$snapshot_candidate")"
-  runtime_sha="$(jq -r '.subject.executable_sha256 // empty' "$snapshot_candidate")"
   subject_install_dir="$(dirname "$(jq -r '.subject.executable // empty' "$snapshot_candidate")")"
   reviewer_install_dir="$(dirname "$(jq -r '.reviewer.executable // empty' "$snapshot_candidate")")"
   [ "$(host_path "$subject_install_dir")" = "$(host_path "$reviewer_install_dir")" ] \
     || die "subject and Reviewer runtime directories differ"
-  approved_component_names="$(jq -c --arg agent "$runtime_agent" --arg version "$runtime_version" --arg sha "$runtime_sha" '
-    [.agents[$agent].approved_builds[]? | select(
-      .cli_version == $version and (.sha256 | ascii_downcase) == ($sha | ascii_downcase)
-    ) | .components | keys] | if length == 1 then .[0] | sort else [] end
-  ' "$AGENT_PUBLISHERS" | tr -d '\r\n')"
+  resolved_runtime_policy="$(official_agent_build "$runtime_agent" "$runtime_version" "$runtime_sha")" \
+    || die "candidate Agent runtime policy is missing or ambiguous"
+  approved_component_names="$(jq -c '.components | keys | sort' <<< "$resolved_runtime_policy" | tr -d '\r\n')"
   candidate_component_names="$(jq -c '[.agent_runtime.components | keys] | if length == 1 then .[0] | sort else [] end' "$snapshot_candidate" | tr -d '\r\n')"
   [ "$approved_component_names" != '[]' ] && [ "$candidate_component_names" = "$approved_component_names" ] \
     || die "candidate Codex runtime component set is incomplete"
@@ -1026,14 +1028,15 @@ if [ "$production_trust" = true ]; then
       || die "Codex runtime component path is outside the approved install bundle: $component_name"
     component_sha="$(jq -r --arg name "$component_name" '.agent_runtime.components[$name].sha256 // empty' "$snapshot_candidate")"
     component_identity="$(jq -c --arg name "$component_name" '.agent_runtime.components[$name].authenticode' "$snapshot_candidate")"
+    component_policy_sha="$(jq -r --arg name "$component_name" '.components[$name].sha256' <<< "$resolved_runtime_policy")"
     component_snapshot="$tmp/runtime-$component_name"
     component_manifest="$tmp/runtime-$component_name.manifest.json"
     snapshot_inputs "$component_manifest" "$component_source" "$component_snapshot" \
       || die "Codex runtime component could not be snapshotted safely: $component_name"
     executable_snapshot_manifests+=("$component_manifest")
-    verify_agent_component_evidence "$runtime_agent" "$runtime_version" "$component_name" \
-      "$component_snapshot" "$component_sha" "$component_identity" >/dev/null \
-      || die "Codex runtime component does not match its approved build evidence: $component_name"
+    verify_resolved_agent_component_evidence "$runtime_agent" "$component_name" \
+      "$component_snapshot" "$component_sha" "$component_identity" "$component_policy_sha" >/dev/null \
+      || die "Codex runtime component does not match its approved or compatible evidence: $component_name"
   done < <(jq -r '.[]' <<< "$approved_component_names" | tr -d '\r')
 fi
 
@@ -1047,15 +1050,14 @@ authorized_fingerprints="$(awk '$1 == "harness-eval-release" {print $2, $3}' "$A
 printf '%s\n' "$authorized_fingerprints" | grep -Fxq -- "$signer_fingerprint" \
   || die "signing key is not authorized by the selected trust anchor"
 codex_publisher_subject="$(jq -r '.agents.codex.publisher_subject // empty' "$AGENT_PUBLISHERS")"
-codex_publisher_thumbprints="$(jq -c '.agents.codex.publisher_thumbprints // []' "$AGENT_PUBLISHERS")"
-[ -n "$codex_publisher_subject" ] && [ "$codex_publisher_thumbprints" != '[]' ] || die "Agent publisher policy is invalid"
+[ -n "$codex_publisher_subject" ] || die "Agent publisher policy is invalid"
 
 jq -e \
   --arg name "$case_name" --arg version "$case_version" --arg scenario "$scenario" \
   --arg case_sha "$(sha "$case_file")" --arg skill_sha "$(sha "$ROOT/SKILL.md")" --arg runtime_sha "$(sha "$tmp/runtime.manifest")" \
   --arg runner_sha "$(sha "$RUNNER")" --arg schema_sha "$(sha "$SCHEMA")" --arg rubric_sha "$(sha "$tmp/rubric.json")" \
   --arg attester_sha "$(sha "$SCRIPT_DIR/attest-result.sh")" --arg isolation_sha "$(sha "$ACL_HELPER")" --arg recovery_sha "$(sha "$ACL_RECOVERY")" --arg probe_sha "$(sha "$ISOLATION_PROBE")" --arg probe_command_validator_sha "$(sha "$PROBE_COMMAND_VALIDATOR")" --arg executable_guard_sha "$(sha "$EXECUTABLE_GUARD")" --arg agent_publishers_sha "$(sha "$AGENT_PUBLISHERS")" --arg agent_build_verifier_sha "$(sha "$AGENT_BUILD_VERIFIER")" --arg publisher_sha "$(sha "$PUBLISHER")" --arg publication_bundle_sha "$(sha "$PUBLICATION_BUNDLE")" --arg brief_validator_sha "$(sha "$BRIEF_VALIDATOR")" --arg subject_event_validator_sha "$(sha "$SUBJECT_EVENT_VALIDATOR")" --arg isolation_validator_sha "$(sha "$ISOLATION_VALIDATOR")" \
-  --arg codex_publisher_subject "$codex_publisher_subject" --argjson codex_publisher_thumbprints "$codex_publisher_thumbprints" --argjson approved_builds "$(jq -c '.agents.codex.approved_builds' "$AGENT_PUBLISHERS")" \
+  --arg codex_publisher_subject "$codex_publisher_subject" --arg agent_runtime_version "$runtime_version" --arg agent_runtime_sha "$runtime_sha" \
   --argjson input_count "$input_count" '
     .schema_version == 3 and .case == $name and .case_version == $version
     and .spec_version == "2.0.0-rc.3" and .scenario_ref == $scenario
@@ -1090,17 +1092,17 @@ jq -e \
     and (.subject.executable_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
     and (.subject.authenticode.status == "Valid")
     and .subject.authenticode.subject == $codex_publisher_subject
-    and (.subject.authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
-    and (.subject.cli_version | type == "string" and length > 0) and (.subject.model | type == "string" and length > 0)
-    and (.subject as $agent | any($approved_builds[]; .cli_version == $agent.cli_version and (.sha256 | ascii_downcase) == $agent.executable_sha256))
+    and (.subject.authenticode.thumbprint | type == "string" and length > 0)
+    and .subject.cli_version == $agent_runtime_version and .subject.executable_sha256 == $agent_runtime_sha
+    and (.subject.model | type == "string" and length > 0)
     and (.subject.session_ids | type == "array" and length == $input_count and (unique|length) == $input_count and all(.[]; type == "string" and length > 0))
     and .reviewer.name == "codex" and .reviewer.tools_disabled == true
     and (.reviewer.executable_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
     and (.reviewer.authenticode.status == "Valid")
     and .reviewer.authenticode.subject == $codex_publisher_subject
-    and (.reviewer.authenticode.thumbprint as $thumbprint | ($codex_publisher_thumbprints | index($thumbprint)) != null)
-    and (.reviewer.cli_version | type == "string" and length > 0) and (.reviewer.model | type == "string" and length > 0)
-    and (.reviewer as $agent | any($approved_builds[]; .cli_version == $agent.cli_version and (.sha256 | ascii_downcase) == $agent.executable_sha256))
+    and (.reviewer.authenticode.thumbprint | type == "string" and length > 0)
+    and .reviewer.cli_version == $agent_runtime_version and .reviewer.executable_sha256 == $agent_runtime_sha
+    and (.reviewer.model | type == "string" and length > 0)
     and (.reviewer.session_id | type == "string" and length > 0)
     and (.reviewer.session_id as $rid | (.subject.session_ids | index($rid)) == null)
     and (.artifact_hashes | keys | sort == ["evaluator_events","isolation","objective_checks","project_brief","reviewer_events","reviewer_output","subject_events","transcript","tree","turn_trees"])

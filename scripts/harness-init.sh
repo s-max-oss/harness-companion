@@ -733,7 +733,7 @@ validate_brief_input() {
     def execution_critical_pointer:
       IN("/goal", "/success_criteria", "/detected_type", "/initial_project_state/is_git_repo");
     def deferred_pointer:
-      test("^/deferred/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
+      test("\\A/deferred/[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\z");
     type == "object"
     and ((has("schema_version") | not) or .schema_version == 1)
     and (.goal | type == "string" and test("[^[:space:]]") and length <= 500)

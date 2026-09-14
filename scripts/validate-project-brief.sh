@@ -39,7 +39,7 @@ jq -e --arg version "$EXPECTED_VERSION" '
   def pointer_path:
     split("/")[1:] | map(gsub("~1"; "/") | gsub("~0"; "~"));
   def deferred_pointer:
-    test("^/deferred/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
+    test("\\A/deferred/[A-Za-z0-9][A-Za-z0-9._-]{0,63}\\z");
   def allowed_pointer:
     IN(
       "/schema_version", "/advisory", "/generated_by", "/source_version",

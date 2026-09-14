@@ -122,16 +122,27 @@ check "minimal Claude output manifest is exact (path, kind, executable mode)" te
 T1_DEFERRED="$TMP/brief-deferred"; mkdir -p "$T1_DEFERRED"
 jq '.provenance["/deferred/shipping_endpoint_details"]={source:"conversation"}' "$TMP/python.json" > "$TMP/python-deferred.json"
 if bash "$INIT" "$T1_DEFERRED" --brief "$TMP/python-deferred.json" --non-interactive >/dev/null 2>&1; then
-  check "deferred topic provenance survives canonical Brief generation" jq -e '.provenance["/deferred/shipping_endpoint_details"].source == "conversation"' "$T1_DEFERRED/.harness/PROJECT_BRIEF.json"
+  check "deferred topic provenance survives canonical Brief generation losslessly" jq -e '.provenance["/deferred/shipping_endpoint_details"] == {source:"conversation"}' "$T1_DEFERRED/.harness/PROJECT_BRIEF.json"
 else
   bad "deferred topic provenance survives canonical Brief generation" "executor exited non-zero"
 fi
-jq '.provenance["/deferred/unsafe/path"]={source:"conversation"}' "$TMP/python.json" > "$TMP/python-bad-deferred.json"
-if bash "$INIT" "$TMP/bad-deferred" --brief "$TMP/python-bad-deferred.json" --non-interactive >/dev/null 2>&1; then
-  bad "deferred topic provenance rejects nested path injection"
-else
-  ok "deferred topic provenance rejects nested path injection"
-fi
+long_deferred_name="$(printf 'a%.0s' {1..65})"
+for invalid_deferred in nested newline empty long spec_default legacy_placeholder; do
+  invalid_brief="$TMP/python-bad-deferred-$invalid_deferred.json"
+  case "$invalid_deferred" in
+    nested) jq '.provenance["/deferred/unsafe/path"]={source:"conversation"}' "$TMP/python.json" > "$invalid_brief" ;;
+    newline) jq --arg key $'/deferred/safe\n/unsafe' '.provenance[$key]={source:"conversation"}' "$TMP/python.json" > "$invalid_brief" ;;
+    empty) jq '.provenance["/deferred/"]={source:"conversation"}' "$TMP/python.json" > "$invalid_brief" ;;
+    long) jq --arg key "/deferred/$long_deferred_name" '.provenance[$key]={source:"conversation"}' "$TMP/python.json" > "$invalid_brief" ;;
+    spec_default) jq '.provenance["/deferred/topic"]={source:"spec_default"}' "$TMP/python.json" > "$invalid_brief" ;;
+    legacy_placeholder) jq '.provenance["/deferred/topic"]={source:"legacy_placeholder"}' "$TMP/python.json" > "$invalid_brief" ;;
+  esac
+  if bash "$INIT" "$TMP" --brief "$invalid_brief" --validate-brief-only --non-interactive >/dev/null 2>&1; then
+    bad "deferred topic provenance rejects $invalid_deferred"
+  else
+    ok "deferred topic provenance rejects $invalid_deferred"
+  fi
+done
 check "minimal Brief persists all categories and advisory marker" jq -e '
   .schema_version == 1 and .advisory == true
   and (.goal | type == "string" and test("[^[:space:]]"))

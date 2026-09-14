@@ -1279,6 +1279,10 @@ current project. Execute initialization only after explicit confirmation.
 Do not create, edit, move, or delete any file directly, including temporary
 Brief files. On approval, pass the exact Brief through stdin to the trusted
 harness-init-boundary.sh executor; that executor is the only mutation boundary.
+Before constructing the first executor payload, read
+$skill_root/references/project-brief-input.md and follow its exact field names
+and shapes. Never invoke the boundary with a guessed schema and retry after an
+error; the first approved boundary invocation must be schema-valid.
 For a fresh-project Codex Windows boundary call, use exactly one static PowerShell pipeline:
 Write-Output '<one-line compact JSON>' | bash '<boundary>' '<target>' --decision
 approve --brief-stdin --non-interactive --host=codex. Inside the single-quoted

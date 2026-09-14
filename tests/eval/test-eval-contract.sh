@@ -10,6 +10,19 @@ PASS=0; FAIL=0
 ok() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "FAIL: $1" >&2; FAIL=$((FAIL + 1)); }
 check() { local label="$1"; shift; if "$@"; then ok "$label"; else bad "$label"; fi; }
+brief_input_contract_documented() {
+  local skill="$1" principles="$2" runner="$3" contract="$4" file
+  for file in "$skill" "$principles" "$runner"; do
+    grep -Fq 'references/project-brief-input.md' "$file" || return 1
+  done
+  grep -Fq '"detected_type"' "$contract" \
+    && grep -Fq '"initial_project_state"' "$contract" \
+    && grep -Fq '"install_packages"' "$contract" \
+    && grep -Fq '"destructive_ops"' "$contract" \
+    && grep -Fq 'never uses `path`' "$contract" \
+    && grep -Fq 'not an array' "$contract" \
+    && grep -Fq 'first approved boundary invocation must be schema-valid' "$runner"
+}
 eval_lock_owner_present() {
   local d="$1"
   { [ -f "$d/.claim" ] && [ ! -L "$d/.claim" ]; } \
@@ -218,6 +231,7 @@ check "result gate binds the exact serializer variant without a host PowerShell 
 check "attester and result gate bind source ACL evidence to live roots and account SIDs" bash -c 'for f in "$@"; do grep -Fq "windows_sandbox_accounts_json" "$f" && grep -Fq "canonical_source_host" "$f" && grep -Fq "canonical_workspace_host" "$f" && grep -Fq "live_sandbox_accounts" "$f" || exit 1; done' _ "$EVAL/attest-result.sh" "$EVAL/check-results.sh"
 check "guided init keeps approved defaults losslessly machine-representable" bash -c 'grep -Fq "Every decision presented for approval must be represented losslessly" "$1" && grep -Fq "apply only the documented Brief defaults" "$1" && grep -Fiq "do not invent product or implementation defaults" "$1"' _ "$ROOT/SKILL.md"
 check "guided init aligns default provenance with exact default pointers" bash -c 'grep -Fq "exact same JSON pointer as its matching" "$1" && grep -Fq "Do not record leaf defaults" "$1"' _ "$ROOT/SKILL.md"
+check "guided init exposes one exact pre-mutation Brief input contract" brief_input_contract_documented "$ROOT/SKILL.md" "$ROOT/references/conversational-principles.md" "$EVAL/run-eval.sh" "$ROOT/references/project-brief-input.md"
 check "conversation guidance does not turn sensible defaults into product architecture" bash -c 'grep -Fq "documented Project Brief defaults" "$1" && grep -Fq "framework," "$1" && grep -Fq "database," "$1" && grep -Fq "explicitly deferred" "$1"' _ "$ROOT/references/conversational-principles.md"
 check "guided init defers optional authentication mechanisms once success is observable" bash -c 'grep -Fq "authentication goal requires observable success criteria" "$1" && grep -Fq "sessions, tokens, or API keys" "$1" && grep -Fq "should be deferred" "$1" && grep -Fq "do not re-ask an unanswered optional" "$1"' _ "$ROOT/references/conversational-principles.md"
 check "conversation guidance asks each conflict once and isolates one field per menu" bash -c 'grep -Fq "Ask that resolution question exactly once" "$1" && grep -Fq "every menu choice to that field alone" "$1" && grep -Fq "Do not offer" "$1" && grep -Fq "composite alternatives" "$1"' _ "$ROOT/references/conversational-principles.md"

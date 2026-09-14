@@ -140,6 +140,13 @@ changes. When required fields are complete, present a compact, readable Brief
 with source annotations. Explain any important default or unresolved optional
 item in plain language.
 
+Before constructing the first executor payload, read
+`references/project-brief-input.md` and use that exact contract. Do not guess
+legacy aliases such as `project_type`, a nested `constraints` object,
+`initial_state`, `defaults_applied[].path`, or array-form `provenance`. Never use
+the mutation boundary as a schema probe: one approved Brief must produce one
+schema-valid first invocation.
+
 The displayed confirmation and the executor input are one contract. Every
 decision shown for approval must have a lossless machine-readable counterpart
 in the exact Brief sent to the executor. Never obtain approval for a richer

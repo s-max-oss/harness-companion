@@ -21,6 +21,10 @@ brief_input_contract_documented() {
     && grep -Fq '"destructive_ops"' "$contract" \
     && grep -Fq 'never uses `path`' "$contract" \
     && grep -Fq 'not an array' "$contract" \
+    && grep -Fq 'exactly one of `user`, `repo`, `custom`, or `deferred`' "$contract" \
+    && grep -Fq 'Execution-critical conflicts' "$contract" \
+    && grep -Fq '`markers_seen` (an array of strings)' "$contract" \
+    && grep -Fq '`notes` (a string of at most 500' "$contract" \
     && grep -Fq 'first approved boundary invocation must be schema-valid' "$runner"
 }
 eval_lock_owner_present() {

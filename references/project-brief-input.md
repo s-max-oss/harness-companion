@@ -68,9 +68,35 @@ and shapes. In particular:
   is one of `conversation`, `repo`, `environment`, `cli`, `spec_default`,
   `legacy_placeholder`, or `existing_brief`.
 - `conflicts_resolved` items, when present, use exactly `field`,
-  `repo_evidence`, `user_input`, `resolution`, and `resolved_value`.
+  `repo_evidence`, `user_input`, `resolution`, and `resolved_value`. The first
+  three are strings; `field` is a supported Brief JSON pointer. `resolution`
+  is exactly one of `user`, `repo`, `custom`, or `deferred`. A deferred item
+  has `resolved_value: null`; every other resolution has a non-null value.
+  Execution-critical conflicts (`/goal`, `/success_criteria`,
+  `/detected_type`, and `/initial_project_state/is_git_repo`) cannot be
+  deferred. Example:
+
+  ```json
+  {
+    "field": "/external_network",
+    "repo_evidence": "The existing policy denies outbound access.",
+    "user_input": "Keep network access disabled.",
+    "resolution": "user",
+    "resolved_value": "denied"
+  }
+  ```
+
 - `type_evidence` is required for `mixed` or `unknown` and contains
-  `markers_seen` plus `notes`; it may be `null` for a known type.
+  `markers_seen` (an array of strings) plus `notes` (a string of at most 500
+  characters); it may be `null` for a known type. Example:
+
+  ```json
+  {
+    "markers_seen": ["package.json", "pyproject.toml"],
+    "notes": "Both Node and Python project markers are present."
+  }
+  ```
+
 - Do not add top-level `constraints`, `initial_state`, `project_type`,
   `deferred`, or other guessed compatibility aliases. Optional product choices
   stay conversationally deferred; provenance may record them under

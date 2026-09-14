@@ -452,6 +452,9 @@ check "canonical eval writers bind published evidence before releasing locks" ba
 check "real eval tells the subject the provable read-only command allowlist" bash -c '
   grep -Fq "Every inspection command must be statically provable as read-only" "$1" \
     && grep -Fq "Do not use command" "$1" \
+    && grep -Fq "Do not use PowerShell script blocks" "$1" \
+    && grep -Fq "inspect an" "$1" \
+    && grep -Fq "unfiltered read result instead" "$1" \
     && grep -Fq "outside that allowlist" "$1"
 ' _ "$EVAL/run-eval.sh"
 eval_run_hash="$(printf 'a%.0s' {1..64})"

@@ -1301,7 +1301,9 @@ Every inspection command must be statically provable as read-only. Use only
 PowerShell Get-ChildItem/Get-Command/Get-Content/Get-Date/Get-FileHash/Get-Item/
 Get-Location/Test-Path/Resolve-Path/Select-String plus the formatting, selection,
 JSON conversion and pipeline cmdlets needed to display those reads
-(ForEach-Object is not allowed); or bare rg, jq without in-place mode, sha256sum,
+(ForEach-Object is not allowed). Do not use PowerShell script blocks, including
+the Where-Object { ... } form; use literal cmdlet parameters or inspect an
+unfiltered read result instead. Or use bare rg, jq without in-place mode, sha256sum,
 cat, grep, head, wc, ls, and pwd. For Git use rev-parse/ls-files/ls-tree,
 \`git --no-optional-locks status\`, or diff/log/show only with both --no-ext-diff
 and --no-textconv. If \`git rev-parse\` reports that the target is not a Git

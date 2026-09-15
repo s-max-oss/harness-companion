@@ -17,6 +17,9 @@ novice-language mode active in this final response. Avoid internal labels such
 as `snapshot` or `run-log directory`, or immediately explain them in terms of
 what they do. Apply the same rule to product terms such as `framework`: call it
 the toolkit used to build the app unless the technical label genuinely helps.
+If the next step includes `/harness:init`, introduce it as the
+confirmation-based setup command rather than calling it "guided" without an
+explanation.
 
 Use only facts from the confirmed Brief, repository evidence, executor result,
 and post-init file state. Do not claim that a file was created when it was

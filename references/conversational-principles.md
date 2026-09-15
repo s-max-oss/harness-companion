@@ -88,8 +88,9 @@ plain language. Describe guided init as "setup that asks for confirmation"
 before using the `/harness:init` command name.
 
 That novice-language mode lasts for the remainder of guided init, including
-every repeated Brief and the post-init explanation. Before sending each
-response, scan all user-facing prose—not just questions—for unexplained
+the required skill-use announcement, progress/commentary updates, every
+repeated Brief, and the post-init explanation. Before sending each response,
+scan all user-facing prose—not just questions or final answers—for unexplained
 technical nouns. The definitions above are examples, not an exhaustive list.
 Prefer descriptions such as "a folder with tracked change history," "the main
 language and tools," "the tool that runs automated checks," "a record used for
@@ -98,6 +99,15 @@ safe updates," and "the folder containing check results" instead of exposing
 without explanation. Likewise, define `framework` as the toolkit used to build
 the app if that optional choice must be mentioned. Internal artifact names that
 do not help the user may be omitted.
+
+The required announcement that this skill is being used is part of the user
+conversation. In novice-language mode, introduce Harness Companion as "the
+setup guide that adds project files and checks for consistent, verifiable
+coding work" in that same announcement. Keep progress updates about observable
+outcomes; do not expose internal phrases such as "machine-readable shape" or
+"trusted setup boundary." When a next step mentions `/harness:init`, call it
+the confirmation-based setup command before showing the command name; never
+leave the phrase "guided `/harness:init`" unexplained.
 
 ## Resolve conflicts explicitly
 

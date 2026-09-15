@@ -143,6 +143,12 @@ user-modified files. After a successful update:
 4. Keep all four categories. Give detail where values changed or remain
    important, and describe unchanged or empty categories in one short phrase.
 
+Name every generated file that the successful executor result reports as
+updated, using its repository-relative path (for example,
+`.harness/PROJECT_BRIEF.json` and `.harness/PROJECT_BRIEF.md`). A generic claim
+such as "the Brief was updated" does not satisfy this step. Likewise, distinguish
+files actually updated from files merely inspected or preserved.
+
 Never promise that a file was preserved unless the executor result and
 post-init state establish that fact. If a three-way conflict or another real
 blocker prevents the update, explain the blocker instead of presenting a

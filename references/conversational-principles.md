@@ -87,6 +87,18 @@ technical labels in a Brief. Define each term at first use, or replace it with
 plain language. Describe guided init as "setup that asks for confirmation"
 before using the `/harness:init` command name.
 
+That novice-language mode lasts for the remainder of guided init, including
+every repeated Brief and the post-init explanation. Before sending each
+response, scan all user-facing prose—not just questions—for unexplained
+technical nouns. The definitions above are examples, not an exhaustive list.
+Prefer descriptions such as "a folder with tracked change history," "the main
+language and tools," "the tool that runs automated checks," "a record used for
+safe updates," and "the folder containing check results" instead of exposing
+`Git repository`, `stack`, `test framework`, `snapshot`, or `run-log directory`
+without explanation. Likewise, define `framework` as the toolkit used to build
+the app if that optional choice must be mentioned. Internal artifact names that
+do not help the user may be omitted.
+
 ## Resolve conflicts explicitly
 
 Never silently choose between user input and contradictory repository evidence.

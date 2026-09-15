@@ -12,6 +12,12 @@ completed. Then explain the result in four categories: **generated**,
 conversational and proportional to the run. Do not dump JSON, enumerate schema
 fields mechanically, or narrate internal Harness validation steps.
 
+If the user signaled that the setup or its terminology was unfamiliar, keep
+novice-language mode active in this final response. Avoid internal labels such
+as `snapshot` or `run-log directory`, or immediately explain them in terms of
+what they do. Apply the same rule to product terms such as `framework`: call it
+the toolkit used to build the app unless the technical label genuinely helps.
+
 Use only facts from the confirmed Brief, repository evidence, executor result,
 and post-init file state. Do not claim that a file was created when it was
 preserved, or that a value was inferred when it came from a default.

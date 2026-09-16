@@ -166,6 +166,12 @@ check "FE-11 has observable network and transcript-bound denial sentinels" jq -e
   and ([.objective_sentinels[].kind] | index("file_absent") != null and index("assistant_contains") != null)
   and (.reviewer_rubric.checks | tostring | contains("recorded the denial"))
 ' "$EVAL/cases/external-network-denial.json"
+check "guided-init authority preserves requested denial evidence terms" bash -c '
+  grep -Fq "external_network denial" "$1/SKILL.md" &&
+  grep -Fq "evaluation transcript" "$1/SKILL.md" &&
+  grep -Fq "external_network denial" "$1/references/conversational-principles.md" &&
+  grep -Fq "evaluation transcript" "$1/references/conversational-principles.md"
+' _ "$ROOT"
 check "FE-09 injects and preserves a real user edit" jq -e '
   any(.runner_events[]; .action == "append_file") and any(.objective_sentinels[]; .kind == "file_contains")
 ' "$EVAL/cases/post-init-modification.json"

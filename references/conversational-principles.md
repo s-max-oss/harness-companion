@@ -276,7 +276,12 @@ probe while waiting for that answer.
 
 If the user stops or denies an action, stop immediately. Do not argue from an
 older Brief preference. Record the denial when the active workflow provides an
-evidence sink.
+evidence sink. If the user asks the acknowledgement to name a particular
+evidence field or sink, preserve those requested audit terms in the response
+instead of substituting a looser synonym. For example, acknowledge that the
+`external_network denial` is recorded by the `evaluation transcript` when those
+are the requested evidence words. Naming the evidence sink does not authorize a
+project-file write.
 
 ## Resume conversation only for meaningful events
 

@@ -300,6 +300,7 @@ def load_authority(isolation_path: Path) -> dict[str, str]:
         "run_root": run_root,
         "target": f"{run_root}/project",
         "boundary": f"{run_root}/skill-authority/scripts/harness-init-boundary.sh",
+        "brief_validator": f"{run_root}/skill-authority/scripts/harness-init.sh",
         "wrapper": wrapper_norm,
     }
 
@@ -403,6 +404,26 @@ def boundary_details_from_elements(
     return None
 
 
+def is_brief_preflight(
+    elements: list[dict[str, object]], authority: dict[str, str], has_input: bool
+) -> bool:
+    """Admit only the authoritative, non-mutating Brief validation shape."""
+    if len(elements) != 7 or not has_input:
+        return False
+    if not all(bool(element.get("static")) for element in elements):
+        return False
+    values = [str(element.get("text", "")) for element in elements]
+    return (
+        basename(values[0]) in {"bash", "bash.exe"}
+        and trusted_native_name(values[0], basename(values[0]))
+        and normalize_windows_path(values[1]) == authority["brief_validator"]
+        and normalize_windows_path(values[2]) == authority["target"]
+        and values[3:6]
+        == ["--brief-stdin", "--validate-brief-only", "--non-interactive"]
+        and values[6].casefold() in {"--host=claude", "--host=codex"}
+    )
+
+
 def validate_shell_script(source: str) -> None:
     if any(marker in source for marker in ("$", "`", ">", "<", "\x00", "\n", "\r")):
         fail("shell inspection uses expansion, substitution, redirection, or multiple lines")
@@ -440,6 +461,10 @@ def validate_native(
     )
     if boundary is not None:
         return boundary
+    if is_brief_preflight(
+        elements, authority, bool(command.get("has_pipeline_input"))
+    ):
+        return None
     if not all(bool(element.get("static")) for element in elements):
         fail("PowerShell command contains a dynamic command or argument")
     if name in {"bash", "bash.exe"}:

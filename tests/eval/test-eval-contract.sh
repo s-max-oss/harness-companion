@@ -465,6 +465,7 @@ check "real eval tells the subject the provable read-only command allowlist" bas
 eval_run_hash="$(printf 'a%.0s' {1..64})"
 eval_run_root="C:/Users/Public/harness-companion-eval/runs/run.$eval_run_hash"
 eval_boundary="$eval_run_root/skill-authority/scripts/harness-init-boundary.sh"
+eval_brief_validator="$eval_run_root/skill-authority/scripts/harness-init.sh"
 eval_target="$eval_run_root/project"
 ps_wrapper='C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 jq -n --arg target_file "$eval_target/.harness-eval-isolation-sentinel" \
@@ -480,6 +481,12 @@ subject_command_pair read-1 'Get-Content -Raw package.json' > "$TMP/subject-read
 check "subject-event validator permits read-only inspection" python "$EVAL/validate-subject-events.py" "$TMP/subject-read.jsonl" "$TMP/subject-isolation.json"
 subject_command_pair read-boundary-1 "\"$ps_wrapper\" -NoProfile -Command \"Get-Content '$eval_boundary'\"" > "$TMP/subject-read-boundary.jsonl"
 check "subject-event validator permits reading the trusted boundary source" python "$EVAL/validate-subject-events.py" "$TMP/subject-read-boundary.jsonl" "$TMP/subject-isolation.json"
+preflight_payload_escaped='{\"goal\":\"A\"}'
+preflight_command="\"$ps_wrapper\" -NoProfile -Command \"Write-Output '$preflight_payload_escaped' | bash '$eval_brief_validator' '$eval_target' --brief-stdin --validate-brief-only --non-interactive --host=codex\""
+subject_command_pair brief-preflight-1 "$preflight_command" '{"valid":true}' > "$TMP/subject-brief-preflight.jsonl"
+check "subject-event validator permits the exact read-only Brief preflight" python "$EVAL/validate-subject-events.py" "$TMP/subject-brief-preflight.jsonl" "$TMP/subject-isolation.json"
+subject_command_pair brief-preflight-extra-1 "${preflight_command%\"} --update\"" > "$TMP/subject-brief-preflight-extra.jsonl"
+if python "$EVAL/validate-subject-events.py" "$TMP/subject-brief-preflight-extra.jsonl" "$TMP/subject-isolation.json" >/dev/null 2>&1; then bad "subject-event validator rejects a mutating Brief preflight variant"; else ok "subject-event validator rejects a mutating Brief preflight variant"; fi
 subject_command_pair read-context-1 "\"$ps_wrapper\" -NoProfile -Command \"Select-String -LiteralPath '$eval_boundary' -Pattern 'decision' -Context 2,3\"" > "$TMP/subject-read-context.jsonl"
 check "subject-event validator permits literal numeric arrays for read-only parameters" python "$EVAL/validate-subject-events.py" "$TMP/subject-read-context.jsonl" "$TMP/subject-isolation.json"
 subject_command_pair read-error-action-1 "\"$ps_wrapper\" -NoProfile -Command \"Get-ChildItem -Force -Name '$eval_target' -ErrorAction SilentlyContinue\"" > "$TMP/subject-read-error-action.jsonl"

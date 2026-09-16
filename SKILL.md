@@ -124,6 +124,14 @@ invocations. On a legacy-unmanaged project, first explain which files predate
 Harness management, collect and confirm any missing Brief fields, and make
 clear that the new snapshot will claim only files this migration creates. Then:
 
+Treat that compact JSON as an opaque, frozen byte string after the dry run.
+Construct it once from the complete confirmed Brief, then duplicate the entire
+dry-run pipeline verbatim and append only `--apply --plan-token <token>` to its
+argument list. Do not reconstruct, shorten, or manually retype any field for
+the apply call. This is especially important for arrays: preserving everything
+else means every existing `success_criteria`, `defaults_applied`, and
+`conflicts_resolved` element must remain present in both invocations.
+
 When a managed project is already initialized and the user requests a concrete
 Brief edit while preserving everything else, begin from the on-disk confirmed
 Brief, copy every unchanged field exactly, and replace each named field with the

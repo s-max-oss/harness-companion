@@ -250,6 +250,13 @@ binds the stdin payload hash and target state. Do not use the bare managed
 resume shortcut, change the payload, or change transport between dry-run and
 apply.
 
+After the dry run, treat the compact JSON as an opaque frozen byte string.
+Duplicate the complete dry-run pipeline verbatim and append only `--apply
+--plan-token <token>`; do not rebuild, abbreviate, or retype the JSON. Before
+launching the apply command, compare the two pipeline prefixes character for
+character. In particular, every element of `success_criteria`,
+`defaults_applied`, and `conflicts_resolved` must be identical in both calls.
+
 ## Preserve authority boundaries
 
 The Brief is advisory. Current-session instructions and host security policy

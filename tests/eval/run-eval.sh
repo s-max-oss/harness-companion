@@ -1308,6 +1308,11 @@ byte-identical JSON again to the same boundary command with final arguments
 --update --apply --plan-token=<the 64-lowercase-hex token from the dry run>.
 These are two separate static PowerShell pipelines in the same Agent turn; do
 not combine them, use a dynamic variable, omit the token, or change the JSON.
+Treat the compact JSON as an opaque frozen byte string after the dry run:
+duplicate the complete dry-run pipeline verbatim and append only --apply and
+the plan-token argument. Never reconstruct, shorten, or manually retype the
+apply JSON. Every array element, especially all success_criteria entries, must
+remain byte-identical in both calls.
 Every inspection command must be statically provable as read-only. Use only
 PowerShell Get-ChildItem/Get-Command/Get-Content/Get-Date/Get-FileHash/Get-Item/
 Get-Location/Test-Path/Resolve-Path/Select-String plus the formatting, selection,

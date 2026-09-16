@@ -920,6 +920,13 @@ cleanup() {
     if [ "$restore_failed" = false ]; then rmdir "$acl_lock" >/dev/null 2>&1 && acl_lock_owned=false || restore_failed=true; fi
     if [ "$SYNTHETIC" = 0 ] && [ "$acl_lock_owned" = false ]; then update_recovery_journal acl_lock_released || restore_failed=true; fi
   fi
+  # Once publication has started, the controller-owned bundle and run tree are
+  # the only authority recovery can use to finish an interrupted no-replace
+  # publication and register the immutable artifacts.  Keep both until the
+  # normal publication path has retired the lock and reset
+  # publication_started=false.  In particular, a runtime-manifest append
+  # failure must not strand an empty .eval-write.lock after deleting its
+  # recovery journal.
   if [ "$restore_failed" = false ] && [ "$publication_started" = false ] && [ -n "${tmp:-}" ] && [ -d "$tmp" ]; then
     cleanup_path="$(host_path "$tmp")"
     if [ "$SYNTHETIC" = 0 ]; then
@@ -928,7 +935,8 @@ cleanup() {
       rm -rf -- "$tmp" || restore_failed=true
     fi
   fi
-  if [ "$restore_failed" = false ] && [ "$SYNTHETIC" = 0 ] && [ "$recovery_journal_active" = true ]; then
+  if [ "$restore_failed" = false ] && [ "$publication_started" = false ] \
+      && [ "$SYNTHETIC" = 0 ] && [ "$recovery_journal_active" = true ]; then
     update_recovery_journal run_tree_removed || restore_failed=true
     if [ "$restore_failed" = false ]; then
       rm -f -- "$recovery_journal_stage" || restore_failed=true

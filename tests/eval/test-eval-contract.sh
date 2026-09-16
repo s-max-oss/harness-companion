@@ -10,6 +10,14 @@ PASS=0; FAIL=0
 ok() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "FAIL: $1" >&2; FAIL=$((FAIL + 1)); }
 check() { local label="$1"; shift; if "$@"; then ok "$label"; else bad "$label"; fi; }
+windows_result_suffix_normalizes() {
+  local suffix
+  # shellcheck source=../../scripts/dirty-worktree-runtime-support.sh
+  . "$ROOT/scripts/dirty-worktree-runtime-support.sh"
+  IFS= read -r suffix < <(printf 'transcript.jsonl\r\n')
+  suffix="${suffix%$'\r'}"
+  [ "$(dwm_runtime_artifact_kind "tests/eval/results/recovery-case.1.20260917T000000Z-1-2.$suffix")" = eval_result ]
+}
 brief_input_contract_documented() {
   local skill="$1" principles="$2" runner="$3" contract="$4" file
   for file in "$skill" "$principles" "$runner"; do
@@ -169,6 +177,8 @@ check "FE-14 starts from a real clean archive and injects a user edit" jq -e '
 ' "$EVAL/cases/clean-archive-complex-dialog.json"
 check "runner is syntactically valid" bash -n "$EVAL/run-eval.sh"
 check "post-eval attester is syntactically valid" bash -n "$EVAL/attest-result.sh"
+check "post-reboot attestation recovery normalizes native jq CRLF suffixes" bash -c 'grep -Fq "Native Windows jq writes CRLF" "$1" && grep -Fq "transport CR before classifying" "$1"' _ "$EVAL/attest-result.sh"
+check "normalized Windows result suffix remains canonically classifiable" windows_result_suffix_normalizes
 check "release gate is syntactically valid" bash -n "$EVAL/check-results.sh"
 check "real eval sanitizes cross-edition PSModulePath through a trusted absolute env" grep -Fq '"$TRUSTED_WINDOWS_ENV" -u PSModulePath "$WINDOWS_POWERSHELL" "$@"' "$EVAL/run-eval.sh"
 check "all eval ACL invocations use the sanitized PowerShell wrapper" bash -c '! grep -Eq "^[[:space:]]*powershell[.]exe[[:space:]]" "$1"' _ "$EVAL/run-eval.sh"

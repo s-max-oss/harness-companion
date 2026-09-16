@@ -183,7 +183,14 @@ EOF
   if [ "$candidates_host" = "$canonical_candidates_host" ] \
     && [ "$results_host" = "$canonical_results_host" ] \
     && [ "$allowed_signers_host" = "$canonical_allowed_signers_host" ]; then
-    while IFS= read -r suffix; do rels+=("tests/eval/results/$base_name.$suffix"); done \
+    while IFS= read -r suffix; do
+      # Native Windows jq writes CRLF even when invoked from Git Bash.  Strip
+      # the transport CR before classifying the canonical relative path;
+      # otherwise post-reboot recovery sees e.g. "transcript.jsonl\r" and
+      # rejects an already-published valid bundle as noncanonical.
+      suffix="${suffix%$'\r'}"
+      rels+=("tests/eval/results/$base_name.$suffix")
+    done \
       < <(jq -r '.files[].suffix' <<< "$recovered")
     printf '%s\0' "${rels[@]}" | runtime_register_batch "$ROOT" eval_result \
       || die "recovered result bundle could not be registered atomically"

@@ -71,7 +71,9 @@ and shapes. In particular:
   not wrap them in `constraints`.
 - Use `initial_project_state`, not `initial_state`. Its exact member names are
   `is_git_repo`, `has_existing_tests`, `existing_harness_files`, and
-  `detection_summary`.
+  `detection_summary`. Keep `detection_summary` to one concise repository
+  observation of at most 200 characters; optional product choices belong in
+  the conversation, not in this field.
 - The exact operation member names are `commit`, `push`, `merge`, `release`,
   `install_packages`, `external_mutation`, and `destructive_ops`. The first six
   each use exactly `ask`, `auto`, or `denied`; `destructive_ops` is a boolean.
@@ -125,12 +127,16 @@ The executable validation in `scripts/harness-init.sh` remains authoritative.
 If this reference and that validator disagree, stop before invoking the
 boundary and report the contract mismatch.
 
-For a read-only preflight, pipe the exact compact JSON to:
+Before presenting the complete Brief for approval, run a read-only preflight
+by piping the exact compact JSON to:
 
 ```text
 scripts/harness-init.sh <existing-target> --brief-stdin --validate-brief-only --non-interactive --host=<claude|codex>
 ```
 
-This path returns `{"valid":true}`
-without staging or writing target files; it is not the mutation boundary and
-does not count as approval or initialization.
+This path returns `{"valid":true}` without staging or writing target files; it
+is not the mutation boundary and does not count as approval or initialization.
+Present and later execute that same validated Brief. If validation fails,
+correct an unconfirmed representation or ask the user about any semantic
+change before presenting it; never discover a schema error for the first time
+at the approved mutation boundary.

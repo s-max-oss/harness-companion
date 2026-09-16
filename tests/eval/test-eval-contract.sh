@@ -27,6 +27,9 @@ brief_input_contract_documented() {
     && grep -Fq '`notes` (a string of at most 500' "$contract" \
     && grep -Fq 'Supported conflict pointers are' "$contract" \
     && grep -Fq -- '--validate-brief-only' "$contract" \
+    && grep -Fq 'observation of at most 200 characters' "$contract" \
+    && grep -Fq 'Before presenting the complete Brief for approval' "$principles" \
+    && grep -Fq 'Do not wait until the approved mutation call' "$principles" \
     && grep -Fq 'first approved boundary invocation must be schema-valid' "$runner"
 }
 brief_input_examples_validate() {

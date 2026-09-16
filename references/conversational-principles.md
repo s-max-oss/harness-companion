@@ -169,6 +169,16 @@ legacy aliases such as `project_type`, a nested `constraints` object,
 the mutation boundary as a schema probe: one approved Brief must produce one
 schema-valid first invocation.
 
+Before presenting the complete Brief for approval, run the contract's
+read-only `--validate-brief-only` preflight against the exact compact JSON that
+will later be executed. This check must make no target-project writes and does
+not replace approval. Keep
+`initial_project_state.detection_summary` to one concise repository observation
+of at most 200 characters. If preflight rejects an unconfirmed representation,
+correct it before presentation; if correction would change meaning, ask the
+user instead. Do not wait until the approved mutation call to discover a
+schema or length error.
+
 The displayed confirmation and the executor input are one contract. Every
 decision shown for approval must have a lossless machine-readable counterpart
 in the exact Brief sent to the executor. Never obtain approval for a richer

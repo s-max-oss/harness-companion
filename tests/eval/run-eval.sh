@@ -961,7 +961,7 @@ exec_root="$tmp/agent-bin"
 agent_scratch="$tmp/agent-scratch"
 mkdir -p "$target" "$skill_root/core/lib" "$review_root" "$exec_root" \
   "$agent_scratch/home" "$agent_scratch/temp" "$agent_scratch/appdata" "$agent_scratch/tools" \
-  "$agent_scratch/localappdata" "$OUTPUT_DIR"
+  "$agent_scratch/localappdata" "$agent_scratch/powershell" "$OUTPUT_DIR"
 probe_script="$exec_root/isolation-probe.ps1"
 if [ "$SYNTHETIC" = 0 ]; then
   cp "$ISOLATION_PROBE" "$probe_script" || die "could not snapshot the isolation probe"
@@ -1190,12 +1190,14 @@ if [ "$SYNTHETIC" = 0 ]; then
   shell_temp_win="$(cygpath -w "$agent_scratch/temp")"
   shell_appdata_win="$(cygpath -w "$agent_scratch/appdata")"
   shell_localappdata_win="$(cygpath -w "$agent_scratch/localappdata")"
+  shell_psmodule_cache_win="$(cygpath -w "$agent_scratch/powershell/ModuleAnalysisCache")"
   target_win="$(cygpath -w "$target")"
   review_root_win="$(cygpath -w "$review_root")"
   shell_home_config="${shell_home_win//\\//}"
   shell_temp_config="${shell_temp_win//\\//}"
   shell_appdata_config="${shell_appdata_win//\\//}"
   shell_localappdata_config="${shell_localappdata_win//\\//}"
+  shell_psmodule_cache_config="${shell_psmodule_cache_win//\\//}"
   sandbox_path_config="${sandbox_path//\\//}"
   codex_shell_environment_flags=(
     -c 'shell_environment_policy.inherit="none"'
@@ -1206,6 +1208,7 @@ if [ "$SYNTHETIC" = 0 ]; then
     -c "shell_environment_policy.set.TMP=\"$shell_temp_config\""
     -c "shell_environment_policy.set.APPDATA=\"$shell_appdata_config\""
     -c "shell_environment_policy.set.LOCALAPPDATA=\"$shell_localappdata_config\""
+    -c "shell_environment_policy.set.PSModuleAnalysisCachePath=\"$shell_psmodule_cache_config\""
     -c "shell_environment_policy.set.SystemRoot=\"${system_root_win//\\//}\""
     -c "shell_environment_policy.set.WINDIR=\"${system_root_win//\\//}\""
     -c 'shell_environment_policy.set.LANG="C.UTF-8"'
@@ -1610,9 +1613,10 @@ if [ "$SYNTHETIC" = 0 ]; then
     --arg codex_powershell_source_path "$codex_powershell_source_win" \
     --arg shell_home "$shell_home_config" --arg shell_temp "$shell_temp_config" \
     --arg shell_appdata "$shell_appdata_config" --arg shell_localappdata "$shell_localappdata_config" \
+    --arg shell_psmodule_analysis_cache "$shell_psmodule_cache_config" \
     --argjson codex_powershell_authenticode "$codex_powershell_authenticode" '
     .schema_version = 3
-    | .shell_environment_policy = {inherit:"none",home:$shell_home,userprofile:$shell_home,temp:$shell_temp,tmp:$shell_temp,appdata:$shell_appdata,localappdata:$shell_localappdata}
+    | .shell_environment_policy = {inherit:"none",home:$shell_home,userprofile:$shell_home,temp:$shell_temp,tmp:$shell_temp,appdata:$shell_appdata,localappdata:$shell_localappdata,psmodule_analysis_cache:$shell_psmodule_analysis_cache}
     | .probe = {command_event:$command_event,result:$result,payload:$payload,shell_wrapper_path:$shell_wrapper_path,shell_wrapper_argv_variant:$shell_wrapper_argv_variant,script:{path:$probe_script_path,sha256:$probe_script_sha256},sanitized_path:($path | split(":")),executables:{powershell:{path:$powershell_path,sha256:$powershell_sha256},whoami:{path:$whoami_path,sha256:$whoami_sha256},codex_powershell:{path:$codex_powershell_path,source_path:$codex_powershell_source_path,sha256:$codex_powershell_sha256,authenticode:$codex_powershell_authenticode}}}
   ' "$isolation_evidence" > "$controller/isolation.with-probe.json"
   mv "$controller/isolation.with-probe.json" "$isolation_evidence"

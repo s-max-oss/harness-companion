@@ -123,13 +123,14 @@ jq -e \
   and ($target == ($run_root + "/project/.harness-eval-isolation-sentinel"))
   and ([range(0; $roots|length) as $i | ($target | startswith($roots[$i] + "/") | not)] | all)
   and ($e.shell_environment_policy | type == "object"
-    and (keys | sort) == ["appdata","home","inherit","localappdata","temp","tmp","userprofile"]
+    and (keys | sort) == ["appdata","home","inherit","localappdata","psmodule_analysis_cache","temp","tmp","userprofile"]
     and .inherit == "none"
     and ((.home|norm) == (.userprofile|norm)) and ((.temp|norm) == (.tmp|norm))
     and (.home|norm|startswith($run_root + "/agent-scratch/"))
     and (.temp|norm|startswith($run_root + "/agent-scratch/"))
     and (.appdata|norm|startswith($run_root + "/agent-scratch/"))
-    and (.localappdata|norm|startswith($run_root + "/agent-scratch/")))
+    and (.localappdata|norm|startswith($run_root + "/agent-scratch/"))
+    and (.psmodule_analysis_cache|norm|startswith($run_root + "/agent-scratch/powershell/")))
   and ($e.probe.payload | keys | sort == ["context_file","controller_file","expected_shell","host_temp_marker","nonce","source_file","target_file","user_executable_file","user_home","whoami_file"])
   and ($e.probe.payload.expected_shell | keys | sort == ["home","temp","tmp","userprofile"])
   and ($e.probe.result | keys | sort == ["context_authority_readable","controller_readable","host_temp_writeable","identity","nonce","payload_sha256","shell_home","shell_temp","shell_tmp","shell_userprofile","source_workspace_readable","target_file_readable","target_writeable","user_executable_readable","user_home_root_listable"])

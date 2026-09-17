@@ -172,6 +172,12 @@ check "guided-init authority preserves requested denial evidence terms" bash -c 
   grep -Fq "external_network denial" "$1/references/conversational-principles.md" &&
   grep -Fq "evaluation transcript" "$1/references/conversational-principles.md"
 ' _ "$ROOT"
+check "guided-init resolves relative deadlines and does not question defaults" bash -c '
+  grep -Fq "Resolve an unambiguous relative deadline" "$1/SKILL.md" &&
+  grep -Fq "Documented Brief defaults are not optional questions" "$1/SKILL.md" &&
+  grep -Fq "Documented Brief defaults are not questions" "$1/references/conversational-principles.md" &&
+  grep -Fq "due Friday" "$1/references/conversational-principles.md"
+' _ "$ROOT"
 check "FE-09 injects and preserves a real user edit" jq -e '
   any(.runner_events[]; .action == "append_file") and any(.objective_sentinels[]; .kind == "file_contains")
 ' "$EVAL/cases/post-init-modification.json"

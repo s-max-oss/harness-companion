@@ -55,6 +55,14 @@ round focused on the subject the user is currently clarifying.
   provenance as `/operation_preferences`. Either represent the whole operation
   preferences object once in both places, or use the same leaf pointers in both.
 - Do not optimize optional fields the user did not ask about.
+- Documented Brief defaults are not questions. Do not ask permission to use
+  them or propose an optimized alternative such as a one-off cadence. Once the
+  required information is complete, apply those defaults, present the complete
+  Brief, and ask only for approval of the Brief.
+- When the host supplies the current date and timezone, resolve an unambiguous
+  relative deadline such as “due Friday” to the corresponding exact calendar
+  date and show that date without asking the user to confirm it. Ask only when
+  the wording genuinely permits multiple plausible calendar dates.
 - Product implementation mechanisms outside the Brief schema and executor are
   optional, even when they relate directly to the goal. For example, an
   authentication goal requires observable success criteria, but not a choice

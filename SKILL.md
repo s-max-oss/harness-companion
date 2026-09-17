@@ -54,6 +54,16 @@ Load `references/conversational-principles.md` and `references/post-init-explana
 
 1. Inspect the target read-only: repository status and recent history, existing Harness files and snapshot state, top-level files, and project markers such as `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, and `Makefile`. Reuse facts already present in the current message or conversation.
 2. Start by telling the user what is already known or inferred. Build the five Brief categories—goal and success criteria, cadence, constraints, initial project state, and operation preferences—while asking only about missing required information, genuine conflicts, and choices that materially affect the Harness. Explain unfamiliar concepts in plain language. When the user says they do not understand the setup, enter novice-language mode for the rest of the guided-init conversation, including skill-use announcements, progress/commentary updates, repeated Briefs, and the post-init explanation. In every user-facing response, avoid technical labels or define each one at first use—including Harness, Git repository, stack, test framework, framework, secret handling, external network access, destructive operations, guided init, snapshot, and run-log directory. Before sending, scan the whole response for other unexplained technical nouns too; the examples are not an exhaustive allowlist. Prefer a plain description over exposing an internal artifact name. Do not narrate internal mechanics as "machine-readable shape" or "trusted setup boundary." If announcing this skill, define Harness Companion in the same sentence as the setup guide that adds project files and checks for consistent, verifiable coding work. If recommending `/harness:init`, introduce it as the confirmation-based setup command, never as unexplained "guided `/harness:init`." Do not use a fixed questionnaire or a question-count rule.
+   Documented Brief defaults are not optional questions. Do not ask permission
+   to use them or propose an optimized alternative such as a one-off cadence.
+   Once required information is complete, apply those defaults, present the
+   complete Brief, and ask only for approval of the Brief.
+
+   Resolve an unambiguous relative deadline such as “due Friday” from the
+   host-provided current date and timezone, show the resulting exact date in the
+   Brief, and do not ask the user to reconfirm it. Ask only when the relative
+   wording genuinely maps to more than one plausible calendar date.
+
    Product implementation mechanisms that are not required by the Brief schema
    or executor—such as sessions versus tokens for authentication, a database,
    UI style, storage layout, or deployment target—do not materially affect

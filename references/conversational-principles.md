@@ -134,6 +134,11 @@ Which is correct?
   4. Skip this for now
 ```
 
+Always show all four choices. For an execution-critical field, render the
+fourth choice as `Skip this for now (initialization will pause)` rather than
+omitting it. Choosing it ends the current setup attempt without execution; it
+does not make the unresolved conflict permissible in an executable Brief.
+
 Ask that resolution question exactly once in one user-visible response. If a
 progress update is useful while inspecting evidence, limit it to status (for
 example, "I am checking the repository markers"); do not include the conflict
@@ -155,7 +160,8 @@ a non-null `resolved_value`. "Tell me more" starts clarification; it is not
 itself a resolution. Normalize a permitted skip as `resolution: "deferred"`
 with an explicit `resolved_value: null`.
 
-Execution-critical conflicts cannot be deferred: `goal`, `success_criteria`,
+Execution-critical conflicts cannot be deferred into an executable Brief:
+`goal`, `success_criteria`,
 `detected_type` when it identifies the primary project type in the stack, and
 `initial_project_state.is_git_repo`. Guided mode remains blocked and performs
 no execution until these conflicts are resolved. Quick mode aborts instead of

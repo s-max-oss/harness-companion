@@ -170,6 +170,14 @@ changes. When required fields are complete, present a compact, readable Brief
 with source annotations. Explain any important default or unresolved optional
 item in plain language.
 
+User-supplied goal and success-criterion strings are frozen as soon as they are
+provided, not only after the approval turn. Copy them character for character
+into the first complete Brief. Capitalization, punctuation, grammar, and list
+boundaries are data: do not title-case, add a period, polish the prose, or split
+one criterion into several criteria. If the supplied wording is ambiguous or
+cannot satisfy the Brief contract, present any proposed rewrite as an explicit
+edit and use it only after the user accepts it.
+
 Before constructing the first executor payload, read
 `references/project-brief-input.md` and use that exact contract. Do not guess
 legacy aliases such as `project_type`, a nested `constraints` object,

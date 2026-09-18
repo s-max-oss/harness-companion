@@ -201,6 +201,16 @@ correct it before presentation; if correction would change meaning, ask the
 user instead. Do not wait until the approved mutation call to discover a
 schema or length error.
 
+After that preflight succeeds, include the exact one-line compact JSON below
+the readable Brief in a fenced `json` block titled **Validated execution record**.
+This is the conversation-persistent handoff for stateless Agent
+turns, not a second representation to rewrite. If the same Brief is presented
+again, copy the record byte-for-byte. On approval, use those exact bytes for
+the mutation boundary; do not reconstruct `detection_summary`, provenance,
+default rationales, or any other field from the readable summary. If the exact
+record is missing from conversation context, preflight and present the Brief
+again rather than executing a regenerated payload.
+
 The displayed confirmation and the executor input are one contract. Every
 decision shown for approval must have a lossless machine-readable counterpart
 in the exact Brief sent to the executor. Never obtain approval for a richer

@@ -182,6 +182,14 @@ that its creates/updates/preserved sets introduce nothing beyond the displayed
 plan, and immediately apply its token in the same turn. Ask again only when the
 dry run reveals a new file action, conflict, or scope change. The token remains
 mandatory; this rule removes duplicate consent, not the 3-way safety check.
+When the preceding response was the four-choice menu for one concrete managed
+Brief edit, an instruction such as "apply the exact safe update" also resolves
+that one conflict in favor of the user's already stated requested value. Treat
+it as approval of the narrowly scoped edit plus the stated preservation
+guarantees: build the revised Brief from the on-disk Brief, run the dry-run, and
+apply its token in the same turn. Do not claim that no plan existed merely
+because the previous response was a choice menu, and do not ask for a third
+approval unless the dry-run reveals additional actions or scope.
 
 ### Completion and errors
 

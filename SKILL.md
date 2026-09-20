@@ -191,6 +191,12 @@ apply its token in the same turn. Do not claim that no plan existed merely
 because the previous response was a choice menu, and do not ask for a third
 approval unless the dry-run reveals additional actions or scope.
 
+After a successful apply, read the "Explain a post-init update" section of
+`references/post-init-explanation.md` in the current turn before replying.
+Report both the changed Brief decisions and every actually updated file's
+repository-relative path from the executor result; distinguish those files
+from preserved user files. Keep unchanged explanation categories brief.
+
 ### Completion and errors
 
 After a successful run, explain the outcome conversationally using the four categories in `references/post-init-explanation.md`: **generated**, **inferred**, **defaulted**, and **deferred**. Before replying, reconcile the approved human Brief, the exact executor input, and the resulting `PROJECT_BRIEF.json`; do not omit an approved default, report an unrecorded choice as applied, or claim that nothing is deferred when optional choices remain open. Treat the completion response as incomplete until it tells the user how to refine any deferred decisions through guided init and closes with a natural next step or an invitation to correct revisitable inferred/defaulted choices. Do not dump JSON.

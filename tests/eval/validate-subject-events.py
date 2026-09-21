@@ -138,7 +138,21 @@ foreach ($source in $sources) {
   $results += [pscustomobject]@{
     parse_errors=@($errors | ForEach-Object { [string]$_.Message })
     redirections=@($ast.FindAll({
-      param($node) $node -is [System.Management.Automation.Language.RedirectionAst]
+      param($node)
+      if ($node -isnot [System.Management.Automation.Language.RedirectionAst]) {
+        return $false
+      }
+      # Discarding stderr into PowerShell's built-in null variable cannot write
+      # a file. Prove this from the AST, not the spelling of a command substring.
+      # All other redirections (including quoted '$null' paths) remain denied.
+      $nullErrorSink =
+        $node -is [System.Management.Automation.Language.FileRedirectionAst] -and
+        $node.FromStream -eq [System.Management.Automation.Language.RedirectionStream]::Error -and
+        -not $node.Append -and
+        $node.Location -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        -not $node.Location.Splatted -and
+        $node.Location.VariablePath.UserPath -ieq 'null'
+      return -not $nullErrorSink
     }, $true)).Count
     method_invocations=@($ast.FindAll({
       param($node) $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst]

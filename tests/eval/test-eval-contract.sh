@@ -504,6 +504,7 @@ check "real eval tells the subject the provable read-only command allowlist" bas
 ' _ "$EVAL/run-eval.sh"
 check "direct Bash wrapper preserves read-only command restrictions" python -B "$EVAL/test-subject-shell-wrapper.py"
 check "PowerShell null stderr sink preserves mutation restrictions" python -B "$EVAL/test-subject-powershell-redirection.py"
+check "recovery publication paths tolerate native jq CRLF" python -B "$EVAL/test-recovery-publication-paths.py"
 eval_run_hash="$(printf 'a%.0s' {1..64})"
 eval_run_root="C:/Users/Public/harness-companion-eval/runs/run.$eval_run_hash"
 eval_boundary="$eval_run_root/skill-authority/scripts/harness-init-boundary.sh"

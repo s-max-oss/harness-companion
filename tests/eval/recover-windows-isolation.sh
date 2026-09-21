@@ -459,6 +459,9 @@ if [ -n "$publication_stage_win" ]; then
       publication_base="$(jq -r '.base' <<< "$publication_record")"
       publication_rels=()
       while IFS= read -r suffix; do
+        # Native Windows jq emits CRLF. The verified suffix whitelist excludes
+        # carriage returns, so remove only this transport terminator.
+        suffix="${suffix%$'\r'}"
         publication_rels+=("tests/eval/candidates/$publication_base.$suffix")
       done < <(jq -r '.files[].suffix' <<< "$publication_record")
       printf '%s\0' "${publication_rels[@]}" | runtime_register_batch "$ROOT" eval_candidate \

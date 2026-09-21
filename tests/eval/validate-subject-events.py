@@ -427,14 +427,36 @@ def is_brief_preflight(
 def validate_shell_script(source: str) -> None:
     if any(marker in source for marker in ("$", "`", ">", "<", "\x00", "\n", "\r")):
         fail("shell inspection uses expansion, substitution, redirection, or multiple lines")
+    # shlex removes quotes but does not expand braces/globs. Reject expansions
+    # before tokenization, where quote information is still available, so an
+    # apparently safe argument cannot become a callback/output option in Bash.
+    quote = ""
+    escaped = False
+    for char in source:
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in {"'", '"'}:
+            quote = char
+        elif char in "*?[]{}~":
+            fail("shell inspection uses unquoted argument expansion")
+        elif char in "|;&":
+            fail("shell composition is not statically provable as read-only")
+        elif char == "#":
+            fail("shell inspection uses unquoted comment syntax")
     lexer = shlex.shlex(source, posix=True, punctuation_chars="|;&")
     lexer.whitespace_split = True
+    # Unquoted comment syntax is rejected above. Keep quoted/escaped hashes
+    # as literal argument text instead of letting shlex hide later arguments.
+    lexer.commenters = ""
     try:
         tokens = list(lexer)
     except ValueError as exc:
         fail(f"shell inspection is malformed: {exc}")
-    if any(token in {"|", ";", "&&", "||", "&"} for token in tokens):
-        fail("shell composition is not statically provable as read-only")
     if not tokens:
         fail("empty shell inspection")
     name = basename(tokens[0])
@@ -443,6 +465,7 @@ def validate_shell_script(source: str) -> None:
         fail("shell environment assignments are not permitted")
     if name not in READ_ONLY_NATIVE and name != "git":
         fail(f"shell command is not in the read-only allowlist: {name or '<dynamic>'}")
+    require_trusted_native_name(tokens[0], name)
     validate_native_args(name, args)
 
 
@@ -589,6 +612,19 @@ def validate_direct_shell(command: str, authority: dict[str, str]) -> dict[str, 
         return boundary
     if BOUNDARY_TEXT.search(command):
         fail("direct shell command is not the exact authoritative init boundary")
+    # Native Codex shell selection emits Bash itself as the outer process,
+    # rather than a Bash invocation inside the PowerShell transport. Unwrap
+    # only its exact non-login -c shape, then apply the same read-only parser.
+    try:
+        invocation = shlex.split(command, posix=True)
+    except ValueError as exc:
+        fail(f"direct shell transport is malformed: {exc}")
+    if invocation and basename(invocation[0]) in {"bash", "bash.exe"}:
+        require_trusted_native_name(invocation[0], basename(invocation[0]))
+        if len(invocation) != 3 or invocation[1] != "-c":
+            fail("direct Bash inspection must use exactly one -c script")
+        validate_shell_script(invocation[2])
+        return None
     validate_shell_script(command)
     return None
 

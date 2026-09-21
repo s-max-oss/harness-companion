@@ -1275,7 +1275,17 @@ authority_unchanged() {
   [ "$(sha "$controller/runtime.current")" = "$runtime_manifest_sha" ]
 }
 
-codex_text() { jq -rs '[.[] | select(.type == "item.completed" and .item.type == "agent_message") | .item.text] | last // ""' "$1"; }
+codex_text() {
+  # Some CLI streams append an empty agent_message after the final answer.
+  # Ignore only blank string messages; malformed messages still fail closed.
+  jq -rs '
+    [.[] | select(.type == "item.completed" and .item.type == "agent_message")
+      | .item.text
+      | if type != "string" then error("invalid agent_message text")
+        else select(test("[^[:space:]]")) end]
+    | last // ""
+  ' "$1"
+}
 claude_text() { jq -rs '[.[] | select(.type == "result") | (.result // .structured_output // "")] | last // "" | if type == "string" then . else tojson end' "$1"; }
 
 run_subject_turn() {

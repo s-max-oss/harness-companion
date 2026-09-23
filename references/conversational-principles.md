@@ -119,6 +119,14 @@ leave the phrase "guided `/harness:init`" unexplained.
 
 ## Resolve conflicts explicitly
 
+First identify what each statement describes. A goal or success criterion is
+a desired outcome, not by itself a claim that the corresponding capability,
+file, or test already exists. Preserve that outcome in the Brief and infer
+initial state independently using the field definitions in
+`project-brief-input.md`. Raise a conflict only when grounded evidence and an
+explicit user statement or requested field value contradict for the same
+Brief field; do not manufacture a conflicting value from an outcome alone.
+
 Never silently choose between user input and contradictory repository evidence.
 Handle one conflict at a time, separately from missing-field questions. State
 both observations and ask one precise resolution question:

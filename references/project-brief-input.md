@@ -74,6 +74,14 @@ and shapes. In particular:
   `detection_summary`. Keep `detection_summary` to one concise repository
   observation of at most 200 characters; optional product choices belong in
   the conversation, not in this field.
+- `initial_project_state.has_existing_tests` records testing markers, not a
+  verified test inventory or a passing test run. Under this contract, any of
+  `pytest.ini`, `pyproject.toml [tool.pytest]`, `Cargo.toml`, `go.mod` with test
+  files, `package.json scripts.test`, `Makefile`, or `*.bats` is sufficient
+  repository evidence for `true`. For example, pytest configuration is
+  sufficient even if no test files are present; describe that limitation in
+  `detection_summary`, without running tests during initialization. Do not copy
+  the example's `false` or infer present state from a desired success criterion.
 - The exact operation member names are `commit`, `push`, `merge`, `release`,
   `install_packages`, `external_mutation`, and `destructive_ops`. The first six
   each use exactly `ask`, `auto`, or `denied`; `destructive_ops` is a boolean.

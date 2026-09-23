@@ -85,14 +85,24 @@ resolved and for which the confirmed Brief accepted a default.
   grouping related operation preferences in one sentence when useful. Do not
   replace the actual list with a selective summary that omits values such as
   a null deadline.
+- Build this summary from that array, then check that each entry's value has
+  a corresponding plain-language clause before sending it. Empty arrays,
+  nulls, and false values still describe accepted decisions; they are not
+  entries to skip. For example, `prohibitions: []` means no additional
+  project-specific prohibitions were specified, not that every action is
+  authorized. Keep the separate permission requirements and disabled actions
+  explicit when grouping operation preferences.
 - Do not report product or implementation choices as defaults unless they were
   explicitly supplied by the user and represented in the executed Brief.
 
-Example:
+Example when the confirmed Brief accepted all documented defaults (omit or
+adapt any clause that was not actually defaulted in this run):
 
-> I used the stable delivery cadence and left secret handling unspecified.
-> That is safe for setup, but you may want to choose an environment file,
-> vault, or keyring before adding credentials.
+> I used a stable delivery cadence, left the deadline and credential-handling
+> method unspecified, and recorded no additional project-specific prohibitions.
+> Outside-network access, commits, pushes, merges, releases, package installation,
+> and other external changes still require permission; destructive actions are
+> disabled. You can refine the credential-handling method before adding credentials.
 
 ## Deferred
 
@@ -172,7 +182,7 @@ Initialization is complete.
 
 Generated: <important created/updated outputs; preserved files when relevant>.
 Inferred: <decision from repository evidence + source>.
-Defaulted: <meaningful accepted defaults + practical effect>.
+Defaulted: <all actually accepted defaults, grouped naturally + practical effect>.
 Deferred: <optional unresolved decisions + how to refine them>.
 
 <one or two revisitable decisions and the natural next step>

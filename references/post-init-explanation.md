@@ -73,25 +73,19 @@ Example:
 
 ## Defaulted
 
-Call out meaningful values that neither the user nor repository evidence
-resolved and for which the confirmed Brief accepted a default.
+Account for every entry in the confirmed Brief's `defaults_applied` array. Use
+that array as the outline: draft a plain-language clause for each recorded
+value, then combine related clauses into natural sentences without losing
+any entry. For a later Brief update, use "Explain a post-init update" below.
 
-- State the selected value in plain language.
-- Briefly explain its practical effect when the name alone is unclear.
-- Prioritize defaults the user may reasonably want to revisit, such as
-  delivery cadence or secret-handling strategy.
+- Briefly explain each value's practical effect when the name alone is unclear.
 - Do not describe an explicit user choice as a default.
-- Account for every entry in the confirmed Brief's `defaults_applied` array,
-  grouping related operation preferences in one sentence when useful. Do not
-  replace the actual list with a selective summary that omits values such as
-  a null deadline.
-- Build this summary from that array, then check that each entry's value has
-  a corresponding plain-language clause before sending it. Empty arrays,
-  nulls, and false values still describe accepted decisions; they are not
-  entries to skip. For example, `prohibitions: []` means no additional
-  project-specific prohibitions were specified, not that every action is
-  authorized. Keep the separate permission requirements and disabled actions
-  explicit when grouping operation preferences.
+- Empty arrays, nulls, and false values still describe accepted decisions;
+  they are not entries to skip. For example, `prohibitions: []` means no
+  additional project-specific prohibitions were specified, not that every action is
+  authorized. A null deadline means no deadline was set.
+- Keep the separate permission requirements and disabled actions explicit
+  when grouping operation preferences.
 - Do not report product or implementation choices as defaults unless they were
   explicitly supplied by the user and represented in the executed Brief.
 

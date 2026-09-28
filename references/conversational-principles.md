@@ -19,7 +19,13 @@ to repeat them. Ask only when a required Brief field is still missing after all
 three sources have been considered.
 
 Repository evidence supports inference; it does not overrule the user. Mark the
-source of every Brief value so the user can see how it was obtained:
+source that supplied each Brief value, not merely a source that did not
+contradict it. Values supplied or unambiguously implied by the user's words
+(including a project type implied by their goal) use `source: conversation`;
+`source: repo` requires supporting repository observations. Absence of
+contradictory markers does not turn a conversation-derived value into a
+repository inference. Keep this attribution consistent in `provenance`, the
+readable Brief, and the post-init explanation:
 
 - `[from you]`
 - `[inferred from <path>]`

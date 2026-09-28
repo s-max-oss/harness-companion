@@ -76,7 +76,13 @@ Example:
 Account for every entry in the confirmed Brief's `defaults_applied` array. Use
 that array as the outline: draft a plain-language clause for each recorded
 value, then combine related clauses into natural sentences without losing
-any entry. For a later Brief update, use "Explain a post-init update" below.
+any entry. For initial completion, compare the finished explanation back to
+the array: identify the clause that communicates each recorded value. If an
+entry has no corresponding clause, add its practical meaning before sending.
+Disclosure in the earlier approval Brief does not fill a gap in this
+post-write explanation. This is a composing check, not another user question
+or a reason to rerun the executor. For a later Brief update, use "Explain a
+post-init update" below.
 
 - Briefly explain each value's practical effect when the name alone is unclear.
 - Do not describe an explicit user choice as a default.
@@ -84,8 +90,9 @@ any entry. For a later Brief update, use "Explain a post-init update" below.
   they are not entries to skip. For example, `prohibitions: []` means no
   additional project-specific prohibitions were specified, not that every action is
   authorized. A null deadline means no deadline was set.
-- Keep the separate permission requirements and disabled actions explicit
-  when grouping operation preferences.
+- When grouping operation preferences, name the operations covered by each
+  permission requirement and distinguish disabled actions; an undefined label
+  such as "consequential operations" does not communicate which actions need permission.
 - Do not report product or implementation choices as defaults unless they were
   explicitly supplied by the user and represented in the executed Brief.
 

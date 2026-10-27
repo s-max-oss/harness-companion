@@ -3,6 +3,32 @@
 All notable changes to harness-companion are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-10-27 — DSH-only stable
+
+First stable release of the DSH-only skill, promoting 2.0.0-rc.4 after a green
+full suite and a reproducible acceptance run.
+
+### Added
+
+- `dsh/acceptance.ps1` — seven-scenario acceptance harness that drives the
+  real `dsh/run.ps1` entry and writes one NDJSON evidence line per scenario
+  (status, feature state machine, canonical evidence, WIP=1, handoff, consent
+  boundary).
+- `docs/acceptance/2026-10-27-dsh-2.0.0.md` — acceptance package with scope,
+  environment, scenario table, evidence paths, and explicit non-coverage.
+
+### Changed
+
+- `F-CONV-08` (Codex forward evaluation) and `F-CONV-09` (its acceptance
+  package) are deprecated: their subject pipeline was retired with the host
+  adapters. Registry feature `F-DSH-02` covers the DSH acceptance harness and
+  package instead.
+
+### Validation
+
+- DSH acceptance: **7 / 7 PASS** in 56 s; evidence under
+  `tests/acceptance/evidence/20261027T133032Z/`.
+- Full suite: recorded below when the 2.0.0 gate run completes.
 ## [2.0.0-rc.4] — 2026-10-27 — DSH-only release
 
 The skill now targets DeepSeek Harness exclusively. Claude Code and Codex keep

@@ -28,7 +28,10 @@ full suite and a reproducible acceptance run.
 
 - DSH acceptance: **7 / 7 PASS** in 56 s; evidence under
   `tests/acceptance/evidence/20261027T133032Z/`.
-- Full suite: recorded below when the 2.0.0 gate run completes.
+- Full suite: **33 / 33 suites PASS** (86 min) through `core/harness-verify.sh`,
+  run `20261027T133213Z-1125-3502`, associated with `F-DSH-02` (passing, registry
+  revision 70).
+
 ## [2.0.0-rc.4] — 2026-10-27 — DSH-only release
 
 The skill now targets DeepSeek Harness exclusively. Claude Code and Codex keep

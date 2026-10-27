@@ -34,6 +34,9 @@ working as tools; they simply no longer integrate this skill.
 
 ### Validation
 
+- `bash tests/run-all.sh`: **33 / 33 suites PASS** (66 min wall clock through
+  `core/harness-verify.sh`, run `20261027T110215Z-1172-24193`). The run is
+  associated with `F-DSH-01`, which is marked `passing` at registry revision 64.
 - `tests/core/test-status-renderer.sh`: 17 / 17 PASS.
 - `dsh/smoke.ps1`: 9 / 9 PASS from the source tree and from an installed copy;
   install → smoke → uninstall round-trip verified.

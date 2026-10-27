@@ -596,6 +596,27 @@ extract_script_path() {
   printf '%s' "$path"
 }
 
+# ---- Install integrity gate ----------------------------------------------------
+# An incomplete source tree (truncated archive, failed copy, interrupted run)
+# must never register hooks. Before rc.3 an empty install registered hooks that
+# pointed at missing scripts, so every session logged a hook failure and the
+# skill looked broken while the "install" reported success.
+MISSING=""
+for required in \
+  "$TARGET/SKILL.md" \
+  "$TARGET/core/lib/status-renderer.sh" \
+  "$TARGET/core/lib/validate-run-log.sh" \
+  "$TARGET/adapters/claude-code/hooks/session-start.sh" \
+  "$TARGET/adapters/claude-code/hooks/stop-handoff.sh"; do
+  [ -f "$required" ] || MISSING="${MISSING}  - $required"$'\n'
+done
+if [ -n "$MISSING" ]; then
+  echo "[ERROR] install is incomplete — refusing to register hooks." >&2
+  printf '        missing:\n%s' "$MISSING" >&2
+  echo "        Re-run the installer from a complete source checkout." >&2
+  exit 1
+fi
+
 # ---- Settings file ------------------------------------------------------------
 if [ "$MODE" = "--project" ]; then
   SETTINGS_FILE="$(pwd)/.claude/settings.json"
@@ -624,6 +645,142 @@ CANON_SS="$(canonical_path "$HOOK_SS_SCRIPT_PATH")"
 CANON_STOP="$(canonical_path "$HOOK_STOP_SCRIPT_PATH")"
 
 # ---- Hook registration with path-normalized idempotency -----------------------
+# Does settings.json still point at the v1 wrapper paths under this install?
+# Those entries predate the canonical adapters/claude-code/hooks paths and must
+# be removed after the canonical entry lands; otherwise Claude runs both.
+settings_reference_legacy_hooks() {
+  local settings="$1"
+  [ -f "$settings" ] || return 1
+  grep -qF "$TARGET/scripts/hooks/session-start.sh" "$settings" 2>/dev/null && return 0
+  grep -qF "$TARGET/scripts/hooks/stop-handoff.sh" "$settings" 2>/dev/null && return 0
+  return 1
+}
+
+# Remove harness-companion hook entries that point at the legacy wrapper scripts.
+# Best effort: a failure here leaves settings.json untouched, never corrupt.
+prune_legacy_hook_entries() {
+  local settings="$1"
+  [ -f "$settings" ] || return 0
+  local tmp="${settings}.prune.$$"
+
+  if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+    # Match on a fixed suffix instead of the absolute install path. MSYS rewrites
+    # POSIX-looking values into Windows form (/c/Users/... -> C:/Users/...) both
+    # for argv AND for environment variables before a native jq.exe sees them,
+    # so neither --arg nor env.* can carry the real command string. A literal
+    # inside the jq program is not rewritten. Hook entries live in the settings
+    # file of the scope that installed them, so a suffix match cannot touch a
+    # different scope's install.
+    if jq '
+      def drop($ev; $pat):
+        .hooks[$ev] //= []
+        | .hooks[$ev] |= [ .[] | select( ([.hooks[]?.command // empty] | any(contains($pat))) | not ) ];
+      drop("SessionStart"; "harness-companion/scripts/hooks/session-start.sh")
+      | drop("Stop"; "harness-companion/scripts/hooks/stop-handoff.sh")
+    ' "$settings" > "$tmp" 2>/dev/null; then
+      if mv "$tmp" "$settings"; then
+        if settings_reference_legacy_hooks "$settings"; then
+          echo "  [WARN] legacy hook entries still present after prune" >&2
+        else
+          echo "  pruned legacy v1 wrapper hook entries"
+        fi
+      fi
+      return 0
+    fi
+    rm -f "$tmp"
+  elif command -v python3 >/dev/null 2>&1; then
+    local _py_prune="${settings}.pyprune.$$"
+    cat > "$_py_prune" <<'PYEOF'
+import json, os, sys
+path = os.environ["SETTINGS_FILE"]
+# Fixed suffixes, for the same reason as the jq path above: MSYS rewrites
+# POSIX-looking argv and env values before a native python.exe sees them.
+MARKERS = {
+    "SessionStart": "harness-companion/scripts/hooks/session-start.sh",
+    "Stop": "harness-companion/scripts/hooks/stop-handoff.sh",
+}
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+hooks = data.get("hooks", {})
+def prune(event, marker):
+    entries = hooks.get(event, [])
+    kept = []
+    for entry in entries:
+        cmds = [(h.get("command") or "") for h in entry.get("hooks", [])]
+        if any(marker in c for c in cmds):
+            continue
+        kept.append(entry)
+    hooks[event] = kept
+for event, marker in MARKERS.items():
+    prune(event, marker)
+tmp = path + ".tmp.prune"
+with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+os.replace(tmp, path)
+PYEOF
+    if SETTINGS_FILE="$settings" python3 "$_py_prune" 2>/dev/null; then
+      if settings_reference_legacy_hooks "$settings"; then
+        echo "  [WARN] legacy hook entries still present after prune" >&2
+      else
+        echo "  pruned legacy v1 wrapper hook entries"
+      fi
+    fi
+    rm -f "$_py_prune"
+  fi
+  return 0
+}
+
+# Raise the Stop hook timeout on an existing install. Fresh installs write 15s,
+# but an upgrade keeps the old settings entry unless it is rewritten; with the
+# old 5s value the handoff warnings are killed before the bounded run-log
+# validation finishes. Matching uses fixed suffixes for the same MSYS reason as
+# prune_legacy_hook_entries (POSIX-looking argv/env values get rewritten).
+normalize_harness_stop_timeout() {
+  local settings="$1"
+  [ -f "$settings" ] || return 0
+  local tmp="${settings}.tune.$$"
+
+  if command -v jq >/dev/null 2>&1 && echo '{}' | jq -e . >/dev/null 2>&1; then
+    if jq '
+      def tune($pat):
+        .hooks.Stop //= []
+        | .hooks.Stop |= map(
+            .hooks |= map(if ((.command // "") | contains($pat)) then .timeout = 15000 else . end)
+          );
+      tune("harness-companion/scripts/hooks/stop-handoff.sh")
+      | tune("harness-companion/adapters/claude-code/hooks/stop-handoff.sh")
+    ' "$settings" > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$settings"
+      return 0
+    fi
+    rm -f "$tmp"
+  elif command -v python3 >/dev/null 2>&1; then
+    local _py_tune="${settings}.pytune.$$"
+    cat > "$_py_tune" <<'PYEOF'
+import json, os
+path = os.environ["SETTINGS_FILE"]
+MARKERS = (
+    "harness-companion/scripts/hooks/stop-handoff.sh",
+    "harness-companion/adapters/claude-code/hooks/stop-handoff.sh",
+)
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+for entry in data.get("hooks", {}).get("Stop", []):
+    for h in entry.get("hooks", []):
+        cmd = h.get("command") or ""
+        if any(m in cmd for m in MARKERS):
+            h["timeout"] = 15000
+with open(path, "w", encoding="utf-8", newline="\n") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
+    SETTINGS_FILE="$settings" python3 "$_py_tune" 2>/dev/null || true
+    rm -f "$_py_tune"
+  fi
+  return 0
+}
+
 register_hooks() {
   local settings="$1"
   local hook_ss_cmd="$2"
@@ -777,7 +934,11 @@ PYEOF
       rm -f "$_py_script" "${_py_script}.out" "${_py_script}.out.lf"
     fi
 
-    if [ "$ss_exists" = "1" ] && [ "$stop_exists" = "1" ]; then
+    if [ "$ss_exists" = "1" ] && [ "$stop_exists" = "1" ] \
+       && ! settings_reference_legacy_hooks "$settings"; then
+      # Canonical entries already present: keep the idempotent path, but still
+      # upgrade the Stop timeout written by older installers.
+      normalize_harness_stop_timeout "$settings"
       echo "  hooks already registered in $settings (idempotent — canonical path match)"
       return 0
     fi
@@ -844,8 +1005,11 @@ PYEOF
         '[{"matcher":"startup|resume","hooks":[{"type":"command","command":$c,"timeout":5000}]}]')"
     fi
     if [ "$stop_exists" -ne 1 ]; then
+      # Stop gets a larger budget than SessionStart: handoff warnings include
+      # run-log validation, which is bounded in core but can still take a few
+      # seconds on projects with large run logs.
       jq_stop_entry="$(jq -n --arg c "$hook_stop_cmd" \
-        '[{"matcher":"*","hooks":[{"type":"command","command":$c,"timeout":5000}]}]')"
+        '[{"matcher":"*","hooks":[{"type":"command","command":$c,"timeout":15000}]}]')"
     fi
     if jq --argjson add_ss "$jq_ss_entry" --argjson add_stop "$jq_stop_entry" '
        .hooks //= {} |
@@ -909,7 +1073,7 @@ if stop_exists != "1":
     stop = hooks.setdefault("Stop", [])
     stop.append({
         "matcher": "*",
-        "hooks": [{"type": "command", "command": stop_cmd, "timeout": 5000}],
+        "hooks": [{"type": "command", "command": stop_cmd, "timeout": 15000}],
     })
 
 tmp = settings_file + ".tmp.py"
@@ -1007,6 +1171,9 @@ PYEOF
     echo "       Re-run with debug to inspect $settings." >&2
     return 1
   fi
+
+  prune_legacy_hook_entries "$settings"
+  normalize_harness_stop_timeout "$settings"
 
   echo "  hooks registered: $settings"
 }

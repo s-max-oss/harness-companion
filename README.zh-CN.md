@@ -119,6 +119,19 @@ bash harness-companion/adapters/claude-code/uninstall.sh   # 直接调用适配�
 |---------|-----------|----------|------|
 | **Claude Code** | SessionStart, Stop | `~/.claude/skills/harness-companion/` | 默认。`hookSpecificOutput.additionalContext` 注入状态；`systemMessage` 发送 handoff 警告。 |
 | **Codex** | SessionStart, Stop, PreToolUse | `<project>/.codex/` 或 `~/.codex/` | 代码完成，运行时 E2E 待验证。PreToolUse 当前为 permissive（策略未启用）。`.codex-plugin/plugin.json` 支持 Codex 市场。 |
+| **DSH** | 无（宿主不提供技能 hook） | `%DSH_HOME%\skills\harness-companion\` | 靠 SKILL.md 的显式契约补状态检查与交接；Windows 用 `dsh/run.ps1` 解析 Git Bash。 |
+
+### DSH（DeepSeek Harness）
+
+```powershell
+./adapters/dsh/install.ps1                  # 装到 %DSH_HOME%\skills\harness-companion
+& "$env:DSH_HOME\skills\harness-companion\dsh\smoke.ps1"   # 9 项限时自检，约 50 秒
+```
+
+- DSH 只发现一层：`<root>/<name>/SKILL.md`。项目根（100/200）优先于 `%DSH_HOME%\skills`（400），再优先于 `~/.agents/skills`（500）——所以本适配层会自动遮蔽那里的 v1，不需要删共享目录。
+- 原版的 `/harness:*` 命令与 hooks 在 DSH 没有对应落点：六个动作变成 `run.ps1 <action>` 参数，状态注入与交接提醒变成 SKILL.md 的显式契约（进入 harness 项目先跑 `status`，收尾跑 `handoff`）。
+- Windows 上 PATH 通常没有 bash。`run.ps1` 自动找 Git Bash、规范路径、转发参数并兜超时；缺了路径规范化，MSYS 会把工作区误判为已变更。
+- 适配层不纳入仓库的四小时全量验证链，改用限时冒烟；细节与取舍见 `adapters/dsh/README.md`。
 
 ## 7 个子系统
 

@@ -199,7 +199,7 @@ if [ "$MODE" = "--repo" ]; then
       '{
         hooks: {
           SessionStart: [{hooks: [{type:"command", command:$ss_p, commandWindows:$ss_w, timeout:5}]}],
-          Stop:         [{hooks: [{type:"command", command:$stop_p, commandWindows:$stop_w, timeout:5}]}],
+          Stop:         [{hooks: [{type:"command", command:$stop_p, commandWindows:$stop_w, timeout:15}]}],
           PreToolUse:   [{hooks: [{type:"command", command:$ptu_p, commandWindows:$ptu_w, timeout:5}]}]
         }
       }' > "$HOOKS_JSON"
@@ -229,7 +229,7 @@ data = {
       "type": "command",
       "command": os.environ["STOP_POSIX"],
       "commandWindows": os.environ["STOP_WIN"],
-      "timeout": 5,
+      "timeout": 15,
     }]}],
     "PreToolUse": [{"hooks": [{
       "type": "command",
@@ -685,7 +685,7 @@ if [ "$MODE" = "--user" ]; then
     printf 'type = "command"\n'
     printf 'command = "bash \\"%s/adapters/codex/hooks/stop-handoff.sh\\""\n' "$POSIX_SOURCE"
     printf 'commandWindows = "%s\\\\adapters\\\\codex\\\\hooks\\\\stop-handoff.cmd"\n' "$WIN_SOURCE_ESC"
-    printf 'timeout = 5\n'
+    printf 'timeout = 15\n'
     printf '\n'
     printf '[[hooks.PreToolUse]]\n'
     printf '[[hooks.PreToolUse.hooks]]\n'

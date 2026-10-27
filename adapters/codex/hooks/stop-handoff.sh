@@ -64,6 +64,8 @@ if [ ! -f "feature_list.json" ]; then
 fi
 
 # ---- Render handoff warnings via core (plain text, no protocol) ----------------
+# core bounds its run-log validation by wall clock (HC_HANDOFF_BUDGET_SEC,
+# default 3s), so this hook finishes inside the host budget.
 WARNINGS_TEXT="$(sr_handoff_warnings "$(pwd)" || true)"
 if [ -z "$WARNINGS_TEXT" ]; then
   _log "stop-handoff: clean — no warnings to surface"

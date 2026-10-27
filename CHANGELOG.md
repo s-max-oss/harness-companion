@@ -3,6 +3,79 @@
 All notable changes to harness-companion are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — DSH host adapter + host hook repair
+
+### Added
+
+- `adapters/dsh/` — DeepSeek Harness adapter, the third host next to Claude
+  Code and Codex: a DSH entry `SKILL.md`, `run.ps1` (Git Bash resolution, argv
+  passthrough, Windows→POSIX path normalization, timeout), `install.ps1` /
+  `uninstall.ps1` with receipt-based identity checks, `smoke.ps1` (nine bounded
+  checks, ~50 s), and two references (execution recipes, host mapping).
+- Installs to `%DSH_HOME%\skills\harness-companion` (DSH root rank 400), which
+  shadows a v1 copy under `~/.agents/skills` (rank 500) without deleting it.
+
+### Changed
+
+- README documents the third host. DSH exposes no skill lifecycle hooks, so
+  SessionStart status injection and Stop handoff reminders become an explicit
+  contract in the DSH `SKILL.md`; `/harness:*` commands become `run.ps1` actions.
+- Stop hooks bound run-log validation by wall clock instead of skipping it:
+  `HC_HANDOFF_BUDGET_SEC` (default 3 s) is checked before each passing feature,
+  so a normal project still gets full validation (a fixture costs ~0.2 s) while
+  a project with large run logs reports checked/truncated counts instead of
+  timing out. The Claude Code Stop hook timeout rises from 5 s to 15 s on fresh
+  and upgraded installs; Codex Stop hooks use 15 s as well.
+
+### Fixed
+
+- `adapters/claude-code/install.sh` refuses to register hooks when the copied
+  tree is incomplete — missing `SKILL.md`, `core/lib/status-renderer.sh`,
+  `core/lib/validate-run-log.sh`, or either hook script exits 1 before
+  `settings.json` is touched. A truncated archive previously produced a
+  "successful" install whose hooks pointed at nonexistent files, failing on
+  every session.
+- Installing over an older layout now prunes leftover `scripts/hooks/*` entries
+  from `settings.json`, so Claude runs exactly one SessionStart and one Stop
+  hook. Matching uses fixed path suffixes because MSYS rewrites POSIX-looking
+  argv and environment values into Windows form before native `jq` / `python`
+  see them, so passing the install path as an argument never matched.
+- Windows path arguments are normalized to forward slashes before the DSH
+  launcher invokes bash. MSYS `sha256sum` switches to binary mode for backslash
+  paths and prefixes the digest with `\`, and the workspace fingerprint cannot
+  strip the project prefix — both surfaced as false `config_changed_since_run` /
+  `workspace_changed_since_verification` refusals.
+- `core/lib/status-renderer.sh` joins non-empty blocks with newlines. Command
+  substitution strips trailing newlines, so the injected status and the Stop
+  message previously arrived as one run-on line
+  (`...leave them for the user.[!!] Features still in_progress...`).
+- `core/lib/status-renderer.sh` strips CR from jq output. `jq.exe` under MSYS
+  writes CRLF, so a run id read through `read` carried a trailing `\r`; the
+  resulting NDJSON path never existed and every passing feature was reported as
+  `run_log_missing`.
+
+### Validation
+
+- `tests/adapters/test-claude-code-contract.sh`: **149 / 149 PASS** (~135 s),
+  including the G10 stale/missing/corrupt run-log assertions and the G9
+  `--project` install round-trip.
+- `adapters/dsh/smoke.ps1`: 9 / 9 PASS in ~50 s, in both the source tree and
+  the installed layout. Covers bash resolution, DSH frontmatter, status,
+  feature listing, state machine, NDJSON evidence, the passing evidence gate,
+  WIP=1, and the consent boundary.
+- Claude Code hooks, invoked the way the host does (event JSON on stdin):
+  SessionStart returns valid JSON with a populated `additionalContext`; Stop
+  returns valid JSON with `systemMessage` in ~8.5 s on this repository
+  (8 passing features, one stale fingerprint check, then a 3 s budget
+  truncation note) and ~0.4 s on the contract fixtures. settings.json holds
+  exactly one hook per event with a 15 s Stop timeout, and a second install
+  reports idempotent.
+- Installer integrity gate, negative test: a source tree without `SKILL.md`
+  exits 1 with `install is incomplete — refusing to register hooks` and writes
+  no `settings.json`.
+- The repository's full suite (`bash tests/run-all.sh`, 4 h timeout) was
+  deliberately not used as the gate for these adapter changes.
+
 ## [2.0.0-rc.3] — 2026-09-09 — Guided Conversational Initialization
 
 Third release candidate. Adds a user-visible conversational `/harness:init`

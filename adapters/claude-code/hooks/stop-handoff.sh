@@ -91,6 +91,9 @@ export HC_SESSION_BASELINE_SHA
 HC_SESSION_BASELINE_SHA="$(hc_baseline_read_commit "$(pwd)" 2>/dev/null || true)"
 
 # ---- Render handoff warnings via core (plain text, no protocol) --------------
+# core/lib/status-renderer.sh bounds its run-log validation by wall clock
+# (HC_HANDOFF_BUDGET_SEC, default 3s) so this hook finishes inside the host
+# budget even when a project has large run logs or a large runtime manifest.
 MESSAGE="$(sr_handoff_warnings "$(pwd)")"
 
 if [ -z "$MESSAGE" ]; then

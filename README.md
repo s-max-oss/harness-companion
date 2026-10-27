@@ -117,6 +117,16 @@ The uninstall script:
 |---------|-------------|-------------|-------|
 | **Claude Code** | SessionStart, Stop | `~/.claude/skills/harness-companion/` | Default. `hookSpecificOutput.additionalContext` for status; `systemMessage` for handoff warnings. |
 | **Codex** | SessionStart, Stop, PreToolUse | `<project>/.codex/` or `~/.codex/` | Code-complete, runtime E2E pending. PreToolUse is permissive (policy not enabled). Plugin marketplace also supported via `.codex-plugin/plugin.json`. |
+| **DSH** | none (host has no skill lifecycle hooks) | `%DSH_HOME%\skills\harness-companion\` | Explicit contract in SKILL.md replaces status injection and handoff reminders. On Windows `dsh/run.ps1` resolves Git Bash. |
+
+### DSH (DeepSeek Harness)
+
+```powershell
+./adapters/dsh/install.ps1                                  # installs into %DSH_HOME%\skills
+& "$env:DSH_HOME\skills\harness-companion\dsh\smoke.ps1"    # nine bounded checks, ~50s
+```
+
+DSH discovers exactly one level (`<root>/<name>/SKILL.md`) and merges roots by rank, so this install (rank 400) shadows any v1 copy under `~/.agents/skills` (rank 500) without deleting shared state. The `/harness:*` commands become `run.ps1 <action>`, and the two hooks become an explicit contract: run `status` when entering a harness project, run `handoff` when wrapping up. The adapter owns host mapping only — bash lookup, argv forwarding, path normalization, timeout, install/verify — and deliberately stays out of the repository's four-hour verification chain; see `adapters/dsh/README.md` for the tradeoff.
 
 ## The 7 Subsystems
 

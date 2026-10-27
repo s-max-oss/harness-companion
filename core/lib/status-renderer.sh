@@ -66,10 +66,11 @@ _sr_feature_counts() {
     return 0
   fi
   local total passing in_progress unverified
-  total="$(jq '.features | length' "$fl" 2>/dev/null || echo 0)"
-  passing="$(jq '[.features[] | select(.status=="passing")] | length' "$fl" 2>/dev/null || echo 0)"
-  in_progress="$(jq '[.features[] | select(.status=="in_progress")] | length' "$fl" 2>/dev/null || echo 0)"
-  unverified="$(jq '[.features[] | select(.status=="unverified")] | length' "$fl" 2>/dev/null || echo 0)"
+  # jq.exe under MSYS writes CRLF; strip CR so consumers see exact values.
+  total="$(jq '.features | length' "$fl" 2>/dev/null | tr -d '\r' || echo 0)"
+  passing="$(jq '[.features[] | select(.status=="passing")] | length' "$fl" 2>/dev/null | tr -d '\r' || echo 0)"
+  in_progress="$(jq '[.features[] | select(.status=="in_progress")] | length' "$fl" 2>/dev/null | tr -d '\r' || echo 0)"
+  unverified="$(jq '[.features[] | select(.status=="unverified")] | length' "$fl" 2>/dev/null | tr -d '\r' || echo 0)"
   printf '%s %s %s %s' "$total" "$passing" "$in_progress" "$unverified"
 }
 
@@ -94,7 +95,7 @@ _sr_revision_line() {
   [ ! -f "$dir/feature_list.json" ] && return 0
   command -v jq >/dev/null 2>&1 || return 0
   local rev
-  rev="$(jq -r '.revision // 0' "$dir/feature_list.json" 2>/dev/null || echo 0)"
+  rev="$(jq -r '.revision // 0' "$dir/feature_list.json" 2>/dev/null | tr -d '\r' || echo 0)"
   printf -- '- [i] Registry revision: %s\n' "$rev"
 }
 
@@ -124,7 +125,7 @@ _sr_passing_no_evidence_line() {
             | select((.status=="passing" or .status=="unverified")
                      and (((.evidence_associations // []) | length) == 0))]
             | length' \
-    "$dir/feature_list.json" 2>/dev/null || echo 0)"
+    "$dir/feature_list.json" 2>/dev/null | tr -d '\r' || echo 0)"
   if [ "$bad" -gt 0 ] 2>/dev/null; then
     printf -- '- [!!] %s passing/unverified features have NO evidence_associations\n' "$bad"
   fi
@@ -151,7 +152,7 @@ _sr_dangling_in_progress_line() {
   command -v jq >/dev/null 2>&1 || return 0
   local list
   list="$(jq -r '.features[] | select(.status=="in_progress") | "  - \(.id): \(.title)"' \
-    "$dir/feature_list.json" 2>/dev/null || true)"
+    "$dir/feature_list.json" 2>/dev/null | tr -d '\r' || true)"
   if [ -n "$list" ]; then
     printf '[!!] Features still in_progress - update their status before stopping:\n%s\n' "$list"
   fi
@@ -169,7 +170,7 @@ _sr_passing_unverified_no_evidence_block() {
                  | select((.status=="passing" or .status=="unverified")
                           and (((.evidence_associations // []) | length) == 0))
                  | "  - \(.id): \(.title)"' \
-    "$dir/feature_list.json" 2>/dev/null || true)"
+    "$dir/feature_list.json" 2>/dev/null | tr -d '\r' || true)"
   if [ -n "$list" ]; then
     printf '[!!] These features are marked passing/unverified but have no canonical evidence_associations:\n%s\n' "$list"
   fi
@@ -199,13 +200,34 @@ _sr_run_log_issue_block() {
                  | ($assocs | last) as $a
                  | select($a != null)
                  | "\($fid)\t\($a.run_id)"' \
-    "$dir/feature_list.json" 2>/dev/null || true)"
+    "$dir/feature_list.json" 2>/dev/null | tr -d '\r' || true)"
   [ -z "$pairs" ] && return 0
+
+  # Bounded work for latency-sensitive callers (Stop hooks). A single
+  # validate_run_log can take seconds when the project's run logs or runtime
+  # manifest are large, and a Stop hook must finish inside the host budget.
+  # The budget is checked BEFORE each feature, so the worst case is one slow
+  # call plus the completed ones; the remaining features are reported as
+  # truncated instead of silently dropped. HC_HANDOFF_BUDGET_SEC=0 disables it.
+  local budget="${HC_HANDOFF_BUDGET_SEC:-3}"
+  case "$budget" in ''|*[!0-9]*) budget=3 ;; esac
+  local total checked=0 start now elapsed
+  total="$(printf '%s\n' "$pairs" | wc -l | tr -d ' ')"
+  start="$(date +%s 2>/dev/null || echo 0)"
+  local truncated=0
 
   local any_issue=0
   local out=""
   while IFS=$'\t' read -r fid rid; do
     [ -z "$fid" ] || [ -z "$rid" ] && continue
+    if [ "$budget" -gt 0 ]; then
+      now="$(date +%s 2>/dev/null || echo 0)"
+      elapsed=$((now - start))
+      if [ "$elapsed" -ge "$budget" ]; then
+        truncated=1
+        break
+      fi
+    fi
     local log_path="$dir/.harness/logs/runs/${rid}.ndjson"
     local issue=""
     if [ ! -f "$log_path" ]; then
@@ -214,7 +236,7 @@ _sr_run_log_issue_block() {
       local validation
       if ! validation="$(validate_run_log "$rid" "$dir" 2>/dev/null)"; then
         local reason
-        reason="$(printf '%s' "$validation" | jq -r '.reason // "invalid"')"
+        reason="$(printf '%s' "$validation" | jq -r '.reason // "invalid"' 2>/dev/null | tr -d '\r')"
         issue="run_log_invalid ($reason)"
       elif command -v ev_is_stale_by_fingerprint >/dev/null 2>&1; then
         if ev_is_stale_by_fingerprint "$rid" "$dir" 2>/dev/null; then
@@ -226,6 +248,7 @@ _sr_run_log_issue_block() {
         fi
       fi
     fi
+    checked=$((checked + 1))
     if [ -n "$issue" ]; then
       out+="  - $fid (run $rid): $issue"$'\n'
       any_issue=1
@@ -234,6 +257,10 @@ _sr_run_log_issue_block() {
 
   if [ "$any_issue" = "1" ]; then
     printf '[!!] Some passing features have run-log issues (validate via core/lib/validate-run-log.sh + staleness.sh):\n%s' "$out"
+  fi
+  if [ "$truncated" = "1" ]; then
+    printf '[i] Run-log checks stopped after %ss (%s of %s checked). Run `/harness:handoff` for the full validation.\n' \
+      "$budget" "$checked" "$total"
   fi
 }
 
@@ -250,38 +277,46 @@ _sr_checklist_reminder_line() {
 # Public API
 # ============================================================
 
+# Join non-empty plain-text blocks with exactly one newline.
+# Command substitution strips trailing newlines, so concatenating helper output
+# directly produced one run-on line in the injected context and the Stop
+# message ("...leave them for the user.[!!] Features still in_progress...").
+_sr_join_blocks() {
+  local out="" block
+  for block in "$@"; do
+    [ -z "$block" ] && continue
+    if [ -n "$out" ]; then out+=$'\n'; fi
+    out+="$block"
+  done
+  printf '%s' "$out"
+}
+
 sr_status_text() {
   local dir="${1:-.}"
   [ ! -d "$dir" ] && return 0
   [ ! -f "$dir/feature_list.json" ] && return 0
 
-  local out
-  out="$(printf '## Harness Status - %s\n\n' "$(basename "$(cd "$dir" && pwd)")")"
+  local header body
+  header="## Harness Status - $(basename "$(cd "$dir" && pwd)")"
 
-  out+="$(_sr_file_line "$dir" "AGENTS.md" "Knowledge")"
-  out+="$(_sr_file_line "$dir" "CLAUDE.md" "Knowledge")"
-  out+="$(_sr_file_line "$dir" "init.sh" "Environment")"
-  out+="$(_sr_file_line "$dir" ".harness/config.json" "Verification config" warn)"
-  out+="$(_sr_file_line "$dir" "feature_list.json" "Scope")"
+  body="$(_sr_join_blocks \
+    "$(_sr_file_line "$dir" "AGENTS.md" "Knowledge")" \
+    "$(_sr_file_line "$dir" "CLAUDE.md" "Knowledge")" \
+    "$(_sr_file_line "$dir" "init.sh" "Environment")" \
+    "$(_sr_file_line "$dir" ".harness/config.json" "Verification config" warn)" \
+    "$(_sr_file_line "$dir" "feature_list.json" "Scope")" \
+    "$(_sr_file_line "$dir" "claude-progress.md" "Progress" optional)" \
+    "$(_sr_file_line "$dir" "session-handoff.md" "Handoff" optional)" \
+    "$(_sr_file_line "$dir" "clean-state-checklist.md" "Handoff (checklist)" optional)" \
+    "$(_sr_file_line "$dir" "checklist.sh" "Handoff (checklist.sh)" optional)" \
+    "$(_sr_revision_line "$dir")" \
+    "$(_sr_feature_stats_line "$dir")" \
+    "$(_sr_wip_violation_line "$dir")" \
+    "$(_sr_passing_no_evidence_line "$dir")")"
 
-  local pair f label
-  for pair in "claude-progress.md:Progress" \
-              "session-handoff.md:Handoff" \
-              "clean-state-checklist.md:Handoff (checklist)" \
-              "checklist.sh:Handoff (checklist.sh)"; do
-    f="${pair%:*}"
-    label="${pair#*:}"
-    out+="$(_sr_file_line "$dir" "$f" "$label" optional)"
-  done
+  [ -z "$body" ] && return 0
 
-  out+="$(_sr_revision_line "$dir")"
-  out+="$(_sr_feature_stats_line "$dir")"
-  out+="$(_sr_wip_violation_line "$dir")"
-  out+="$(_sr_passing_no_evidence_line "$dir")"
-
-  out+=$'\nUse `/harness:status` for the detailed dashboard.\n'
-
-  printf '%s' "$out"
+  printf '%s\n\n%s\n\nUse `/harness:status` for the detailed dashboard.\n' "$header" "$body"
 }
 
 sr_handoff_warnings() {
@@ -289,13 +324,15 @@ sr_handoff_warnings() {
   [ ! -d "$dir" ] && return 0
   [ ! -f "$dir/feature_list.json" ] && return 0
 
-  local out
+  local joined
+  local -a blocks=()
+  blocks+=( "$(_sr_uncommitted_files_line "$dir")" )
+  blocks+=( "$(_sr_dangling_in_progress_line "$dir")" )
+  blocks+=( "$(_sr_passing_unverified_no_evidence_block "$dir")" )
+  blocks+=( "$(_sr_run_log_issue_block "$dir")" )
+  blocks+=( "$(_sr_checklist_reminder_line "$dir")" )
 
-  out+="$(_sr_uncommitted_files_line "$dir")"
-  out+="$(_sr_dangling_in_progress_line "$dir")"
-  out+="$(_sr_passing_unverified_no_evidence_block "$dir")"
-  out+="$(_sr_run_log_issue_block "$dir")"
-  out+="$(_sr_checklist_reminder_line "$dir")"
-
-  printf '%s' "$out"
+  joined="$(_sr_join_blocks "${blocks[@]}")"
+  [ -z "$joined" ] && return 0
+  printf '%s\n' "$joined"
 }

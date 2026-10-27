@@ -5,14 +5,13 @@
 Before writing any code, complete these steps in order:
 
 1. **Read this file completely.** It defines the boundaries and conventions for this project.
-2. **Read `CLAUDE.md`** for the quick reference if using Claude Code.
-3. **Read the design specs in `docs/superpowers/specs/`** — they are the product contract. `2026-08-04-harness-init-guided-onboarding.md` (frozen executor spec) and `2026-08-05-rc3-conversational-layer-addendum.md` (rc.3 conversational dialog layer) jointly define the v2.0.0-rc.3 deliverable.
-4. **Run `bash init.sh`** to verify the project initializes cleanly. Exit codes:
+2. **Read the design specs in `docs/superpowers/specs/`** — they are the product contract. `2026-08-04-harness-init-guided-onboarding.md` (frozen executor spec) and `2026-08-05-rc3-conversational-layer-addendum.md` (rc.3 conversational dialog layer) jointly define the v2.0.0-rc.3 deliverable.
+3. **Run `bash init.sh`** to verify the project initializes cleanly. Exit codes:
    - `0` — all checks pass AND every Phase 1 start condition is met → "Ready to start work."
    - `1` — init/validator failure (syntax, config, run log, registry, status, WIP, staleness, snapshot/digest/immutable integrity). Fix the failure before continuing.
    - `2` — checks pass but Phase 1 start conditions are NOT met → NOT ready, fail-closed. Resolve the listed unmet conditions.
    `init.sh` fails closed: it never prints "Ready to start work." while any start condition is unmet. The master-clean start condition is verified via Git refs (local `master` == `origin/master`) — there is no `HARNESS_MASTER_CLEAN_CONFIRMED` shortcut; the GitHub pre-release keeps a separate manual in-session authorization gate.
-5. **Read `feature_list.json`** to see the current state of all features.
+4. **Read `feature_list.json`** to see the current state of all features.
 
 ## Project Context
 
@@ -42,8 +41,10 @@ The `docs/superpowers/specs/` directory is the design contract:
   `harness-status.sh`, `harness-audit.sh`.
 - `scripts/` — thin wrappers plus the executor `harness-init.sh` (F-CONV-06 extends it).
 - `templates/` — output file templates used by the executor.
-- `adapters/` — host adapters (`claude-code/`, `codex/`).
-- `tests/` — shell test suites (`tests/core/`, `tests/adapters/`, `tests/bootstrap/`, `tests/golden/`, `tests/migration/`, `tests/release/`).
+- `dsh/` — the only host runtime: launcher, installer, smoke, DSH references.
+  Business semantics stay in `core/`; this layer only maps the host protocol.
+- `tests/` — shell test suites (`tests/core/`, `tests/init/`, `tests/release/`,
+  `tests/golden/`, `tests/fixtures/`).
 
 ## Conventions
 

@@ -11,7 +11,7 @@
 | SessionStart 状态注入 | hook + `hookSpecificOutput.additionalContext` | 无 hook。`SKILL.md` 的「会话边界」契约：进入 harness 项目先跑一次 `status` |
 | Stop 交接提醒 | hook + `systemMessage` | 无 hook。「收尾/交接」时跑 `handoff` |
 | PreToolUse | Codex hook（本来就 permissive） | 丢弃 |
-| 安装器 | `adapters/{claude-code,codex}/install.sh` | `adapters/dsh/install.ps1`（复制到 `%DSH_HOME%\skills`） |
+| 安装器 | `adapters/{claude-code,codex}/install.sh`（已退役） | `dsh/install.ps1`（复制到 `%DSH_HOME%\skills`） |
 | 安装收据 | `install-receipt.json`（含 sha256 清单、升级历史） | 精简收据：身份 + 版本 + 来源 + 时间。够卸载校验用，不做全量哈希 |
 | 业务语义 | `core/` | **不变**，原样复制 |
 | 宿主协议映射 | `adapters/*/hooks/*.sh` | `dsh/run.ps1`（bash 解析 + argv 透传 + 超时） |
@@ -36,7 +36,7 @@ DSH 的自定义斜杠命令需要插件 `ctx.commands.register()`。技能本�
 
 ### 全量验证链
 
-原版 DoD 要求 `core/harness-verify.sh` 产出 `overall_result=passed` 的证据。本仓库自己的配置是 `bash tests/run-all.sh`、`timeout_seconds: 14400`。DSH 适配层**不纳入**这条链：交付用 `adapters/dsh/smoke.ps1`（限时、只读、覆盖入口与关键动作）。
+原版 DoD 要求 `core/harness-verify.sh` 产出 `overall_result=passed` 的证据。本仓库自己的配置是 `bash tests/run-all.sh`、`timeout_seconds: 14400`。DSH 适配层**不纳入**这条链：交付用 `dsh/smoke.ps1`（限时、只读、覆盖入口与关键动作）。
 
 取舍理由：适配层是新宿主映射，不该被主仓库的全量套件绑架；等它稳定运行后再补登记 feature 与证据更合理。
 
@@ -97,10 +97,10 @@ DSH 只扫一层：`<root>/<name>/SKILL.md`。本机相关根与优先级（小�
 
 ## 6. 分层边界（硬约束）
 
-- `adapters/dsh/` **只做宿主映射**：找 bash、转发参数、超时、安装、自检。
+- `dsh/` **只做宿主映射**：找 bash、转发参数、超时、安装、自检。
 - 不许出现业务判定：WIP 检测、证据比对、状态机、`fingerprint` 一律留在 `core/`。
 - `SKILL.md` 是对话层，不是语义层：它规定"什么时候跑哪个动作"，不重新实现动作。
-- 检查方式：`adapters/dsh/` 里出现 `status=="passing"` 判定、`evidence_associations` 解析、状态迁移表之类的代码，就是越界。
+- 检查方式：`dsh/` 里出现 `status=="passing"` 判定、`evidence_associations` 解析、状态迁移表之类的代码，就是越界。
 
 ## 7. 版本与升级
 

@@ -13,7 +13,7 @@ Get-Command bash      # 本机：不存在
 但 Git for Windows 自带 Git Bash（本机实测 `C:\Program Files\Git\bin\bash.exe`，版本 5.2.37）。`run.ps1` 做四件事：
 
 1. 找 bash：`$env:DSH_BASH` → PATH 里的 `bash` → `%ProgramFiles%\Git\bin\bash.exe` → `%ProgramFiles(x86)%\...` → `%LOCALAPPDATA%\Programs\Git\bin\bash.exe` → `C:\Program Files\Git\usr\bin\bash.exe` → `/bin/bash`。第一个真实可执行的胜出（用 `--version` 探活，不认 stub）。
-2. 定位 skill 根：从脚本位置向上找含 `core/harness-status.sh` 的目录。源代码树（`adapters/dsh/`）和安装后（`<skill>/dsh/`）两种布局都成立。
+2. 定位 skill 根：从脚本位置向上找含 `core/harness-status.sh` 的目录。源代码树（`dsh/`）和安装后（`<skill>/dsh/`）两种布局都成立。
 3. 转发 argv：`& $bash $script @rest`，不经 `cmd.exe`、不做二次引号处理。带空格、带中文、带 `--flag=value` 的参数都安全。
 4. 超时：默认 300 秒，超时杀进程并退出 124，不会让会话挂死。
 

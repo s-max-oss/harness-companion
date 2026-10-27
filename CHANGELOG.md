@@ -3,6 +3,41 @@
 All notable changes to harness-companion are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — DSH-only skill (breaking)
+
+The skill now targets DeepSeek Harness exclusively. Claude Code and Codex keep
+working as tools; they simply no longer integrate this skill.
+
+### Changed
+
+- The DSH runtime moved from `adapters/dsh/` to `dsh/`. The root `SKILL.md` is
+  the DSH entry; `dsh/install.ps1` copies it and the shared `core/`, `scripts/`,
+  `templates/`, and `references/` into `<DSH_HOME>/skills/harness-companion`.
+- `CLAUDE.md` was removed; `AGENTS.md` is the single operating manual.
+
+### Removed
+
+- `adapters/claude-code/`, `adapters/codex/`, their hook scripts and installers,
+  `.claude-plugin/`, `.codex-plugin/`, the top-level `hooks/` registry,
+  `scripts/hooks/`, `install.sh`, and `uninstall.sh`.
+- Contract, lifecycle, install-mode, migration, and release-packaging suites
+  that existed only to validate those hosts, plus the adapter-specific CI
+  workflow.
+
+### Added
+
+- `tests/core/test-status-renderer.sh` keeps the evidence-rendering coverage
+  that lived in the retired adapter suite (17 assertions): verified evidence,
+  missing/corrupted run logs, stale fingerprint, missing associations, dangling
+  `in_progress`, newline-joined blocks, and CR-free output. Fixtures are built
+  at runtime so the test does not depend on committed absolute paths.
+
+### Validation
+
+- `tests/core/test-status-renderer.sh`: 17 / 17 PASS.
+- `dsh/smoke.ps1`: 9 / 9 PASS from the source tree and from an installed copy;
+  install → smoke → uninstall round-trip verified.
+
 ## [Unreleased] — DSH host adapter + host hook repair
 
 ### Added

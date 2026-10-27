@@ -39,7 +39,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $AdapterDir = $PSScriptRoot
-$RepoRoot = Split-Path -Parent (Split-Path -Parent $AdapterDir)
+$RepoRoot = Split-Path -Parent $AdapterDir
 
 function Fail([string]$Message) {
   Write-Output "[ERROR] $Message"
@@ -52,7 +52,7 @@ function Write-Step([string]$Message) {
 
 # ---- source validation --------------------------------------------------------
 $required = @(
-  (Join-Path $AdapterDir 'SKILL.md'),
+  (Join-Path $RepoRoot 'SKILL.md'),
   (Join-Path $AdapterDir 'run.ps1'),
   (Join-Path $RepoRoot 'core/harness-status.sh'),
   (Join-Path $RepoRoot 'scripts/harness-init.sh'),
@@ -135,7 +135,7 @@ function Copy-Tree([string]$Source, [string]$Destination) {
 }
 
 Write-Output '[2/5] Copying skill entry + references'
-Copy-Item -LiteralPath (Join-Path $AdapterDir 'SKILL.md') -Destination (Join-Path $Target 'SKILL.md') -Force
+Copy-Item -LiteralPath (Join-Path $RepoRoot 'SKILL.md') -Destination (Join-Path $Target 'SKILL.md') -Force
 $referencesTarget = Join-Path $Target 'references'
 New-Item -ItemType Directory -Force -Path $referencesTarget | Out-Null
 Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'references') -File -Filter '*.md' | ForEach-Object {

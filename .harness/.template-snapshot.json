@@ -1,0 +1,31 @@
+{
+  "captured_from_git_rev": "7ba16e74a28e40eeec0aa9a250ac2505dd0b570d",
+  "schema_version": 1,
+  "source_version": "2.0.0-rc.2",
+  "templates": {
+    ".harness/config.json": {
+      "sha256": "682ccdd1908b3674cbcf4da96032e28ab5b50bdb320a1ad3b6d396c2d48684ff",
+      "source": "templates/.harness/config.json.generic.example"
+    },
+    "AGENTS.md": {
+      "sha256": "6e787f7a6167a18110dfb9bd1462836e36c5cea472da0271dfe915bdbe634d69",
+      "source": "templates/AGENTS.md"
+    },
+    "CLAUDE.md": {
+      "sha256": "c204933931aa87a9db52ab4da9a06bb50c1453de526cb19bae5b5f142425ace4",
+      "source": "templates/CLAUDE.md"
+    },
+    "claude-progress.md": {
+      "sha256": "81fb98253ec31ff362580371994149e1c21027715bf7c162bbe3e1c163e89ced",
+      "source": "templates/claude-progress.md"
+    },
+    "feature_list.json": {
+      "sha256": "a94577be4adfa542c5ea008ff77945bca79b3132654ccc1286286dafd3b2b1f2",
+      "source": "templates/feature_list.json"
+    },
+    "init.sh": {
+      "sha256": "4e85bfa808dce352d09de2481c1fd7fcfab0b746ea1fe4670d6c7ae7376f9f36",
+      "source": "templates/env-init.sh"
+    }
+  }
+}

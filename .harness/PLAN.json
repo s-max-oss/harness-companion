@@ -1,0 +1,233 @@
+{
+  "version": "2.0.0-rc.3",
+  "plan_scope": "v2.0.0-rc.3 — guided conversational Harness construction as ONE closed loop: frozen onboarding executor spec (2026-08-04-harness-init-guided-onboarding.md) + rc.3 conversational layer addendum (2026-08-05-rc3-conversational-layer-addendum.md) jointly constitute rc.3's complete product contract. Executor, dialog layer, shell tests, forward eval, and acceptance (F-CONV-01..09) are delivered together. v2.1+ is deferred until v2.0.0 is stable and is NOT pre-seeded here.",
+  "fail_closed_start_conditions": [
+    "rc.2 merged to master (distribution/rc2-hardening → master)",
+    "rc.2 tag cut (v2.0.0-rc.2)",
+    "rc.2 GitHub pre-release created (release gate)",
+    "master clean (git checkout master && git pull, no local divergences)",
+    "target branch 'rc3-guided-conversational-init' created from master HEAD"
+  ],
+  "start_condition_rule": "If ANY start condition is unmet at Phase 1 entry, the Agent fails closed: reports the unmet precondition with diagnostic, writes nothing, and does not begin Phase 1. rc.2 → rc.3 ship order is fixed.",
+  "branch_gate": {
+    "target_branch": "rc3-guided-conversational-init",
+    "purpose": "Machine-readable form of start condition 5, enforced by core/lib/branch-gate.sh on EVERY entry. First entry also requires the current branch tip == local master tip; later entries require the recorded branch_base_sha to remain an ancestor of HEAD (forward advancement only, no re-baseline). The state file .harness/branch-gate.json is recorded once by a successful init and is excluded from the workspace fingerprint + classified mutable in the dirty-worktree manifest (P0-2)."
+  },
+  "force_stop_at": "F-CONV-09",
+  "force_stop_rule": "F-CONV-09 (Phase 5 acceptance) is the SOLE user phase-stop gate in rc.3. After the final Reviewer PASS on the acceptance package, the Agent presents the complete rc.3 evidence and stops. v2.1+ does NOT auto-start. User must explicitly authorize any further work. Reviewer gates remain INTERNAL progress gates — they gate phase transitions, not user phase-stop.",
+  "phases": [
+    {
+      "phase": 1,
+      "title": "Foundation",
+      "features": ["F-CONV-04", "F-CONV-05", "F-CONV-06"],
+      "order": "sequential",
+      "wip": 1,
+      "reviewer_gate": {
+        "type": "independent_sub_agent",
+        "inputs": ["spec", "diff_base_sha", "diff_head_sha", "shell_test_logs", "raw_artifacts"],
+        "excluded_from_context": ["main_agent_conclusions", "main_agent_self_assessment", "conversation_history"],
+        "on_pass": "auto_continue_to_phase_2",
+        "on_fail": "fix_and_resubmit",
+        "on_unavailable": "blocker"
+      },
+      "feature_review_gate": {
+        "per_feature": true,
+        "contract_ref": "reviewer_contract.per_feature_gate",
+        "on_pass": "feature closes; next feature in Phase 1 proceeds (F-CONV-04→05→06)",
+        "on_fail": "fix_and_resubmit",
+        "on_unavailable": "blocker"
+      }
+    },
+    {
+      "phase": 2,
+      "title": "Dialog",
+      "features": ["F-CONV-01", "F-CONV-02", "F-CONV-03"],
+      "order": "sequential",
+      "wip": 1,
+      "reviewer_gate": {
+        "type": "independent_sub_agent",
+        "inputs": ["spec", "diff_base_sha", "diff_head_sha", "shell_test_logs", "raw_artifacts"],
+        "excluded_from_context": ["main_agent_conclusions", "main_agent_self_assessment", "conversation_history"],
+        "on_pass": "auto_continue_to_phase_3",
+        "on_fail": "fix_and_resubmit",
+        "on_unavailable": "blocker"
+      },
+      "feature_review_gate": {
+        "per_feature": true,
+        "contract_ref": "reviewer_contract.per_feature_gate",
+        "on_pass": "feature closes; next feature in Phase 2 proceeds (F-CONV-01→02→03)",
+        "on_fail": "fix_and_resubmit",
+        "on_unavailable": "blocker"
+      }
+    },
+    {
+      "phase": 3,
+      "title": "Shell tests",
+      "features": ["F-CONV-07"],
+      "order": "single",
+      "wip": 1,
+      "reviewer_gate": {
+        "type": "independent_sub_agent",
+        "inputs": ["spec", "diff_base_sha", "diff_head_sha", "shell_test_logs", "raw_artifacts"],
+        "excluded_from_context": ["main_agent_conclusions", "main_agent_self_assessment", "conversation_history"],
+        "on_pass": "auto_continue_to_phase_4",
+        "on_fail": "fix_and_resubmit",
+        "on_unavailable": "blocker"
+      },
+      "feature_review_gate": {
+        "per_feature": true,
+        "contract_ref": "reviewer_contract.per_feature_gate",
+        "on_pass": "feature closes; proceed to Phase 3 cumulative reviewer_gate",
+        "on_fail": "fix_and_resubmit",
+        "on_unavailable": "blocker"
+      }
+    },
+    {
+      "phase": 4,
+      "title": "Forward eval",
+      "features": ["F-CONV-08"],
+      "order": "single",
+      "wip": 1,
+      "reviewer_gate": {
+        "type": "independent_sub_agent",
+        "inputs": ["spec", "diff_base_sha", "diff_head_sha", "eval_results", "transcripts", "raw_artifacts"],
+        "excluded_from_context": ["main_agent_conclusions", "main_agent_self_assessment", "conversation_history"],
+        "on_pass": "auto_continue_to_phase_5",
+        "on_fail": "fix_and_resubmit",
+        "on_unavailable": "blocker"
+      },
+      "feature_review_gate": {
+        "per_feature": true,
+        "contract_ref": "reviewer_contract.per_feature_gate",
+        "on_pass": "feature closes; proceed to Phase 4 cumulative reviewer_gate",
+        "on_fail": "fix_and_resubmit",
+        "on_unavailable": "blocker"
+      }
+    },
+    {
+      "phase": 5,
+      "title": "Acceptance",
+      "features": ["F-CONV-09"],
+      "order": "single",
+      "wip": 1,
+      "reviewer_gate": {
+        "type": "independent_sub_agent",
+        "inputs": ["spec", "all_phase_diffs", "all_test_logs", "all_eval_results", "acceptance_package"],
+        "excluded_from_context": ["main_agent_conclusions", "main_agent_self_assessment", "conversation_history"],
+        "on_pass": "force_stop",
+        "on_fail": "fix_and_resubmit",
+        "on_unavailable": "blocker"
+      },
+      "feature_review_gate": {
+        "per_feature": true,
+        "contract_ref": "reviewer_contract.per_feature_gate",
+        "on_pass": "feature closes; proceed to Phase 5 cumulative reviewer_gate",
+        "on_fail": "fix_and_resubmit",
+        "on_unavailable": "blocker"
+      },
+      "sole_user_phase_stop_gate": true,
+      "user_gate": "Explicit user confirmation required before any release action. This is the ONLY user phase-stop gate in rc.3. Reviewer gates are internal progress gates, not user gates."
+    }
+  ],
+  "reviewer_contract": {
+    "type": "independent_sub_agent",
+    "fresh": true,
+    "read_only": true,
+    "context_isolated": true,
+    "receives": ["frozen_spec", "phase_diff", "base_sha", "head_sha", "test_logs", "raw_artifacts"],
+    "excluded_from_context": ["main_agent_conclusions", "main_agent_reasoning", "main_agent_self_assessment", "conversation_history"],
+    "prohibition": "Main Agent self-review is prohibited. The Agent that implemented a Phase MUST NOT review its own output.",
+    "on_unavailable": "blocker — Phase cannot proceed; blocker recorded in evidence with missing host capability",
+    "on_pass": "auto-continue to next Phase (user informed, not prompted)",
+    "on_fail": "Agent addresses issues, re-submits for review; retry count recorded",
+    "retry_limit": 5,
+    "per_feature_gate": {
+      "type": "independent_sub_agent",
+      "fresh": true,
+      "read_only": true,
+      "context_isolated": true,
+      "applies_to": "every feature in every phase — one fresh Reviewer per feature, run BEFORE that phase's cumulative reviewer_gate",
+      "inputs": ["frozen_spec", "feature_diff_base_sha", "feature_diff_head_sha", "feature_verification_evidence"],
+      "excluded_from_context": ["main_agent_conclusions", "main_agent_reasoning", "main_agent_self_assessment", "conversation_history"],
+      "on_pass": "feature closes; next feature in phase proceeds (or phase cumulative review when last feature)",
+      "on_fail": "fix_and_resubmit; retry_count recorded",
+      "on_unavailable": "blocker",
+      "retry_limit": 5,
+      "verdict_evidence": "each feature's verdict is recorded as ORIGINAL evidence (verdict_evidence); the per-phase cumulative reviewer_gate is a SEPARATE review and does NOT overwrite per-feature verdicts"
+    },
+    "scope_note": "Two dev-phase review levels: (1) per-feature fresh Reviewer (reviewer_contract.per_feature_gate) then (2) per-phase cumulative Reviewer (reviewer_gate). Both are dev-phase mechanisms only; an independent Reviewer as a permanent runtime gate is a future product concern, deferred until v2.0.0 is stable.",
+    "verdict_artifact": {
+      "purpose": "Independent Reviewer verdicts are persisted as append-only evidence. Feature verdicts and phase verdicts are saved SEPARATELY; a phase cumulative review never overwrites per-feature verdict records.",
+      "schema_version": 1,
+      "paths": {
+        "feature": ".harness/reviews/feature/<feature_id>.jsonl",
+        "phase": ".harness/reviews/phase/<phase>.jsonl"
+      },
+      "append_only": true,
+      "record_schema": {
+        "purpose": "Feature and phase records use SEPARATE schemas (kind split) so a phase cumulative review never shares or overwrites per-feature fields. Validated by core/lib/verdict-artifact.sh (append-only writer + validator).",
+        "common": {
+          "schema_version": "integer == 1",
+          "kind": "\"feature\" | \"phase\" — determines which schema below applies",
+          "phase": "integer 1..5",
+          "attempt": "integer >= 1 — the re-review sequence number; MUST be previous attempt + 1 (validator enforces attempt continuity 1..N with no gaps/duplicates)",
+          "verdict": "\"PASS\" | \"FAIL\" | \"BLOCKER\"",
+          "base_sha": "40- OR 64-hex Git OID — base revision of the reviewed diff (SHA-1 or SHA-256 repos both supported)",
+          "head_sha": "40- OR 64-hex Git OID — head revision of the reviewed diff; must be a real git object in the project repo",
+          "run_id": "string — associated verification run id. REQUIRED (non-empty) when verdict==PASS; null allowed for FAIL/BLOCKER. When present, must reference an EXISTING, VALID run log (validate_run_log passes)",
+          "reviewer_host": "\"subagent\" | \"manual\"",
+          "checked": "array of strings — spec refs, test-log ids, eval-case ids reviewed",
+          "reason": "string — pass/fail/blocker justification",
+          "recorded_at": "ISO-8601 timestamp"
+        },
+        "feature_record_extra": {
+          "feature_id": "string — the reviewed feature id (^[A-Z][A-Z0-9_-]*$); must match the artifact file's id"
+        },
+        "phase_record_extra": {
+          "feature_ids": "array of strings (non-empty) — the phase's feature ids covered by this cumulative review"
+        }
+      },
+      "append_rule": "each review appends ONE new record with attempt = previous + 1 for the same feature/phase; existing records are never rewritten, truncated, or deleted. A re-review (fix_and_resubmit) writes a NEW record; it does not modify the prior verdict record. The writer computes the next attempt and fully validates the record (schema, attempt continuity, OID format, PASS→non-empty run_id, valid run, real head_sha object) BEFORE appending."
+    }
+  },
+  "always_independent_authorizations": {
+    "rule": "These operations ALWAYS require explicit in-session user confirmation, regardless of what PROJECT_BRIEF.json says. PROJECT_BRIEF is advisory; session instruction and host security policy take precedence.",
+    "operations": [
+      "git push",
+      "git merge to master",
+      "git tag (any version tag)",
+      "GitHub release creation",
+      "local install (bash install.sh --user)",
+      "package installation (new runtime dependencies, npm/pip/etc.)",
+      "external network access (downloads, API calls outside the repo)",
+      "destructive_ops (amend, rebase, reset, discard changes, force-push, delete files)",
+      "external_mutation (writes outside the current repository)",
+      "credentials handling (secrets, API keys, tokens)"
+    ]
+  },
+  "commit_policy": {
+    "scope": "auto",
+    "allowed": "Ordinary feature commits within the current repository (git add + git commit, conventional messages)",
+    "excluded": "amend, rebase, reset, discard changes, force-push, and any destructive operations — these ALWAYS require explicit user confirmation"
+  },
+  "authorization_model": "rc.3: advisory Brief + session confirmation. The two-tier loop authorization model (Tier-1 core-enforced + Tier-2 agent-contractual with auth_granted NDJSON) is deferred to a future version after v2.0.0 is stable.",
+  "self_host_bootstrap": {
+    "definition": "The harness-companion repo bootstraps ITSELF as a harness project. Bootstrap writes are the ONLY dev-repo writes allowed before Phase 1; they are evidence-of-init, not implementation code.",
+    "state": "origin: legacy-unmanaged (manual self-host init, no prior snapshot) → current: managed-valid (valid .template-snapshot.json present). Per frozen §3.4 detection, this bootstrap began with legacy markers (config.json + feature_list/AGENTS/init combo) and no snapshot, and is now managed-valid.",
+    "writes": [
+      ".harness/PROJECT_BRIEF.json",
+      ".harness/PROJECT_BRIEF.md",
+      ".harness/config.json",
+      ".harness/.template-snapshot.json",
+      ".harness/logs/runs/<run_id>.ndjson (NDJSON init evidence generated via core/harness-verify.sh, NOT hand-crafted)",
+      "feature_list.json",
+      "AGENTS.md (repo-level knowledge entry)",
+      "CLAUDE.md (repo-level knowledge entry)",
+      "init.sh (init environment helper)",
+      "claude-progress.md (progress file)",
+      ".gitignore (append .harness/logs/, .harness/.registry.lock/, .harness/*.tmp.*)"
+    ],
+    "verification": "Bootstrap is verifiable: config.json passes core/lib/config-validate.sh; snapshot schema_version=1 with real template sources + real SHAs; NDJSON init log generated by harness-verify.sh with run_started + run_completed overall_result=passed; .gitignore contains the three harness entries. Capability level is COMPUTED — 2 (AGENTS.md/CLAUDE.md knowledge entry + config with verification.commands + feature_list with revision). The knowledge entries and init environment exist NOW as part of the bootstrap; F-CONV-01 does not generate them.",
+    "honesty": "generated_by / source_version report the ACTUAL bootstrap baseline (harness-companion v2.0.0-rc.2 @ c5ca212) — never the target v2.0.0-rc.3. Bootstrap origin is legacy-unmanaged (manual, no prior snapshot); current state is managed-valid (valid snapshot). It does not masquerade as rc.3 executor output."
+  }
+}

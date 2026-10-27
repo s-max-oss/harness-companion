@@ -4,14 +4,11 @@
 # Solidified in-repo form of the historical /tmp/full-suite.sh. Runs EVERY
 # tests/**/test-*.sh script and aggregates results. Reproducible because:
 #   - ROOT is derived from this script's own location (location-independent).
-#   - Each test runs with stdin from /dev/null: an installed SessionStart hook
-#     reads stdin (ji_init), and a background shell leaves an open pipe that
-#     never EOFs → the hook's `cat` blocks forever and the test (and timeout)
-#     can never finish.
-#   - test-version-sync.sh is FAIL-CLOSED on items #6/#7 unless given a REAL
-#     installed target, per CI Phase 5d. The install + test sequence is the
-#     SAME one CI uses — scripts/version-sync-gate.sh — so local and CI can
-#     never diverge on the version-sync install method (P0-7).
+#   - Each test runs with stdin from /dev/null: a bash-declared hook or helper
+#     that reads stdin would otherwise block on a background shell's open pipe.
+#
+# The DSH-only suite has no host-install phase: the target is the skill itself,
+# and `dsh/acceptance.ps1` covers host entry-point acceptance separately.
 #
 # Usage (from anywhere):
 #   bash tests/run-all.sh
@@ -65,16 +62,9 @@ run_test() {
   local rel="$1"
   local log rc res
   log="$(mktemp)"
-  if [ "$rel" = "tests/release/test-version-sync.sh" ]; then
-    # P0-7: shared install + test method — byte-for-byte the same sequence CI
-    # Phase 5d runs via scripts/version-sync-gate.sh.
-    "$TIMEOUT_BIN" --kill-after=60s 3000s bash "$ROOT/scripts/version-sync-gate.sh" "$ROOT" 2>&1 | tee "$log" | tail -3
-    rc=${PIPESTATUS[0]}
-  else
-    # stdin from /dev/null so a SessionStart hook reading stdin can never block.
-    "$TIMEOUT_BIN" --kill-after=60s 3000s bash "$ROOT/$rel" < /dev/null 2>&1 | tee "$log" | tail -3
-    rc=${PIPESTATUS[0]}
-  fi
+  # stdin from /dev/null so a SessionStart hook reading stdin can never block.
+  "$TIMEOUT_BIN" --kill-after=60s 3000s bash "$ROOT/$rel" < /dev/null 2>&1 | tee "$log" | tail -3
+  rc=${PIPESTATUS[0]}
   res="$(grep -E 'Results:|passed,' "$log" | tail -1)"
   echo "  [RC=$rc]"
   echo "  [RESULT: $res]"

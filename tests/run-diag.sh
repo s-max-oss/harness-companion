@@ -42,13 +42,8 @@ run_test() {
   local log="$OUTDIR/$(printf '%02d' "$idx")-$(basename "$rel").log"
   local rc
   echo "========== RUNNING $rel ==========" | tee -a "$OUTDIR/summary.txt"
-  if [ "$rel" = "tests/release/test-version-sync.sh" ]; then
-    "$TIMEOUT_BIN" --kill-after=60s 1500s bash "$ROOT/scripts/version-sync-gate.sh" "$ROOT" < /dev/null > "$log" 2>&1
-    rc=$?
-  else
-    "$TIMEOUT_BIN" --kill-after=60s 1500s bash "$ROOT/$rel" < /dev/null > "$log" 2>&1
-    rc=$?
-  fi
+  "$TIMEOUT_BIN" --kill-after=60s 1500s bash "$ROOT/$rel" < /dev/null > "$log" 2>&1
+  rc=$?
   local res
   res="$(grep -E 'Results:|passed,|Failed:|FAILED:' "$log" | tail -1)"
   echo "  [RC=$rc]  [$res]  full log: $log" | tee -a "$OUTDIR/summary.txt"

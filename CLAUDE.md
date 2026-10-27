@@ -1,55 +1,40 @@
-# CLAUDE.md — Quick Reference for Claude Code
+# CLAUDE.md — Quick Reference
 
-## Project Overview
+`AGENTS.md` is the operating manual for this repository; read it first. This
+file exists because the harness knowledge subsystem expects a `CLAUDE.md` next
+to `AGENTS.md`, and it deliberately carries no independent rules. (The generic
+scaffold that this project ships to *target* projects lives in
+`templates/CLAUDE.md`; do not confuse the two.)
 
-[One-sentence summary of what this project is.]
-
-## Build & Run
-
-```bash
-npm install        # Install dependencies
-npm run check      # Type-check without emitting
-npm run build      # Compile
-npm run dev        # Build + launch
-npm test           # Run test suite
-```
-
-## Quick Start
+## Commands
 
 ```bash
-bash init.sh       # Full verification: install, check, build
+bash init.sh                 # project self-check (fail-closed)
+bash tests/run-all.sh        # full suite (~60-90 min on Windows)
 ```
 
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `src/main/` | Main process entry point |
-| `src/preload/` | Context bridge API |
-| `src/renderer/` | UI layer |
-| `src/services/` | Business logic |
-| `src/shared/types.ts` | Shared types and IPC channel constants |
-| `feature_list.json` | Feature tracking with pass/fail status and evidence |
-
-## Architecture Rules
-
-- [Add your project's key rules here]
-- Renderer never imports Node.js modules (Electron apps).
-- All main-renderer communication goes through IPC (Electron apps).
-- Services use constructor-injected dependencies.
-
-## How to Add a Feature
-
-1. Define types/interfaces.
-2. Add the business logic in services.
-3. Register IPC handlers (if Electron).
-4. Expose the API through preload (if Electron).
-5. Build the UI.
-6. Update `feature_list.json` with the result.
-
-## Testing
-
-```bash
-npm test           # Run test suite
-npm run test:watch # Run tests in watch mode
+```powershell
+./dsh/acceptance.ps1         # DSH acceptance: 7 scenarios, ~1 min
+./dsh/install.ps1            # install into %DSH_HOME%\skills
+./dsh/smoke.ps1              # installed-skill smoke: 9 checks
 ```
+
+## Layout
+
+- `dsh/` — the only host runtime (launcher, installer, smoke, acceptance)
+- `core/` — POSIX bash semantics (status, feature, verify, audit)
+- `scripts/` — init executor, handoff, consent boundary
+- `templates/` — scaffolding shipped to target projects
+- `references/` — file formats, subsystem mapping, conversation rules
+- `tests/` — core / bootstrap / init / release suites, acceptance evidence
+
+## Conventions
+
+- Business semantics stay in `core/`; host mapping stays in `dsh/`.
+- Never hand-craft NDJSON run logs; generate them with `core/harness-verify.sh`.
+- WIP=1, evidence before `passing`, fail-closed init.
+
+## See also
+
+`AGENTS.md` (authoritative), `README.md`, `CHANGELOG.md`,
+`docs/acceptance/2026-10-27-dsh-2.0.0.md`.

@@ -1,0 +1,173 @@
+{
+  "advisory": true,
+  "cadence": "oneoff",
+  "captured_from_git_rev": "7ba16e74a28e40eeec0aa9a250ac2505dd0b570d",
+  "conflicts_resolved": [],
+  "deadline": null,
+  "defaults_applied": [
+    {
+      "field": "/deadline",
+      "rationale": "No external deadline; design-gate-first pace",
+      "source": "spec_default",
+      "value": null
+    },
+    {
+      "field": "/secrets_handling",
+      "rationale": "No secrets in this repo; user did not specify",
+      "source": "spec_default",
+      "value": "unspecified"
+    },
+    {
+      "field": "/external_network",
+      "rationale": "User did not specify; default per frozen spec §6.4",
+      "source": "spec_default",
+      "value": "ask"
+    },
+    {
+      "field": "/prohibitions",
+      "rationale": "User did not specify any prohibitions",
+      "source": "spec_default",
+      "value": []
+    },
+    {
+      "field": "/operation_preferences/merge",
+      "rationale": "User did not specify; default per frozen spec §6.4",
+      "source": "spec_default",
+      "value": "ask"
+    },
+    {
+      "field": "/operation_preferences/release",
+      "rationale": "User did not specify; default per frozen spec §6.4",
+      "source": "spec_default",
+      "value": "ask"
+    },
+    {
+      "field": "/operation_preferences/install_packages",
+      "rationale": "User did not specify; default per frozen spec §6.4",
+      "source": "spec_default",
+      "value": "ask"
+    },
+    {
+      "field": "/operation_preferences/external_mutation",
+      "rationale": "User did not specify; default per frozen spec §6.4",
+      "source": "spec_default",
+      "value": "ask"
+    },
+    {
+      "field": "/operation_preferences/destructive_ops",
+      "rationale": "User did not specify; default per frozen spec §6.4",
+      "source": "spec_default",
+      "value": false
+    }
+  ],
+  "detected_type": "shell",
+  "external_network": "ask",
+  "generated_by": "harness-companion v2.0.0-rc.2",
+  "goal": "Ship v2.0.0-rc.3: guided conversational Harness construction as one closed loop. On /harness:init, the Agent drives a natural conversation, synthesizes a structured Brief, and only after user confirmation does the deterministic Bash executor (scripts/harness-init.sh) write files per the output manifest. Executor, dialog layer, shell tests, forward eval, and acceptance ship together.",
+  "initial_project_state": {
+    "detection_summary": "Self-host bootstrap of harness-companion at v2.0.0-rc.2 (HEAD c5ca212). Origin: legacy-unmanaged (manual init, no prior snapshot). Current: managed-valid (valid snapshot).",
+    "existing_harness_files": [
+      "core/lib/evidence.sh",
+      "core/lib/workspace-fingerprint.sh",
+      "core/lib/staleness.sh",
+      "core/lib/config-validate.sh",
+      "core/lib/validate-run-log.sh",
+      "core/lib/atomic_write.sh",
+      "core/lib/project-detect.sh",
+      "core/harness-feature.sh",
+      "core/harness-verify.sh",
+      "core/harness-status.sh",
+      "core/harness-audit.sh",
+      "scripts/harness-init.sh",
+      "templates/init.sh",
+      "AGENTS.md",
+      "CLAUDE.md",
+      "init.sh",
+      "claude-progress.md",
+      "feature_list.json",
+      ".harness/config.json",
+      ".harness/PROJECT_BRIEF.json",
+      ".harness/.template-snapshot.json"
+    ],
+    "has_existing_tests": true,
+    "is_git_repo": true
+  },
+  "operation_preferences": {
+    "commit": "auto",
+    "destructive_ops": false,
+    "external_mutation": "ask",
+    "install_packages": "ask",
+    "merge": "ask",
+    "push": "ask",
+    "release": "ask"
+  },
+  "prohibitions": [],
+  "provenance": {
+    "/goal": {
+      "source": "conversation"
+    },
+    "/success_criteria": {
+      "source": "conversation"
+    },
+    "/cadence": {
+      "source": "conversation"
+    },
+    "/deadline": {
+      "source": "spec_default"
+    },
+    "/stack": {
+      "source": "repo",
+      "marker": "core/*.sh"
+    },
+    "/detected_type": {
+      "source": "repo",
+      "marker": "core/*.sh scripts/*.sh"
+    },
+    "/test_framework": {
+      "source": "spec_default"
+    },
+    "/secrets_handling": {
+      "source": "spec_default"
+    },
+    "/external_network": {
+      "source": "spec_default"
+    },
+    "/operation_preferences/commit": {
+      "source": "conversation"
+    },
+    "/operation_preferences/push": {
+      "source": "conversation"
+    },
+    "/operation_preferences/merge": {
+      "source": "spec_default"
+    },
+    "/operation_preferences/release": {
+      "source": "spec_default"
+    },
+    "/operation_preferences/install_packages": {
+      "source": "spec_default"
+    },
+    "/operation_preferences/external_mutation": {
+      "source": "spec_default"
+    },
+    "/operation_preferences/destructive_ops": {
+      "source": "spec_default"
+    }
+  },
+  "schema_version": 1,
+  "secrets_handling": "unspecified",
+  "source_version": "2.0.0-rc.2",
+  "stack": "shell",
+  "success_criteria": [
+    "Deterministic executor: scripts/harness-init.sh accepts --brief (guided/quick) and legacy callers, and writes the §6.2a output manifest from a validated Brief — atomically, idempotently, re-entrant via 3-way SHA compare",
+    "Zero writes before Brief confirmation in guided mode; Brief state lives only in conversation context until the user approves",
+    "Conversational dialog layer: SKILL.md + reference files drive a natural Agent-led dialog — never re-ask known info, explain decisions, confirm the Brief not the plan, post-init explanation covers generated/inferred/defaulted/deferred",
+    "Type-matched templates: templates/ restructured into common/ + by-type/, core/lib/project-detect.sh extended, and the template manifest snapshot records origin for resume/update",
+    "14 forward-eval conversation scenarios pass with a real Agent (vague goals, conflicts, unfamiliar users, rejection/modification, authorization denial, clean-archive end-to-end)",
+    "Shell tests cover executor determinism, type-matching, zero-writes, resume safety, and cross-host equality; legacy Bash callers still work with placeholder-filled Briefs",
+    "All rc.3 work contained within this repository; zero writes to ~/.claude/, ~/.agents/, or local install paths; acceptance package (F-CONV-09) presented and release-ready; release requires separate user authorization"
+  ],
+  "template_manifest_digest": "6f8f9ec1748acf0b2dad44c3c2e69cfe0278dee9d4a2d3667353ffd4f67589d3",
+  "test_framework": "unspecified",
+  "type_evidence": null
+}

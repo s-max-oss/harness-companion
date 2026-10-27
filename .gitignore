@@ -13,3 +13,14 @@ Thumbs.db
 .harness/logs/
 .harness/.registry.lock/
 .harness/*.tmp.*
+.harness/acceptance/
+.harness/runtime-manifest.jsonl*
+.harness/registry-journal.ndjson
+
+# DSH acceptance evidence: release packages are committed deliberately
+tests/acceptance/evidence/*
+!tests/acceptance/evidence/20261027T133032Z/
+
+# Python caches
+__pycache__/
+*.pyc

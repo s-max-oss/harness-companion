@@ -3,7 +3,7 @@
 All notable changes to harness-companion are recorded here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — DSH-only skill (breaking)
+## [2.0.0-rc.4] — 2026-10-27 — DSH-only release
 
 The skill now targets DeepSeek Harness exclusively. Claude Code and Codex keep
 working as tools; they simply no longer integrate this skill.
@@ -38,9 +38,9 @@ working as tools; they simply no longer integrate this skill.
 - `dsh/smoke.ps1`: 9 / 9 PASS from the source tree and from an installed copy;
   install → smoke → uninstall round-trip verified.
 
-## [Unreleased] — DSH host adapter + host hook repair
+### Host adapter and hook repair
 
-### Added
+#### Added
 
 - `adapters/dsh/` — DeepSeek Harness adapter, the third host next to Claude
   Code and Codex: a DSH entry `SKILL.md`, `run.ps1` (Git Bash resolution, argv
@@ -50,7 +50,7 @@ working as tools; they simply no longer integrate this skill.
 - Installs to `%DSH_HOME%\skills\harness-companion` (DSH root rank 400), which
   shadows a v1 copy under `~/.agents/skills` (rank 500) without deleting it.
 
-### Changed
+#### Changed
 
 - README documents the third host. DSH exposes no skill lifecycle hooks, so
   SessionStart status injection and Stop handoff reminders become an explicit
@@ -62,7 +62,7 @@ working as tools; they simply no longer integrate this skill.
   timing out. The Claude Code Stop hook timeout rises from 5 s to 15 s on fresh
   and upgraded installs; Codex Stop hooks use 15 s as well.
 
-### Fixed
+#### Fixed
 
 - `adapters/claude-code/install.sh` refuses to register hooks when the copied
   tree is incomplete — missing `SKILL.md`, `core/lib/status-renderer.sh`,
@@ -89,7 +89,7 @@ working as tools; they simply no longer integrate this skill.
   resulting NDJSON path never existed and every passing feature was reported as
   `run_log_missing`.
 
-### Validation
+#### Validation
 
 - `tests/adapters/test-claude-code-contract.sh`: **149 / 149 PASS** (~135 s),
   including the G10 stale/missing/corrupt run-log assertions and the G9

@@ -22,23 +22,45 @@ set -uo pipefail
 TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$TEST_DIR/../.." && pwd)"
 AUDIT="$ROOT_DIR/core/harness-audit.sh"
-FIXTURES="$ROOT_DIR/tests/adapters/fixtures"
 
 if [ ! -f "$AUDIT" ]; then
   echo "SKIP: $AUDIT not present"
   exit 0
 fi
 
-# G0-rev4: copy fixtures to temp so regeneration never mutates source fixtures.
-_TMP_FIXTURES="$(mktemp -d)"
-trap 'rm -rf "$_TMP_FIXTURES"' EXIT
-cp -R "$FIXTURES/." "$_TMP_FIXTURES/" 2>/dev/null || true
-FIXTURES="$_TMP_FIXTURES"
+# Fixtures are built at runtime. The retired adapter fixtures embedded absolute
+# artifact paths, so they rotted as soon as the repository moved (the audit then
+# classified every run log as corrupt instead of the intended state).
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/hc-audit-XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+FIXTURES="$WORK"
+CONFIG='{"project_type":"generic","verification":{"commands":[{"id":"echo","command":["bash","-c","echo ok"],"command_origin":"configured","confirmation":"not_required","required_for_passing":true,"timeout_seconds":60}]}}'
 
-# Regenerate fixtures inside the temp copy only.
-if [ -x "$ROOT_DIR/tests/adapters/_regen-fixtures.sh" ]; then
-  FIXTURES_DIR="$_TMP_FIXTURES" bash "$ROOT_DIR/tests/adapters/_regen-fixtures.sh" all >/dev/null 2>&1 || true
-fi
+mk_project() {
+  local dir="$1" features="$2"
+  mkdir -p "$dir/.harness"
+  printf '# %s\n' "$(basename "$dir")" > "$dir/AGENTS.md"
+  printf '%s' "$CONFIG" > "$dir/.harness/config.json"
+  printf '{"version":"2","schema_version":"2.0.0","revision":1,"features":[%s]}' "$features" \
+    > "$dir/feature_list.json"
+}
+
+verified_project() {
+  local dir="$1" fid="$2"
+  mk_project "$dir" "{\"id\":\"$fid\",\"title\":\"audit case\",\"status\":\"not_started\",\"evidence_associations\":[],\"legacy_audit_evidence\":[]}"
+  bash "$ROOT_DIR/core/harness-feature.sh" status "$dir" "$fid" in_progress >/dev/null 2>&1
+  bash "$ROOT_DIR/core/harness-verify.sh" "$fid" "$dir" --write >/dev/null 2>&1
+  bash "$ROOT_DIR/core/harness-feature.sh" status "$dir" "$fid" passing >/dev/null 2>&1
+}
+
+verified_project "$WORK/clean-project" "F-AUDIT-CLEAN"
+mk_project "$WORK/invalid-runid" '{"id":"F-AUDIT-MISS","title":"missing","status":"passing","evidence_associations":[{"run_id":"19990101T000000Z-1-1"}],"legacy_audit_evidence":[]}'
+mk_project "$WORK/corrupted-runlog" '{"id":"F-AUDIT-CORRUPT","title":"corrupt","status":"passing","evidence_associations":[{"run_id":"19990101T000000Z-2-2"}],"legacy_audit_evidence":[]}'
+mkdir -p "$WORK/corrupted-runlog/.harness/logs/runs"
+printf 'not-json\n' > "$WORK/corrupted-runlog/.harness/logs/runs/19990101T000000Z-2-2.ndjson"
+verified_project "$WORK/stale-run" "F-AUDIT-STALE"
+printf 'changed after verification\n' >> "$WORK/stale-run/AGENTS.md"
+mk_project "$WORK/no-association" '{"id":"F-AUDIT-NOASSC","title":"no assoc","status":"passing","evidence_associations":[],"legacy_audit_evidence":[]}'
 
 PASSED=0
 FAILED=0

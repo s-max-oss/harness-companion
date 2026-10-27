@@ -6,9 +6,10 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 EVAL="$ROOT/tests/eval"
 TMP="$(mktemp -d)" || exit 1
 trap 'rm -rf "$TMP"' EXIT
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
 ok() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 bad() { echo "FAIL: $1" >&2; FAIL=$((FAIL + 1)); }
+skip() { echo "SKIP: $1"; SKIP=$((SKIP + 1)); }
 check() { local label="$1"; shift; if "$@"; then ok "$label"; else bad "$label"; fi; }
 windows_result_suffix_normalizes() {
   local suffix
@@ -640,7 +641,14 @@ check "ACL recovery binds a stable Windows file identity" bash -c 'grep -Fq "Get
 check "ACL reads and writes use verified open handles, not pathname ACL APIs" bash -c 'grep -Fq "GetKernelObjectSecurity" "$1" && grep -Fq "SetSecurityInfo" "$1" && ! grep -Eq "Get-Acl|^[[:space:]]*Set-Acl|[.]SetAccessControl[(]" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
 check "ACL helper directly denies and identity-binds the exact probed source file" bash -c 'grep -Fq "SourceFile is required" "$1" && grep -Fq "kind = '\''file'\''" "$1" && grep -Fq "FileSecurity" "$1" && grep -Fq -- "-not \$_.IsInherited" "$1" && grep -Fq "source_file_deny" "$1"' _ "$EVAL/windows-isolation-acl.ps1"
 if command -v powershell.exe >/dev/null 2>&1; then
-  check "Windows ACL helper round-trips DACL and retains failed recovery state" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-isolation-acl.ps1" -Helper "$EVAL/windows-isolation-acl.ps1"
+  # The helper binds ACLs to the Codex sandbox local accounts. Provisioning
+  # them is a release-host prerequisite; without them the case is not
+  # executable and must not masquerade as a pass or a failure.
+  if env -u PSModulePath powershell.exe -NoProfile -Command 'if (Get-LocalUser -Name CodexSandboxOffline -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }' >/dev/null 2>&1; then
+    check "Windows ACL helper round-trips DACL and retains failed recovery state" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-isolation-acl.ps1" -Helper "$EVAL/windows-isolation-acl.ps1"
+  else
+    skip "Windows ACL helper round-trips DACL and retains failed recovery state (Codex sandbox local users not provisioned)"
+  fi
   mkdir -p "$TMP/executable-guard-test"
   check "Windows executable guard permits launch but blocks overwrite and replacement" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-executable-guard.ps1" -Guard "$(cygpath -w "$EVAL/windows-executable-guard.ps1")" -TempRoot "$(cygpath -w "$TMP/executable-guard-test")" -LaunchSource 'C:\Windows\System32\whoami.exe'
   live_user_home_win="$(env -u PSModulePath powershell.exe -NoProfile -Command '[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)' | tr -d '\r')"
@@ -667,7 +675,7 @@ if command -v powershell.exe >/dev/null 2>&1; then
   else
     ok "attester rejects PowerShell wrapper byte drift"
   fi
-  live_codex="$(command -v codex)"
+  if live_codex="$(command -v codex 2>/dev/null)"; then
   live_codex_dir="$(cd "$(dirname "$live_codex")" && pwd -P)"
   live_codex_version="$("$live_codex" --version | head -1)"
   live_component_identity="$(HARNESS_EVAL_AUTH_PATH="$(cygpath -w "$live_codex")" env -u PSModulePath powershell.exe -NoProfile -Command '
@@ -691,6 +699,9 @@ if command -v powershell.exe >/dev/null 2>&1; then
   done < <(jq -r --arg version "$live_codex_version" \
     '.agents.codex.approved_builds[] | select(.cli_version == $version) | .components | keys[]' \
     "$EVAL/trust/agent-publishers.json" | tr -d '\r')
+  else
+    skip "live Codex component identity checks (codex is not installed on this host)"
+  fi
   check "production runner crash recovery covers lifecycle stages, PID reuse, and partial cleanup" env -u PSModulePath powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$EVAL/test-windows-eval-recovery.ps1" -Runner "$(cygpath -w "$EVAL/run-eval.sh")" -Recovery "$(cygpath -w "$EVAL/recover-windows-isolation.sh")" -RepoRoot "$(cygpath -w "$ROOT")" -Bash 'C:\Program Files\Git\bin\bash.exe'
   mkdir -p "$TMP/shadow-bin"
   printf '#!/bin/bash\nprintf shadow > "%s"\nexit 99\n' "$TMP/shadow-hit" > "$TMP/shadow-bin/powershell.exe"
@@ -1752,5 +1763,9 @@ else
   bad "Claude stateless subject and Reviewer use the same synthetic contract"
 fi
 
-echo "Results: $PASS passed, $FAIL failed"
+if [ "$SKIP" -gt 0 ]; then
+  echo "Results: $PASS passed, $FAIL failed, $SKIP skipped"
+else
+  echo "Results: $PASS passed, $FAIL failed"
+fi
 [ "$FAIL" -eq 0 ]

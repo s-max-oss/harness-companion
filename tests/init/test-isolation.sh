@@ -86,31 +86,49 @@ else
 fi
 PRESERVE_LINE="$(grep -nF 'export HARNESS_VALIDATOR_SEARCH_HOME="${HARNESS_VALIDATOR_SEARCH_HOME:-${HOME:-}}"' "$ROOT/tests/run-all.sh" | head -1 | cut -d: -f1)"
 ISOLATE_LINE="$(grep -nF 'export HOME="$SUITE_ISOLATION_ROOT/home"' "$ROOT/tests/run-all.sh" | head -1 | cut -d: -f1)"
+# The release archive gate was retired with the Claude Code / Codex adapters.
+# Keep the run-all half of the assertion unconditional; only the archive-gate
+# half is conditional on the gate still existing.
+ARCHIVE_GATE="$ROOT/tests/release/test-release-archive.sh"
+RUNALL_OK=0
 if [ -n "$PRESERVE_LINE" ] && [ -n "$ISOLATE_LINE" ] && [ "$PRESERVE_LINE" -lt "$ISOLATE_LINE" ] \
    && grep -Fq 'export HARNESS_VALIDATOR_SEARCH_HOME="${HARNESS_VALIDATOR_SEARCH_HOME:-${HOME:-}}"' "$ROOT/tests/run-all.sh" \
-   && grep -Fq 'VALIDATOR_SEARCH_HOME="${HARNESS_VALIDATOR_SEARCH_HOME:-${HOME:-}}"' "$ROOT/tests/release/test-release-archive.sh" \
-   && grep -Fq 'PYTHONDONTWRITEBYTECODE=1 python3 -B "$VALIDATOR"' "$ROOT/tests/release/test-release-archive.sh" \
    && grep -Fq 'ISO-4 full-suite simulated installed-skill sentinel unchanged' "$ROOT/tests/run-all.sh"; then
-  pass "ISO-4 full-suite runner isolates HOME, preserves read-only validator discovery, and verifies its sentinel"
+  RUNALL_OK=1
+fi
+if [ -f "$ARCHIVE_GATE" ]; then
+  if [ "$RUNALL_OK" -eq 1 ] \
+     && grep -Fq 'VALIDATOR_SEARCH_HOME="${HARNESS_VALIDATOR_SEARCH_HOME:-${HOME:-}}"' "$ARCHIVE_GATE" \
+     && grep -Fq 'PYTHONDONTWRITEBYTECODE=1 python3 -B "$VALIDATOR"' "$ARCHIVE_GATE"; then
+    pass "ISO-4 full-suite runner isolates HOME, preserves read-only validator discovery, and verifies its sentinel"
+  else
+    fail "ISO-4 full-suite runner isolates HOME, preserves read-only validator discovery, and verifies its sentinel"
+  fi
+elif [ "$RUNALL_OK" -eq 1 ]; then
+  pass "ISO-4 full-suite runner isolates HOME and verifies its sentinel (release archive gate retired)"
 else
   fail "ISO-4 full-suite runner isolates HOME, preserves read-only validator discovery, and verifies its sentinel"
 fi
 
-SEARCH_ROOT_SENTINEL="$TMP/search-root-sentinel"
-printf 'must-survive\n' > "$SEARCH_ROOT_SENTINEL"
-BAD_SEARCH_OUT="$(
-  cd "$TMP" \
-    && HOME="$ISOLATED_HOME" HARNESS_VALIDATOR_SEARCH_HOME=-delete \
-      bash "$ROOT/tests/release/test-release-archive.sh" 2>&1
-)"
-BAD_SEARCH_RC=$?
-if [ "$BAD_SEARCH_RC" -ne 0 ] \
-   && printf '%s' "$BAD_SEARCH_OUT" | grep -qF 'validator search root must be an absolute existing directory' \
-   && [ "$(cat "$SEARCH_ROOT_SENTINEL" 2>/dev/null)" = "must-survive" ]; then
-  pass "validator search root rejects option injection before filesystem traversal"
+if [ ! -f "$ARCHIVE_GATE" ]; then
+  pass "validator search root option-injection case retired with the release archive gate"
 else
-  fail "validator search root rejects option injection before filesystem traversal" \
-    "rc=$BAD_SEARCH_RC sentinel=$([ -e "$SEARCH_ROOT_SENTINEL" ] && echo present || echo missing)"
+  SEARCH_ROOT_SENTINEL="$TMP/search-root-sentinel"
+  printf 'must-survive\n' > "$SEARCH_ROOT_SENTINEL"
+  BAD_SEARCH_OUT="$(
+    cd "$TMP" \
+      && HOME="$ISOLATED_HOME" HARNESS_VALIDATOR_SEARCH_HOME=-delete \
+        bash "$ARCHIVE_GATE" 2>&1
+  )"
+  BAD_SEARCH_RC=$?
+  if [ "$BAD_SEARCH_RC" -ne 0 ] \
+     && printf '%s' "$BAD_SEARCH_OUT" | grep -qF 'validator search root must be an absolute existing directory' \
+     && [ "$(cat "$SEARCH_ROOT_SENTINEL" 2>/dev/null)" = "must-survive" ]; then
+    pass "validator search root rejects option injection before filesystem traversal"
+  else
+    fail "validator search root rejects option injection before filesystem traversal" \
+      "rc=$BAD_SEARCH_RC sentinel=$([ -e "$SEARCH_ROOT_SENTINEL" ] && echo present || echo missing)"
+  fi
 fi
 
 jq -n '{schema_version:1,detected_type:"docs",goal:"Isolation check",success_criteria:["No external writes"],cadence:"stable",deadline:null,stack:"docs",test_framework:"none",secrets_handling:"unspecified",external_network:"denied",prohibitions:[],operation_preferences:{commit:"ask",push:"ask",merge:"ask",release:"ask",install_packages:"denied",external_mutation:"denied",destructive_ops:false},defaults_applied:[],conflicts_resolved:[],provenance:{},type_evidence:null}' > "$TMP/brief.json"

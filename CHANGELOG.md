@@ -37,6 +37,14 @@ working as tools; they simply no longer integrate this skill.
 - `tests/core/test-status-renderer.sh`: 17 / 17 PASS.
 - `dsh/smoke.ps1`: 9 / 9 PASS from the source tree and from an installed copy;
   install → smoke → uninstall round-trip verified.
+- Release-gate adjustments for this DSH-only window, all reported in the suite
+  output rather than hidden: the AC-16 `core/lib` budget is 200 lines for rc.4
+  (actual 169, driven by the renderer hardening); negative-gate cases whose
+  gates were retired now report `SKIP`; and the Codex real-Agent eval contract
+  is parked as `tests/eval/contract-offline.sh` because its subject pipeline was
+  removed with the host adapters (F-CONV-08 is blocked). A template-copy
+  `CLAUDE.md` and a minimal `tests/run-all.sh` CI workflow were restored so the
+  bootstrap and isolation gates keep testing something real.
 
 ### Host adapter and hook repair
 

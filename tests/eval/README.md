@@ -110,5 +110,8 @@ results directory and is always marked `release_eligible: false` with verdict
 `SYNTHETIC`:
 
 ```bash
-bash tests/eval/test-eval-contract.sh
+# Parked manual suite since rc.4: it targets the retired Codex real-Agent
+# evaluation pipeline (F-CONV-08 is blocked), so tests/run-all.sh does not
+# gate on it.
+bash tests/eval/contract-offline.sh
 ```

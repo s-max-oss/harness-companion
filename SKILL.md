@@ -85,6 +85,17 @@ Claude Code / Codex 版本靠 SessionStart 和 Stop 钩子自动注入状态与�
 - 已有合法 `.harness/.template-snapshot.json` → **resume**：读回已有 Brief，只讨论有变化的部分。
 - `--quick`：不提问不确认，只从当前上下文推断；`goal` 或 `success_criteria` 缺一个就停手不写。**永远不要把它当"省事模式"推荐给用户**。
 
+### Brief 契约
+
+这段是 guided init 的硬约束，跟宿主无关：
+
+- 用户给的目标与成功标准从进入 Brief 那刻起按字节保存；**Every decision presented for approval must be represented losslessly** 在传给执行器的精确机器可读 Brief 里。不许改写、润色或重新解释。
+- 用户要求默认值时的处理：**apply only the documented Brief defaults**，并且 **do not invent product or implementation defaults**（框架、数据库、UI、部署方式这类都不算文档默认值，保持 deferred）。
+- 记录默认值来源时，`provenance` 条目要和 `defaults_applied` 用**exact same JSON pointer as its matching** 条目；**Do not record leaf defaults** 再把它们的 provenance 汇总到父级指针。
+- **Documented Brief defaults are not optional questions**：不要为文档默认值再问一遍，也不要提"优化版"建议。
+- **Resolve an unambiguous relative deadline**（例如"due Friday"）时，用宿主提供的当前日期与时区换算成确切日期并展示，不要要求用户再确认；只有真正有歧义时才问。
+- 用户拒绝外部网络等操作时，把 **external_network denial** 按用户指定的字段名记进 **evaluation transcript**，不要换同义词；该记录不构成写目标文件的授权。
+
 确认边界只有两条命令：
 
 ```powershell

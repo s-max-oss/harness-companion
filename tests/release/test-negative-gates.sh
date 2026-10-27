@@ -62,6 +62,12 @@ neg_fail() {
   FAILED=$((FAILED + 1))
 }
 
+SKIPPED=0
+neg_skip() {
+  printf "${CYAN}SKIP${NC} (negative): %s\n" "$1"
+  SKIPPED=$((SKIPPED + 1))
+}
+
 # Assert gate exits non-zero, and post-state matches pre-state.
 #
 # Usage: assert_gate_fail_closed [--skip-residue]
@@ -81,8 +87,9 @@ neg_fail() {
 #                   `&& touch "$SENTINEL"` so the sentinel is ONLY created
 #                   when the gate unexpectedly exits 0.  Do NOT use `;`.
 assert_gate_fail_closed() {
-  local skip_residue=0 expected_diagnostic=""
-  while [ "${1:-}" = "--skip-residue" ] || [ "${1:-}" = "--expect-diagnostic" ]; do
+  local skip_residue=0 expected_diagnostic="" require_gate=""
+  while [ "${1:-}" = "--skip-residue" ] || [ "${1:-}" = "--expect-diagnostic" ] \
+        || [ "${1:-}" = "--require-gate" ]; do
     case "$1" in
       --skip-residue)
         skip_residue=1
@@ -92,11 +99,22 @@ assert_gate_fail_closed() {
         expected_diagnostic="${2:-}"
         shift 2
         ;;
+      --require-gate)
+        require_gate="${2:-}"
+        shift 2
+        ;;
     esac
   done
 
   local label="$1" sentinel="$2"
   shift 2
+
+  # A retired gate cannot be exercised: report it explicitly instead of
+  # silently passing or failing the negative suite.
+  if [ -n "$require_gate" ] && [ ! -f "$require_gate" ]; then
+    neg_skip "$label (gate retired: ${require_gate#"$SOURCE_REPO"/})"
+    return 0
+  fi
 
   # Clean up any sentinel from a prior run, THEN capture baseline.
   # This way git status --porcelain won't count the sentinel file.
@@ -234,6 +252,7 @@ setup_fake_mktemp FAKE_BIN_B "1b" || exit 1
 SENTINEL="$SOURCE_REPO/.neg1b-sentinel"
 assert_gate_fail_closed \
   --expect-diagnostic "FATAL: mktemp failed" \
+  --require-gate "$SOURCE_REPO/tests/migration/test-v1-compat.sh" \
   "NEG-1b: mktemp exit 1 aborts test-v1-compat.sh" \
   "$SENTINEL" \
   "PATH=\"$FAKE_BIN_B:\$PATH\" bash \"$SOURCE_REPO/tests/migration/test-v1-compat.sh\" && touch \"$SENTINEL\""
@@ -249,6 +268,7 @@ setup_fake_mktemp FAKE_BIN_C "1c" || exit 1
 SENTINEL="$SOURCE_REPO/.neg1c-sentinel"
 assert_gate_fail_closed \
   --expect-diagnostic "FATAL: mktemp failed" \
+  --require-gate "$SOURCE_REPO/tests/release/test-release-archive.sh" \
   "NEG-1c: mktemp exit 1 aborts test-release-archive.sh" \
   "$SENTINEL" \
   "PATH=\"$FAKE_BIN_C:\$PATH\" HARNESS_VALIDATOR_SKIP_OK=1 bash \"$SOURCE_REPO/tests/release/test-release-archive.sh\" && touch \"$SENTINEL\""
@@ -295,11 +315,22 @@ echo "=== NEG-2: missing validator blocks release archive gate ==="
 SENTINEL="$SOURCE_REPO/.neg2-sentinel"
 assert_gate_fail_closed \
   --expect-diagnostic "HARNESS_VALIDATOR=.*does not exist" \
+  --require-gate "$SOURCE_REPO/tests/release/test-release-archive.sh" \
   "NEG-2: HARNESS_VALIDATOR=/nonexistent + no SKIP_OK → FAILS" \
   "$SENTINEL" \
   "HARNESS_VALIDATOR=/nonexistent/path/validate_plugin.py HARNESS_VALIDATOR_SKIP_OK=0 bash \"$SOURCE_REPO/tests/release/test-release-archive.sh\" && touch \"$SENTINEL\""
 
 echo ""
+
+# NEG-4 through NEG-6 exercise helper functions extracted from the release
+# archive gate. With that gate retired there is nothing to extract, so the
+# three cases are reported as skipped rather than failed.
+ARCHIVE_GATE="$SOURCE_REPO/tests/release/test-release-archive.sh"
+if [ ! -f "$ARCHIVE_GATE" ]; then
+  neg_skip "NEG-4: safe_mktemp failure case retired with the release archive gate"
+  neg_skip "NEG-5: safe_mktemp empty-output case retired with the release archive gate"
+  neg_skip "NEG-6: cumulative trap case retired with the release archive gate"
+else
 
 # ---- NEG-4: real safe_mktemp fails on mktemp failure (function level) -----
 echo "=== NEG-4: real safe_mktemp() rejects mktemp failure ==="
@@ -391,6 +422,8 @@ else
   neg_fail "NEG-6" "cumulative trap left orphan(s): before=$TMP_BEFORE after=$TMP_AFTER"
 fi
 
+fi  # end archive-gate availability guard
+
 echo ""
 
 # ---- Summary ---------------------------------------------------------------
@@ -398,6 +431,7 @@ echo "============================================"
 echo "  Negative Gate Test Summary"
 echo "  Passed (gates correctly fail-closed):  $PASSED"
 echo "  Failed (gates unexpectedly succeeded): $FAILED"
+echo "  Skipped (gate retired):                $SKIPPED"
 echo "============================================"
 
 # Cleanup sentinels

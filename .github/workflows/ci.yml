@@ -1,0 +1,33 @@
+name: harness-companion CI
+
+# DSH-only suite. The Claude Code / Codex adapter suites were retired together
+# with their host runtimes; the remaining gate is the full shell suite.
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: Full suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      HOME: ${{ runner.temp }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Isolate HOME
+        run: echo "HOME=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Run full suite
+        run: bash tests/run-all.sh

@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-**v2.0.0-rc.3（DSH）** — 一个 DeepSeek Harness 技能：为任何项目搭建并维护 Harness Engineering 环境（知识、环境、进度、范围、验证、可观测、交接）。
+**v2.0.0（DSH）** — 一个 DeepSeek Harness 技能：为任何项目搭建并维护 Harness Engineering 环境（知识、环境、进度、范围、验证、可观测、交接）。
 
 > **宿主范围**：自 2026 年 10 月起，本仓库只面向 **DeepSeek Harness（DSH）**。Claude Code 与 Codex 适配层已退役，代码与设计记录保留在 git 历史里。
 

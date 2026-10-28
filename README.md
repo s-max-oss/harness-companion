@@ -2,7 +2,7 @@
 
 > 🇨🇳 [简体中文](./README.zh-CN.md)
 
-**v2.0.0-rc.3 (DSH)** — a DeepSeek Harness skill that bootstraps and maintains a
+**v2.0.0 (DSH)** — a DeepSeek Harness skill that bootstraps and maintains a
 Harness Engineering environment for any project: knowledge, environment,
 progress, scope, verification, observability, and handoff.
 
